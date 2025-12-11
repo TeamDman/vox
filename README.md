@@ -1,49 +1,76 @@
 # rapace
 
-[![codecov](https://codecov.io/gh/bearcove/rapace/branch/main/graph/badge.svg)](https://codecov.io/gh/bearcove/rapace)
+[![crates.io](https://img.shields.io/crates/v/rapace.svg)](https://crates.io/crates/rapace)
+[![documentation](https://docs.rs/rapace/badge.svg)](https://docs.rs/rapace)
+[![MIT/Apache-2.0 licensed](https://img.shields.io/crates/l/rapace.svg)](./LICENSE)
 
-> **⚠️ EXPERIMENTAL - DO NOT USE ⚠️**
->
-> rapace is a research project. APIs churn, transports change, and there are **zero stability or performance guarantees**.
+A high-performance RPC framework for Rust with support for shared memory, TCP, WebSocket, and in-process transports.
 
-rapace is a Rust-native RPC spine for host ↔ plugin systems on the same machine. You write async Rust traits, mark them with `#[rapace::service]`, and pick a transport (in-proc, sockets, SHM, WebSocket, wasm). Facet-driven reflection keeps schemas and encoders aligned, while the shared-memory transport moves large payloads without memcpy. It exists to power [dodeca](https://github.com/bearcove/dodeca), so host ↔ plugin calls stay fast even when plugins crash, restart, or stream multi-GB payloads.
+## Features
 
-## Fast facts
-- Trait-first: generated clients/servers stay plain Rust.
-- Facet-driven: every type carries schema + per-transport encoders.
-- Channel-based: unary + streaming RPCs share the same multiplexed session.
-- Crash-aware: a single `RpcSession` per transport handles flow control and recovery.
-- Zero-copy local path: SHM transport allocates directly in shared memory.
+- **Multiple transports**: Choose the right transport for your use case
+  - Shared memory (SHM): Ultra-low latency for local processes
+  - TCP/Unix sockets: Network communication
+  - WebSocket: Browser and web clients
+  - In-memory: Testing and single-process RPC
 
-## Where it fits
-- ✅ You own both ends, want async traits, and care about throughput on one box.
-- ❌ You need cross-language stability, public internet protocols, hardened sandboxes, or simple HTTP+JSON.
+- **Streaming**: Full support for server and client streaming
 
-## Current state (December 2025)
-| Area | Status |
-|------|--------|
-| Service macros & session | ✅ prototype-ready |
-| In-proc / stream / WebSocket transports | ✅ conformance-tested |
-| SHM transport & allocator | ✅ zero-copy, alpha polish |
-| Facet integration | ✅ mandatory |
-| Browser + wasm client | ✅ Playwright coverage |
-| Tooling (registry/explorer) | ⚠️ in flux |
-| API stability, prod readiness | ❌ breaking changes expected |
+- **Code generation**: Write your service interface once with `#[rapace::service]`
 
-## What ships in this repo
-Cargo workspace crates cover the public facade (`rapace`), core channel logic, transports (stream/mem/shm/websocket), registry, explorer UI, tracing/http integrations, fuzz/test harnesses, plus a `demos/` directory with runnable hosts ↔ plugins that double as diagnostics.
+- **Type-safe**: Compile-time verification of RPC calls
 
-## Sponsors
-CI and browser suites run on generously provisioned runners provided by Depot:
+- **Cross-platform**: Linux, macOS, Windows, and WebAssembly
 
-<p><a href="https://depot.dev?utm_source=rapace">
-<picture>
-<source media="(prefers-color-scheme: dark)" srcset="https://github.com/bearcove/rapace/raw/main/static/depot-dark.svg">
-<img src="https://github.com/bearcove/rapace/raw/main/static/depot-light.svg" height="40" alt="Depot">
-</picture>
-</a></p>
+## Quick Start
 
-Their support keeps Miri, fuzzing, wasm, and browser tests running on every change.
+```rust
+use rapace::service;
+use rapace::RpcSession;
+use rapace_transport_mem::MemTransport;
+
+#[rapace::service]
+pub trait Calculator {
+    async fn add(&self, a: i32, b: i32) -> i32;
+}
+
+// Implement your service...
+struct MyCalculator;
+impl Calculator for MyCalculator {
+    async fn add(&self, a: i32, b: i32) -> i32 {
+        a + b
+    }
+}
+
+// Use it with any transport
+let (client_transport, server_transport) = MemTransport::pair();
+let session = RpcSession::new(client_transport);
+let client = CalculatorClient::new(session);
+```
+
+## Documentation
+
+See the [crate documentation](https://docs.rs/rapace) and [examples](https://github.com/bearcove/rapace/tree/main/demos).
+
+## Crates
+
+- **rapace**: Main framework (re-exports transports)
+- **rapace-core**: Core types and protocols
+- **rapace-macros**: Service macro
+- **rapace-registry**: Service metadata
+- **Transports**:
+  - rapace-transport-mem
+  - rapace-transport-stream (TCP/Unix)
+  - rapace-transport-websocket
+  - rapace-transport-shm
+- **rapace-explorer**: Dynamic service discovery
+- **rapace-testkit**: Transport conformance tests
 
 ## License
-Dual-licensed under `LICENSE-APACHE` and `LICENSE-MIT`; pick whichever terms work for you.
+
+Licensed under either of:
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](https://github.com/bearcove/rapace/blob/main/LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](https://github.com/bearcove/rapace/blob/main/LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
+
+at your option.

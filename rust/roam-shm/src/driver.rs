@@ -599,7 +599,7 @@ where
                     if tx.try_send(incoming).is_ok() {
                         // Spawn a task to forward the response
                         let incoming_response_tx = self.incoming_response_tx.clone();
-                        tokio::spawn(async move {
+                        peeps_tasks::spawn_tracked("roam_shm_forward_response", async move {
                             if let Ok(response) = response_rx.await {
                                 let _ = incoming_response_tx.send(response).await;
                             }
@@ -851,7 +851,7 @@ where
         let handler_fut = dispatcher.dispatch(cx, payload, &mut conn.server_channel_registry);
 
         // r[impl call.cancel.best-effort] - Store abort handle for cancellation support
-        let join_handle = tokio::spawn(handler_fut);
+        let join_handle = peeps_tasks::spawn_tracked("roam_shm_handle_request", handler_fut);
         conn.in_flight_server_requests
             .insert(request_id, join_handle.abort_handle());
         Ok(())
@@ -1506,7 +1506,7 @@ impl MultiPeerHostDriverBuilder {
             let peer_incoming_response_tx = incoming_response_tx.clone();
             let (peer_response_tx, mut peer_response_rx) =
                 mpsc::channel::<IncomingConnectionResponse>(64);
-            tokio::spawn(async move {
+            peeps_tasks::spawn_tracked("roam_shm_peer_response_router", async move {
                 while let Some(response) = peer_response_rx.recv().await {
                     if peer_incoming_response_tx
                         .send((peer_id, response))
@@ -2461,7 +2461,7 @@ impl MultiPeerHostDriver {
         let handler_fut = dispatcher.dispatch(cx, payload, &mut conn.server_channel_registry);
 
         // r[impl call.cancel.best-effort] - Store abort handle for cancellation support
-        let join_handle = tokio::spawn(handler_fut);
+        let join_handle = peeps_tasks::spawn_tracked("roam_shm_handle_request", handler_fut);
         conn.in_flight_server_requests
             .insert(request_id, join_handle.abort_handle());
         Ok(())

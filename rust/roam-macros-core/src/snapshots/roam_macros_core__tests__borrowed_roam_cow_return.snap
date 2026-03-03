@@ -1,0 +1,136 @@
+---
+source: rust/roam-macros-core/src/lib.rs
+expression: "generate(quote!\n{\n    trait TextSvc\n    {\n        async fn normalize(&self, input: String) -> ::std::borrow::Cow<'roam,\n        str>;\n    }\n})"
+---
+#[allow(non_snake_case, clippy::all)]
+pub fn text_svc_service_descriptor() -> &'static ::roam::session::ServiceDescriptor {
+    static DESCRIPTOR: std::sync::OnceLock<&'static ::roam::session::ServiceDescriptor> =
+        std::sync::OnceLock::new();
+    DESCRIPTOR.get_or_init(|| {
+        let methods: Vec<&'static ::roam::session::MethodDescriptor> =
+            vec![::roam::hash::method_descriptor::<
+                (String,),
+                ::std::borrow::Cow<'static, str>,
+            >("TextSvc", "normalize", &["input"], None)];
+        Box::leak(Box::new(::roam::session::ServiceDescriptor {
+            service_name: "TextSvc",
+            methods: Box::leak(methods.into_boxed_slice()),
+            doc: None,
+        }))
+    })
+}
+pub trait TextSvc
+where
+    Self: Send + Sync,
+{
+    fn normalize<'roam>(
+        &self,
+        call: impl ::roam::Call<'roam, ::std::borrow::Cow<'roam, str>, ::core::convert::Infallible>,
+        input: String,
+    ) -> impl std::future::Future<Output = ()> + Send;
+}
+#[doc = r" Dispatcher for this service."]
+#[doc = r""]
+#[doc = r" Wraps a handler and implements [`#roam::Handler`] by routing incoming"]
+#[doc = r" calls to the appropriate trait method by method ID."]
+#[derive(Clone)]
+pub struct TextSvcDispatcher<H> {
+    handler: H,
+}
+impl<H> TextSvcDispatcher<H>
+where
+    H: TextSvc + Clone + Send + Sync + 'static,
+{
+    #[doc = r" Create a new dispatcher wrapping the given handler."]
+    pub fn new(handler: H) -> Self {
+        Self { handler }
+    }
+}
+impl<H, R> ::roam::Handler<R> for TextSvcDispatcher<H>
+where
+    H: TextSvc + Clone + Send + Sync + 'static,
+    R: ::roam::ReplySink,
+{
+    async fn handle(&self, call: ::roam::SelfRef<::roam::RequestCall<'static>>, reply: R) {
+        let method_id = call.method_id;
+        let args_bytes = match &call.args {
+            ::roam::Payload::Incoming(bytes) => bytes,
+            _ => {
+                reply
+                    .send_error(::roam::RoamError::<::core::convert::Infallible>::InvalidPayload)
+                    .await;
+                return;
+            }
+        };
+        if method_id == text_svc_service_descriptor().methods[0usize].id {
+            let args: (String,) = match ::roam::facet_postcard::from_slice_borrowed(args_bytes) {
+                Ok(v) => v,
+                Err(_) => {
+                    reply
+                        .send_error(
+                            ::roam::RoamError::<::core::convert::Infallible>::InvalidPayload,
+                        )
+                        .await;
+                    return;
+                }
+            };
+            let (input,) = args;
+            let sink_call = ::roam::SinkCall::new(reply);
+            self.handler.normalize(sink_call, input).await;
+            return;
+        }
+        reply
+            .send_error(::roam::RoamError::<::core::convert::Infallible>::UnknownMethod)
+            .await;
+    }
+}
+#[doc = "Client for the `TextSvc` service.\n\nGeneric over any [`Caller`](:: roam::Caller) implementation."]
+#[derive(Clone)]
+pub struct TextSvcClient<C: ::roam::Caller> {
+    caller: C,
+}
+impl<C: ::roam::Caller> TextSvcClient<C> {
+    #[doc = r" Create a new client wrapping the given caller."]
+    pub fn new(caller: C) -> Self {
+        Self { caller }
+    }
+    pub async fn normalize(
+        &self,
+        input: String,
+    ) -> Result<::roam::SelfRef<::std::borrow::Cow<'static, str>>, ::roam::RoamError> {
+        let method_id = text_svc_service_descriptor().methods[0usize].id;
+        let args = (input,);
+        let channels = vec![];
+        let req = ::roam::RequestCall {
+            method_id,
+            args: ::roam::Payload::outgoing(&args),
+            channels,
+            metadata: Default::default(),
+        };
+        let response = self.caller.call(req).await.map_err(|e| match e {
+            ::roam::RoamError::UnknownMethod => {
+                ::roam::RoamError::<::core::convert::Infallible>::UnknownMethod
+            }
+            ::roam::RoamError::InvalidPayload => {
+                ::roam::RoamError::<::core::convert::Infallible>::InvalidPayload
+            }
+            ::roam::RoamError::Cancelled => {
+                ::roam::RoamError::<::core::convert::Infallible>::Cancelled
+            }
+            ::roam::RoamError::User(never) => match never {},
+        })?;
+        response.try_repack(|resp, _bytes| {
+            let ret_bytes = match &resp.ret {
+                ::roam::Payload::Incoming(bytes) => bytes,
+                _ => return Err(::roam::RoamError::<::core::convert::Infallible>::InvalidPayload),
+            };
+            let result: Result<
+                ::std::borrow::Cow<'static, str>,
+                ::roam::RoamError<::core::convert::Infallible>,
+            > = ::roam::facet_postcard::from_slice_borrowed(ret_bytes)
+                .map_err(|_| ::roam::RoamError::<::core::convert::Infallible>::InvalidPayload)?;
+            let ret = result?;
+            Ok(ret)
+        })
+    }
+}

@@ -8,13 +8,26 @@ pub fn audit_service_descriptor() -> &'static ::roam::session::ServiceDescriptor
         std::sync::OnceLock::new();
     DESCRIPTOR.get_or_init(|| {
         let methods: Vec<&'static ::roam::session::MethodDescriptor> = vec![
-            ::roam::hash::method_descriptor::<(String,), &'static str>(
+            ::roam::hash::method_descriptor_with_retry::<(String,), &'static str>(
                 "Audit",
                 "record",
                 &["payload"],
                 None,
+                ::roam::RetryPolicy {
+                    persist: false,
+                    idem: false,
+                },
             ),
-            ::roam::hash::method_descriptor::<(), u64>("Audit", "ping", &[], None),
+            ::roam::hash::method_descriptor_with_retry::<(), u64>(
+                "Audit",
+                "ping",
+                &[],
+                None,
+                ::roam::RetryPolicy {
+                    persist: false,
+                    idem: false,
+                },
+            ),
         ];
         Box::leak(Box::new(::roam::session::ServiceDescriptor {
             service_name: "Audit",
@@ -80,6 +93,21 @@ where
     H: Audit + Clone + Send + Sync + 'static,
     R: ::roam::ReplySink,
 {
+    fn retry_policy(&self, method_id: ::roam::MethodId) -> ::roam::RetryPolicy {
+        if method_id == audit_service_descriptor().methods[0usize].id {
+            return ::roam::RetryPolicy {
+                persist: false,
+                idem: false,
+            };
+        }
+        if method_id == audit_service_descriptor().methods[1usize].id {
+            return ::roam::RetryPolicy {
+                persist: false,
+                idem: false,
+            };
+        }
+        ::roam::RetryPolicy::default()
+    }
     async fn handle(&self, call: ::roam::SelfRef<::roam::RequestCall<'static>>, reply: R) {
         let method_id = call.method_id;
         let args_bytes = match &call.args {

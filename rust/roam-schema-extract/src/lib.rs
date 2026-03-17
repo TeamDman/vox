@@ -2,8 +2,8 @@
 
 use facet_core::{Def, ScalarType, Shape, StructKind, Type, UserType};
 use roam_schema::{
-    FieldSchema, MethodSchemaBinding, PrimitiveType, Schema, SchemaKind, SchemaMessagePayload,
-    TypeSchemaId, VariantPayload, VariantSchema,
+    BindingDirection, FieldSchema, MethodSchemaBinding, PrimitiveType, Schema, SchemaKind,
+    SchemaMessagePayload, TypeSchemaId, VariantPayload, VariantSchema,
 };
 use roam_types::{MethodId, is_rx, is_tx};
 use std::collections::{HashMap, HashSet};
@@ -25,27 +25,33 @@ pub struct PreparedSchemaMessage {
 pub struct SchemaTracker {
     /// Type schema IDs we've already sent.
     sent: Mutex<HashSet<TypeSchemaId>>,
-    /// Method bindings we've already sent (by method_id).
-    methods_sent: Mutex<HashSet<u64>>,
+    /// Method args bindings we've already sent (by method_id).
+    args_bindings_sent: Mutex<HashSet<u64>>,
+    /// Method response bindings we've already sent (by method_id).
+    response_bindings_sent: Mutex<HashSet<u64>>,
     /// Assigns incrementing type IDs to shapes we extract.
     shape_to_id: Mutex<HashMap<&'static Shape, TypeSchemaId>>,
     /// Next ID to assign.
     next_id: Mutex<u32>,
     /// Type schemas received from the remote peer.
     received: Mutex<HashMap<TypeSchemaId, Schema>>,
-    /// Method bindings received: method_id → root TypeSchemaId.
-    received_method_bindings: Mutex<HashMap<u64, TypeSchemaId>>,
+    /// Args bindings received: method_id → root TypeSchemaId for args.
+    received_args_bindings: Mutex<HashMap<u64, TypeSchemaId>>,
+    /// Response bindings received: method_id → root TypeSchemaId for response.
+    received_response_bindings: Mutex<HashMap<u64, TypeSchemaId>>,
 }
 
 impl SchemaTracker {
     pub fn new() -> Self {
         SchemaTracker {
             sent: Mutex::new(HashSet::new()),
-            methods_sent: Mutex::new(HashSet::new()),
+            args_bindings_sent: Mutex::new(HashSet::new()),
+            response_bindings_sent: Mutex::new(HashSet::new()),
             shape_to_id: Mutex::new(HashMap::new()),
             next_id: Mutex::new(1),
             received: Mutex::new(HashMap::new()),
-            received_method_bindings: Mutex::new(HashMap::new()),
+            received_args_bindings: Mutex::new(HashMap::new()),
+            received_response_bindings: Mutex::new(HashMap::new()),
         }
     }
 
@@ -76,6 +82,7 @@ impl SchemaTracker {
         &self,
         method_id: MethodId,
         shape: &'static Shape,
+        direction: BindingDirection,
     ) -> Option<PreparedSchemaMessage> {
         let all_schemas = self.extract_schemas(shape);
         let root_type_schema_id = all_schemas.last().map(|s| s.type_id)?;
@@ -86,8 +93,11 @@ impl SchemaTracker {
             .filter(|s| !sent.contains(&s.type_id))
             .collect();
 
-        let mut methods_sent = self.methods_sent.lock().unwrap();
-        let need_method_binding = methods_sent.insert(method_id.0);
+        let mut bindings_sent = match direction {
+            BindingDirection::Args => self.args_bindings_sent.lock().unwrap(),
+            BindingDirection::Response => self.response_bindings_sent.lock().unwrap(),
+        };
+        let need_method_binding = bindings_sent.insert(method_id.0);
 
         if unsent.is_empty() && !need_method_binding {
             return None;
@@ -101,6 +111,7 @@ impl SchemaTracker {
             vec![MethodSchemaBinding {
                 method_id: method_id.0,
                 root_type_schema_id,
+                direction,
             }]
         } else {
             vec![]
@@ -120,17 +131,29 @@ impl SchemaTracker {
                 received.insert(schema.type_id, schema);
             }
         }
-        {
-            let mut bindings = self.received_method_bindings.lock().unwrap();
-            for binding in payload.method_bindings {
-                bindings.insert(binding.method_id, binding.root_type_schema_id);
-            }
+        for binding in payload.method_bindings {
+            let map = match binding.direction {
+                BindingDirection::Args => &self.received_args_bindings,
+                BindingDirection::Response => &self.received_response_bindings,
+            };
+            map.lock()
+                .unwrap()
+                .insert(binding.method_id, binding.root_type_schema_id);
         }
     }
 
-    /// Look up the remote's root TypeSchemaId for a method.
-    pub fn get_remote_root(&self, method_id: MethodId) -> Option<TypeSchemaId> {
-        self.received_method_bindings
+    /// Look up the remote's root TypeSchemaId for a method's args.
+    pub fn get_remote_args_root(&self, method_id: MethodId) -> Option<TypeSchemaId> {
+        self.received_args_bindings
+            .lock()
+            .unwrap()
+            .get(&method_id.0)
+            .copied()
+    }
+
+    /// Look up the remote's root TypeSchemaId for a method's response.
+    pub fn get_remote_response_root(&self, method_id: MethodId) -> Option<TypeSchemaId> {
+        self.received_response_bindings
             .lock()
             .unwrap()
             .get(&method_id.0)
@@ -161,6 +184,12 @@ impl SchemaTracker {
         };
         ctx.extract(shape);
         ctx.schemas
+    }
+}
+
+impl std::fmt::Debug for SchemaTracker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SchemaTracker").finish_non_exhaustive()
     }
 }
 

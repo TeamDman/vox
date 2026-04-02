@@ -1,5 +1,4 @@
 use eyre::Result;
-use vox::transport::tcp::StreamLink;
 
 #[vox::service]
 trait Hello {
@@ -19,28 +18,22 @@ impl Hello for HelloService {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let addr = listener.local_addr()?;
-
-    // Server: accept one connection using the existing lower-level API
-    let server = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await?;
-        let caller = vox::acceptor_on(StreamLink::tcp(stream))
-            .on_connection(HelloDispatcher::new(HelloService))
-            .establish::<HelloClient>()
-            .await?;
-        caller.caller.closed().await;
-
-        Ok::<(), eyre::Report>(())
+    // Server
+    let server = tokio::spawn(async {
+        vox::serve("127.0.0.1:9000", HelloDispatcher::new(HelloService))
+            .await
+            .unwrap();
     });
 
-    // Client: the new one-liner
-    let client: HelloClient = vox::connect(addr).await?;
+    // Give server a moment to bind.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Client
+    let client: HelloClient = vox::connect("127.0.0.1:9000").await?;
     let reply = client.say_hello("world".into()).await?;
-    assert_eq!(reply, "Hello, world!");
     println!("{reply}");
 
     drop(client);
-    server.await??;
+    server.abort();
     Ok(())
 }

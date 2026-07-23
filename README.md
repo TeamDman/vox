@@ -77,6 +77,7 @@ match client.divide(10, 0).await? {
 | Rust       | Reference implementation  |
 | TypeScript | Generated client/server   |
 | Swift      | Generated client/server   |
+| Java       | Java 17 contract frozen; implementation in progress |
 
 ## Specification
 

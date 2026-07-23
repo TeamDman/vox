@@ -114,6 +114,9 @@ fn validate_shape(
     shape: &'static Shape,
     location: &str,
 ) -> Result<(), JavaCodegenError> {
+    if is_bytes(shape) {
+        return Ok(());
+    }
     if matches!(shape.def, facet_core::Def::DynamicValue(_)) {
         return Err(error(method, &format!("dynamic Facet value in {location}")));
     }
@@ -135,14 +138,20 @@ fn validate_shape(
         ShapeKind::Tx { .. } | ShapeKind::Rx { .. } => {
             Err(error(method, &format!("channel in {location}")))
         }
-        ShapeKind::List { element }
-        | ShapeKind::Slice { element }
-        | ShapeKind::Set { element }
-        | ShapeKind::Array { element, .. }
-        | ShapeKind::Option { inner: element }
-        | ShapeKind::Pointer { pointee: element } => validate_shape(method, element, location),
-        ShapeKind::Map { key, value }
-        | ShapeKind::Result {
+        ShapeKind::List { .. }
+        | ShapeKind::Slice { .. }
+        | ShapeKind::Set { .. }
+        | ShapeKind::Array { .. }
+        | ShapeKind::Option { .. }
+        | ShapeKind::Map { .. } => Err(error(
+            method,
+            &format!(
+                "container shape `{}` in {location} is not implemented yet",
+                shape.type_identifier
+            ),
+        )),
+        ShapeKind::Pointer { pointee } => validate_shape(method, pointee, location),
+        ShapeKind::Result {
             ok: key,
             err: value,
         } => {
@@ -165,17 +174,43 @@ fn validate_shape(
             for variant in variants {
                 match classify_variant(variant) {
                     VariantKind::Unit => {}
-                    VariantKind::Newtype { inner } => validate_shape(method, inner, location)?,
-                    VariantKind::Tuple { fields } | VariantKind::Struct { fields } => {
-                        for field in fields {
-                            validate_shape(method, field.shape(), location)?;
-                        }
+                    VariantKind::Newtype { .. }
+                    | VariantKind::Tuple { .. }
+                    | VariantKind::Struct { .. } => {
+                        return Err(error(
+                            method,
+                            &format!(
+                                "payload enum `{}` in {location} is not implemented yet",
+                                shape.type_identifier
+                            ),
+                        ));
                     }
                 }
             }
             Ok(())
         }
-        ShapeKind::Scalar(_) => Ok(()),
+        ShapeKind::Scalar(
+            ScalarType::Bool
+            | ScalarType::U8
+            | ScalarType::U16
+            | ScalarType::U32
+            | ScalarType::I8
+            | ScalarType::I16
+            | ScalarType::I32
+            | ScalarType::I64
+            | ScalarType::F32
+            | ScalarType::F64
+            | ScalarType::Str
+            | ScalarType::String
+            | ScalarType::CowStr,
+        ) => Ok(()),
+        ShapeKind::Scalar(_) => Err(error(
+            method,
+            &format!(
+                "scalar shape `{}` in {location} is not implemented yet",
+                shape.type_identifier
+            ),
+        )),
     }
 }
 

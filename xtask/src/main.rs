@@ -55,6 +55,15 @@ enum Commands {
         /// Generate Swift wire protocol types (Wire.swift)
         #[facet(args::named, default)]
         swift_wire: bool,
+        /// Generate Java 17 unary fixtures into java/generated/
+        #[facet(args::named, default)]
+        java: bool,
+    },
+    /// Check generated source for drift without changing the worktree
+    CheckCodegen {
+        /// Check Java 17 generated fixtures
+        #[facet(args::named, default)]
+        java: bool,
     },
     /// Emit built-in schema compatibility snapshots as JSON.
     SchemaCompatSnapshot,
@@ -210,9 +219,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             swift_client,
             swift_server,
             swift_wire,
+            java,
         } => {
             let none_specified =
-                !typescript && !swift && !swift_client && !swift_server && !swift_wire;
+                !typescript && !swift && !swift_client && !swift_server && !swift_wire && !java;
             if typescript || none_specified {
                 codegen_typescript(&workspace_root)?;
             }
@@ -227,6 +237,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             if swift_wire || none_specified {
                 codegen_swift_wire(&workspace_root)?;
             }
+            if java || none_specified {
+                codegen_java(&workspace_root)?;
+            }
+        }
+        Commands::CheckCodegen { java } => {
+            if !java {
+                return Err("check-codegen currently requires --java".into());
+            }
+            check_codegen_java(&workspace_root)?;
         }
         Commands::SchemaCompatSnapshot => {
             emit_schema_compat_snapshot()?;
@@ -236,6 +255,143 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    Ok(())
+}
+
+#[derive(Facet)]
+struct NestedRequest {
+    message: String,
+}
+
+#[derive(Facet)]
+struct NestedResponse {
+    echoed: String,
+}
+
+#[derive(Facet)]
+struct DivideRequest {
+    dividend: i64,
+    divisor: i64,
+}
+
+#[derive(Facet)]
+struct DivideResponse {
+    quotient: i64,
+}
+
+#[derive(Facet)]
+#[repr(u8)]
+enum DivideByZero {
+    Zero = 0,
+}
+
+fn java_fixture_service() -> vox_types::ServiceDescriptor {
+    use vox_types::{MethodDescriptorOptions, ServiceDescriptor, method_descriptor};
+
+    let echo = method_descriptor::<(String,), String>(
+        "JavaFixture",
+        "echo",
+        &["value"],
+        &[None],
+        MethodDescriptorOptions {
+            response_wire_shape: <Result<String, vox_types::VoxError> as Facet>::SHAPE,
+            doc: None,
+        },
+    );
+    let inspect = method_descriptor::<(NestedRequest,), NestedResponse>(
+        "JavaFixture",
+        "inspect",
+        &["request"],
+        &[None],
+        MethodDescriptorOptions {
+            response_wire_shape: <Result<NestedResponse, vox_types::VoxError> as Facet>::SHAPE,
+            doc: None,
+        },
+    );
+    let divide = method_descriptor::<(DivideRequest,), Result<DivideResponse, DivideByZero>>(
+        "JavaFixture",
+        "divide",
+        &["request"],
+        &[None],
+        MethodDescriptorOptions {
+            response_wire_shape:
+                <Result<DivideResponse, vox_types::VoxError<DivideByZero>> as Facet>::SHAPE,
+            doc: None,
+        },
+    );
+    let methods = Box::leak(vec![echo, inspect, divide].into_boxed_slice());
+    ServiceDescriptor {
+        service_name: "JavaFixture",
+        methods,
+        doc: Some("Frozen Java 17 unary generation fixture"),
+    }
+}
+
+fn java_generated_dir(workspace_root: &std::path::Path) -> std::path::PathBuf {
+    workspace_root
+        .join("java")
+        .join("generated")
+        .join("src")
+        .join("main")
+        .join("java")
+        .join("org")
+        .join("facet")
+        .join("vox")
+        .join("generated")
+}
+
+fn codegen_java(workspace_root: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    let out_dir = java_generated_dir(workspace_root);
+    std::fs::create_dir_all(&out_dir)?;
+    let expected = vox_codegen::targets::java::generate_service(&java_fixture_service())?;
+    for file in expected {
+        write_if_changed(&out_dir.join(file.relative_path), file.source)?;
+    }
+    Ok(())
+}
+
+fn check_codegen_java(workspace_root: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    use std::collections::BTreeMap;
+
+    let out_dir = java_generated_dir(workspace_root);
+    let expected: BTreeMap<_, _> =
+        vox_codegen::targets::java::generate_service(&java_fixture_service())?
+            .into_iter()
+            .map(|file| (file.relative_path, file.source))
+            .collect();
+    let mut actual = BTreeMap::new();
+    if out_dir.exists() {
+        for entry in std::fs::read_dir(&out_dir)? {
+            let path = entry?.path();
+            if path.extension().is_some_and(|ext| ext == "java") {
+                let name = path
+                    .file_name()
+                    .expect("generated Java file has a name")
+                    .to_string_lossy()
+                    .into_owned();
+                actual.insert(name, std::fs::read_to_string(path)?);
+            }
+        }
+    }
+    if expected != actual {
+        let missing: Vec<_> = expected
+            .keys()
+            .filter(|key| !actual.contains_key(*key))
+            .collect();
+        let unexpected: Vec<_> = actual
+            .keys()
+            .filter(|key| !expected.contains_key(*key))
+            .collect();
+        let changed: Vec<_> = expected
+            .keys()
+            .filter(|key| actual.get(*key) != expected.get(*key))
+            .collect();
+        return Err(format!(
+            "Java generated source drift (missing: {missing:?}, unexpected: {unexpected:?}, changed: {changed:?}); run `cargo xtask codegen --java`"
+        )
+        .into());
+    }
+    println!("Java generated sources are up to date");
     Ok(())
 }
 

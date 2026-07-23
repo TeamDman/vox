@@ -44,6 +44,34 @@ public final class SchemaClosure {
     public static SchemaClosure of(Schema root, Schema... reachable) throws PhonException {
         return new SchemaClosure(root, List.of(reachable));
     }
+    public static SchemaClosure uncheckedOf(Schema root, Schema... reachable) {
+        try {
+            return of(root, reachable);
+        } catch (PhonException failure) {
+            throw new ExceptionInInitializerError(failure);
+        }
+    }
+    public static SchemaClosure fromCanonicalBytes(
+            SchemaId rootId, byte[][] canonicalSchemas, PhonLimits limits)
+            throws PhonException {
+        List<Schema> decoded = new ArrayList<>();
+        for (byte[] canonicalSchema : canonicalSchemas) {
+            decoded.add(SchemaWire.decode(canonicalSchema, limits));
+        }
+        Schema root = null;
+        for (Schema schema : decoded) {
+            if (schema.id().equals(rootId)) {
+                root = schema;
+                break;
+            }
+        }
+        if (root == null) {
+            throw new PhonException(PhonException.Kind.SCHEMA,
+                    "root schema " + rootId + " is absent from canonical schema table");
+        }
+        decoded.remove(root);
+        return new SchemaClosure(root, decoded, limits);
+    }
     public Schema root() { return root; }
     public SchemaId id() { return root.id(); }
     public byte[] canonicalBytes() { return canonicalBytes.clone(); }

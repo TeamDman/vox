@@ -38,4 +38,5 @@ public final class PhonLimits {
     public int byteRunLength() { return byteRunLength; }
     public int referencedSchemas() { return referencedSchemas; }
     public int planningWork() { return planningWork; }
+    public static PhonLimits defaults() { return DEFAULT; }
 }

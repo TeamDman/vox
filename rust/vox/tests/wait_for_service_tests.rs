@@ -9,9 +9,11 @@ trait Echo {
     async fn echo(&self, value: u32) -> u32;
 }
 
+#[cfg(unix)]
 #[derive(Clone)]
 struct EchoService;
 
+#[cfg(unix)]
 impl Echo for EchoService {
     async fn echo(&self, value: u32) -> u32 {
         value

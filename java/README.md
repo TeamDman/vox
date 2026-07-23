@@ -38,8 +38,10 @@ runtime and tests must not acquire additional copies.
 
 ## Focused Java 17 gate
 
-Compile main, test, and subject sources together with the temporary test-only
-`PhonAdapter` fixture, then run:
+The runtime now compiles directly against the dependency-free Phon Java
+runtime; the temporary test-only `PhonAdapter` fixture has been removed. The
+repository task compiles main, generated, test, and subject sources together
+and runs:
 
 ```text
 javac --release 17 -Xlint:all -Werror ...
@@ -47,5 +49,5 @@ java -ea org.facet.vox.tcp.StreamFramingTest
 java -ea org.facet.vox.VoxRuntimeTest
 ```
 
-The test fixture is replaced by the real `org.facet.phon.PhonAdapter` when the
-Phon Java track is integrated.
+`GeneratedResponseIntegrationTest` additionally proves that complete
+`Result<T, VoxError<E>>` response bytes round-trip without a private outer tag.

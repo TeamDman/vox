@@ -21,6 +21,9 @@ public final class CallOptions {
     public static CallOptions withIdleTimeout(Duration timeout) {
         return new CallOptions(timeout, Map.of());
     }
+    public static CallOptions defaults() {
+        return withIdleTimeout(Duration.ofSeconds(30));
+    }
 
     public Duration idleTimeout() { return idleTimeout; }
     public Map<String, String> metadata() { return metadata; }

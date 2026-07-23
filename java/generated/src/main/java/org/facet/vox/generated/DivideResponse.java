@@ -17,7 +17,7 @@ public final class DivideResponse {
 
   public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0xa94b23358bb8526cL), List.of(), new Schema.RecordKind("DivideResponse", List.of(new Schema.Field("quotient", Schema.Ref.concrete(SchemaId.fromLong(0xc6eb8c46f1e17fbaL)), true))));
   public static final PhonAdapter<DivideResponse> ADAPTER = new PhonAdapter<>() {
-    @Override public SchemaClosure schema() throws PhonException { return SchemaClosure.of(SCHEMA); }
+    @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA); }
     @Override public void encode(PhonEncoder encoder, DivideResponse value) throws PhonException {
       encoder.writeI64(value.quotient());
     }

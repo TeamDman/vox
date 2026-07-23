@@ -20,7 +20,7 @@ public final class DivideRequest {
 
   public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x1a9631092d2f02e2L), List.of(), new Schema.RecordKind("DivideRequest", List.of(new Schema.Field("dividend", Schema.Ref.concrete(SchemaId.fromLong(0xc6eb8c46f1e17fbaL)), true), new Schema.Field("divisor", Schema.Ref.concrete(SchemaId.fromLong(0xc6eb8c46f1e17fbaL)), true))));
   public static final PhonAdapter<DivideRequest> ADAPTER = new PhonAdapter<>() {
-    @Override public SchemaClosure schema() throws PhonException { return SchemaClosure.of(SCHEMA); }
+    @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA); }
     @Override public void encode(PhonEncoder encoder, DivideRequest value) throws PhonException {
       encoder.writeI64(value.dividend());
       encoder.writeI64(value.divisor());

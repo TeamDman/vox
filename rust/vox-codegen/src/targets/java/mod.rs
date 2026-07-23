@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::fmt::{self, Write};
 
 use facet_core::{ScalarType, Shape};
+use phon_schema::schema_to_bytes;
 use vox_types::{
     EnumInfo, MethodDescriptor, ServiceDescriptor, ShapeKind, StructInfo, VariantKind,
     classify_shape, classify_variant, is_bytes,
@@ -62,6 +63,11 @@ pub fn generate_service(service: &ServiceDescriptor) -> Result<Vec<JavaFile>, Ja
         files.push(JavaFile {
             relative_path: format!("{args_name}.java"),
             source: generate_args_type(package, &args_name, method),
+        });
+        let response_name = response_type_name(&service_name, method);
+        files.push(JavaFile {
+            relative_path: format!("{response_name}.java"),
+            source: generate_response_type(package, &response_name, method)?,
         });
     }
     files.push(JavaFile {
@@ -439,15 +445,15 @@ fn generate_named_type(package: &str, name: &str, shape: &'static Shape) -> Stri
                 out,
                 "  public static final PhonAdapter<{name}> ADAPTER = new PhonAdapter<>() {{"
             );
-            out.push_str("    @Override public SchemaClosure schema() throws PhonException { return SchemaClosure.of(SCHEMA); }\n");
+            out.push_str("    @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA); }\n");
             out.push_str("    @Override public void encode(PhonEncoder encoder, ");
             let _ = writeln!(
                 out,
-                "{name} value) throws PhonException {{ encoder.writeU8(value.ordinal()); }}"
+                "{name} value) throws PhonException {{ encoder.writeU32(value.ordinal()); }}"
             );
             let _ = writeln!(
                 out,
-                "    @Override public {name} decode(PhonDecoder decoder) throws PhonException {{ int value = decoder.readU8(); if (value < 0 || value >= values().length) throw new PhonException(\"invalid {name} discriminant \" + value); return values()[value]; }}"
+                "    @Override public {name} decode(PhonDecoder decoder) throws PhonException {{ long value = decoder.readU32(); if (value >= values().length) throw new PhonException(PhonException.Kind.MALFORMED, \"invalid {name} discriminant \" + value); return values()[(int) value]; }}"
             );
             out.push_str("  };\n");
             out.push_str("}\n");
@@ -529,13 +535,13 @@ fn generate_args_type(package: &str, name: &str, method: &MethodDescriptor) -> S
         .collect::<Vec<_>>()
         .join(", ");
     let closure = if reachables.is_empty() {
-        "SchemaClosure.of(SCHEMA)".to_string()
+        "SchemaClosure.uncheckedOf(SCHEMA)".to_string()
     } else {
-        format!("SchemaClosure.of(SCHEMA, {reachables})")
+        format!("SchemaClosure.uncheckedOf(SCHEMA, {reachables})")
     };
     let _ = writeln!(
         out,
-        "    @Override public SchemaClosure schema() throws PhonException {{ return {closure}; }}"
+        "    @Override public SchemaClosure schema() {{ return {closure}; }}"
     );
     let _ = writeln!(
         out,
@@ -597,13 +603,13 @@ fn emit_record_schema_and_adapter(
         .collect::<Vec<_>>()
         .join(", ");
     let closure = if reachables.is_empty() {
-        "SchemaClosure.of(SCHEMA)".to_string()
+        "SchemaClosure.uncheckedOf(SCHEMA)".to_string()
     } else {
-        format!("SchemaClosure.of(SCHEMA, {reachables})")
+        format!("SchemaClosure.uncheckedOf(SCHEMA, {reachables})")
     };
     let _ = writeln!(
         out,
-        "    @Override public SchemaClosure schema() throws PhonException {{ return {closure}; }}"
+        "    @Override public SchemaClosure schema() {{ return {closure}; }}"
     );
     let _ = writeln!(
         out,
@@ -689,7 +695,7 @@ fn encode_statement(shape: &'static Shape, value: &str) -> String {
         ),
         _ if is_bytes(shape) => format!("encoder.writeBytes({value});"),
         _ => format!(
-            "throw new PhonException(\"generated adapter for {} is not implemented\");",
+            "throw new PhonException(PhonException.Kind.DECODE, \"generated adapter for {} is not implemented\");",
             shape.type_identifier.replace('"', "\\\"")
         ),
     }
@@ -794,9 +800,126 @@ fn generate_handler(package: &str, name: &str, service: &ServiceDescriptor) -> S
     out
 }
 
+fn generate_response_type(
+    package: &str,
+    name: &str,
+    method: &MethodDescriptor,
+) -> Result<String, JavaCodegenError> {
+    let (ok_shape, error_shape) = result_parts(method.return_shape);
+    let ok_type = boxed_java_type(ok_shape);
+    let error_type = error_shape.map_or_else(|| "Void".to_string(), boxed_java_type);
+    let ok_adapter = adapter_for(ok_shape);
+    let error_adapter = error_shape.map(adapter_for);
+    let module =
+        phon_codegen::Module::from_shapes(&[method.response_wire_shape]).map_err(|cause| {
+            error(
+                method,
+                &format!("response schema derivation failed: {cause}"),
+            )
+        })?;
+    let root = module.roots.first().expect("one response root").id.as_u64();
+
+    let mut out = header(package);
+    out.push_str("import org.facet.phon.*;\nimport org.facet.vox.VoxResult;\n\n");
+    let _ = writeln!(out, "public final class {name} {{");
+    let _ = writeln!(
+        out,
+        "  private static final SchemaClosure SCHEMA = responseSchema();"
+    );
+    out.push_str("  private static SchemaClosure responseSchema() {\n    try {\n");
+    let _ = writeln!(
+        out,
+        "      return SchemaClosure.fromCanonicalBytes(SchemaId.fromLong(0x{root:016x}L), new byte[][] {{"
+    );
+    for schema in &module.schemas {
+        let bytes = schema_to_bytes(schema)
+            .iter()
+            .map(|byte| format!("(byte)0x{byte:02x}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(out, "        new byte[] {{{bytes}}},");
+    }
+    out.push_str(
+        "      }, PhonLimits.defaults());\n    } catch (PhonException failure) {\n      throw new ExceptionInInitializerError(failure);\n    }\n  }\n",
+    );
+    let _ = writeln!(
+        out,
+        "  public static final PhonAdapter<VoxResult<{ok_type}, {error_type}>> ADAPTER = new PhonAdapter<>() {{"
+    );
+    out.push_str("    @Override public SchemaClosure schema() { return SCHEMA; }\n");
+    let _ = writeln!(
+        out,
+        "    @Override public void encode(PhonEncoder encoder, VoxResult<{ok_type}, {error_type}> value) throws PhonException {{"
+    );
+    out.push_str(
+        "      if (value.isSuccess()) {\n        encoder.writeU32(0);\n        encoder.writeAdapted(",
+    );
+    let _ = writeln!(
+        out,
+        "{ok_adapter}, value.success());\n        return;\n      }}"
+    );
+    out.push_str("      encoder.writeU32(1);\n      switch (value.kind()) {\n");
+    if let Some(ref error_adapter) = error_adapter {
+        let _ = writeln!(
+            out,
+            "        case APPLICATION_ERROR:\n          encoder.writeU32(0);\n          encoder.writeAdapted({error_adapter}, value.applicationError());\n          return;"
+        );
+    } else {
+        out.push_str(
+            "        case APPLICATION_ERROR:\n          throw new PhonException(PhonException.Kind.ENCODE, \"infallible method cannot encode an application error\");\n",
+        );
+    }
+    out.push_str(
+        "        case UNKNOWN_METHOD: encoder.writeU32(1); return;\n\
+         case INVALID_PAYLOAD: encoder.writeU32(2); encoder.writeString(value.detail()); return;\n\
+         case CANCELLED: encoder.writeU32(3); return;\n\
+         case CONNECTION_CLOSED: encoder.writeU32(4); return;\n\
+         case CONNECTION_SHUTDOWN: encoder.writeU32(5); return;\n\
+         case SEND_FAILED: encoder.writeU32(6); return;\n\
+         case TIMED_OUT: encoder.writeU32(7); return;\n\
+         case INDETERMINATE: encoder.writeU32(8); return;\n\
+         default: throw new PhonException(PhonException.Kind.ENCODE, \"invalid response result kind\");\n\
+         }\n    }\n",
+    );
+    let _ = writeln!(
+        out,
+        "    @Override public VoxResult<{ok_type}, {error_type}> decode(PhonDecoder decoder) throws PhonException {{"
+    );
+    out.push_str("      long outer = decoder.readU32();\n      if (outer == 0) return VoxResult.success(decoder.readAdapted(");
+    let _ = writeln!(out, "{ok_adapter}));");
+    out.push_str(
+        "      if (outer != 1) throw new PhonException(PhonException.Kind.MALFORMED, \"invalid Result discriminant\");\n      long error = decoder.readU32();\n      switch ((int) error) {\n",
+    );
+    if let Some(ref error_adapter) = error_adapter {
+        let _ = writeln!(
+            out,
+            "        case 0: return VoxResult.applicationError(decoder.readAdapted({error_adapter}));"
+        );
+    } else {
+        out.push_str(
+            "        case 0: throw new PhonException(PhonException.Kind.MALFORMED, \"infallible method received User error\");\n",
+        );
+    }
+    out.push_str(
+        "        case 1: return VoxResult.infrastructure(VoxResult.Kind.UNKNOWN_METHOD);\n\
+         case 2: return VoxResult.infrastructure(VoxResult.Kind.INVALID_PAYLOAD, decoder.readString());\n\
+         case 3: return VoxResult.infrastructure(VoxResult.Kind.CANCELLED);\n\
+         case 4: return VoxResult.infrastructure(VoxResult.Kind.CONNECTION_CLOSED);\n\
+         case 5: return VoxResult.infrastructure(VoxResult.Kind.CONNECTION_SHUTDOWN);\n\
+         case 6: return VoxResult.infrastructure(VoxResult.Kind.SEND_FAILED);\n\
+         case 7: return VoxResult.infrastructure(VoxResult.Kind.TIMED_OUT);\n\
+         case 8: return VoxResult.infrastructure(VoxResult.Kind.INDETERMINATE);\n\
+         default: throw new PhonException(PhonException.Kind.MALFORMED, \"invalid VoxError discriminant\");\n\
+         }\n    }\n  };\n",
+    );
+    let _ = writeln!(out, "  private {name}() {{}}");
+    out.push_str("}\n");
+    Ok(out)
+}
+
 fn generate_dispatcher(package: &str, name: &str, service: &ServiceDescriptor) -> String {
     let mut out = header(package);
-    out.push_str("import java.util.concurrent.CompletableFuture;\nimport org.facet.phon.PhonCodec;\nimport org.facet.phon.PhonLimits;\nimport org.facet.vox.*;\n\n");
+    out.push_str("import java.util.concurrent.CompletableFuture;\nimport java.util.concurrent.CompletionException;\nimport org.facet.phon.*;\nimport org.facet.vox.*;\n\n");
     let _ = writeln!(
         out,
         "public final class {name}Dispatcher implements ServiceDispatcher {{"
@@ -827,20 +950,29 @@ fn generate_dispatcher(package: &str, name: &str, service: &ServiceDescriptor) -
         } else {
             format!("call.context(), {invoke_args}")
         };
-        let ret_adapter = adapter_for(result_parts(method.return_shape).0);
+        let (_, error_shape) = result_parts(method.return_shape);
+        let response_ty = response_type_name(name, method);
         let _ = writeln!(
             out,
             "      if (call.method().id() == {name}ServiceDescriptor.{constant}.id()) {{"
         );
         let _ = writeln!(
             out,
-            "        {tuple_ty} args = PhonCodec.decode({name}ServiceDescriptor.{constant}.argumentAdapter(), call.encodedArguments(), PhonLimits.defaults());"
+            "        {tuple_ty} args = PhonCodec.decode({tuple_ty}.ADAPTER, call.encodedArguments(), PhonLimits.defaults());"
         );
-        let _ = writeln!(
-            out,
-            "        return handler.{}({invoke_args}).thenAccept(value -> call.respond(PhonCodec.encode({ret_adapter}, value, PhonLimits.defaults())));",
-            java_ident(method.method_name)
-        );
+        if error_shape.is_some() {
+            let _ = writeln!(
+                out,
+                "        return handler.{}({invoke_args}).thenAccept(value -> {{\n          try {{\n            call.respond(PhonCodec.encode({response_ty}.ADAPTER, value, PhonLimits.defaults()));\n          }} catch (PhonException error) {{\n            throw new CompletionException(error);\n          }}\n        }});",
+                java_ident(method.method_name)
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "        return handler.{}({invoke_args}).thenAccept(value -> {{\n          try {{\n            call.respond(PhonCodec.encode({response_ty}.ADAPTER, VoxResult.success(value), PhonLimits.defaults()));\n          }} catch (PhonException error) {{\n            throw new CompletionException(error);\n          }}\n        }});",
+                java_ident(method.method_name)
+            );
+        }
         out.push_str("      }\n");
     }
     out.push_str("      return CompletableFuture.failedFuture(new VoxException(\"unknown method \" + call.method().id()));\n    } catch (Exception error) {\n      return CompletableFuture.failedFuture(error);\n    }\n  }\n}\n");
@@ -849,7 +981,7 @@ fn generate_dispatcher(package: &str, name: &str, service: &ServiceDescriptor) -
 
 fn generate_client(package: &str, name: &str, service: &ServiceDescriptor) -> String {
     let mut out = header(package);
-    out.push_str("import java.util.concurrent.CompletableFuture;\nimport org.facet.phon.PhonCodec;\nimport org.facet.phon.PhonLimits;\nimport org.facet.vox.*;\n\n");
+    out.push_str("import java.util.concurrent.CompletableFuture;\nimport java.util.concurrent.CompletionException;\nimport org.facet.phon.*;\nimport org.facet.vox.*;\n\n");
     let _ = writeln!(out, "public final class {name}Client {{");
     out.push_str("  private final ServiceLane lane;\n");
     let _ = writeln!(
@@ -866,6 +998,10 @@ fn generate_client(package: &str, name: &str, service: &ServiceDescriptor) -> St
         let return_ty = handler_return(method.return_shape);
         let method_name = java_ident(method.method_name);
         let constant = java_constant(method.method_name);
+        let tuple_ty = args_type_name(name, method);
+        let (_, error_shape) = result_parts(method.return_shape);
+        let response_ty = response_type_name(name, method);
+        let wire_result_ty = wire_result_type(method.return_shape);
         let _ = writeln!(
             out,
             "  public CompletableFuture<{return_ty}> {method_name}({args}) {{ return {method_name}({}{sep}CallOptions.defaults()); }}",
@@ -883,17 +1019,29 @@ fn generate_client(package: &str, name: &str, service: &ServiceDescriptor) -> St
         );
         let _ = writeln!(
             out,
-            "    byte[] encoded = PhonCodec.encode({name}ServiceDescriptor.{constant}.argumentAdapter(), new {}({}), PhonLimits.defaults());",
-            args_type_name(name, method),
+            "    try {{\n      byte[] encoded = PhonCodec.encode({tuple_ty}.ADAPTER, new {}({}), PhonLimits.defaults());",
+            tuple_ty,
             args_names(method)
         );
-        let _ = writeln!(
-            out,
-            "    return lane.call({name}ServiceDescriptor.{constant}, encoded, options).thenApply(bytes -> PhonCodec.decode({name}ServiceDescriptor.{constant}.returnAdapter(), bytes, PhonLimits.defaults()));"
-        );
+        if error_shape.is_some() {
+            let _ = writeln!(
+                out,
+                "      return lane.call({name}ServiceDescriptor.{constant}, encoded, options).thenApply(bytes -> {{\n        try {{\n          {wire_result_ty} result = PhonCodec.decode({response_ty}.ADAPTER, bytes, PhonLimits.defaults());\n          if (result.isInfrastructureError()) throw remoteFailure(result);\n          return result;\n        }} catch (PhonException error) {{\n          throw new CompletionException(error);\n        }}\n      }});\n    }} catch (PhonException error) {{\n      return CompletableFuture.failedFuture(error);\n    }}"
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "      return lane.call({name}ServiceDescriptor.{constant}, encoded, options).thenApply(bytes -> {{\n        try {{\n          {wire_result_ty} result = PhonCodec.decode({response_ty}.ADAPTER, bytes, PhonLimits.defaults());\n          if (!result.isSuccess()) throw remoteFailure(result);\n          return result.success();\n        }} catch (PhonException error) {{\n          throw new CompletionException(error);\n        }}\n      }});\n    }} catch (PhonException error) {{\n      return CompletableFuture.failedFuture(error);\n    }}"
+            );
+        }
         out.push_str("  }\n");
     }
-    out.push_str("}\n");
+    out.push_str(
+        "  private static CompletionException remoteFailure(VoxResult<?, ?> result) {\n\
+         String detail = result.detail() == null ? \"\" : \": \" + result.detail();\n\
+         return new CompletionException(new VoxException(\"remote Vox error \" + result.kind() + detail));\n\
+         }\n}\n",
+    );
     out
 }
 
@@ -908,6 +1056,10 @@ fn args_names(method: &MethodDescriptor) -> String {
 
 fn args_type_name(service_name: &str, method: &MethodDescriptor) -> String {
     format!("{service_name}{}Args", upper_camel(method.method_name))
+}
+
+fn response_type_name(service_name: &str, method: &MethodDescriptor) -> String {
+    format!("{service_name}{}Response", upper_camel(method.method_name))
 }
 
 fn result_parts(shape: &'static Shape) -> (&'static Shape, Option<&'static Shape>) {
@@ -927,6 +1079,15 @@ fn handler_return(shape: &'static Shape) -> String {
         ),
         None => boxed_java_type(ok),
     }
+}
+
+fn wire_result_type(shape: &'static Shape) -> String {
+    let (ok, err) = result_parts(shape);
+    format!(
+        "VoxResult<{}, {}>",
+        boxed_java_type(ok),
+        err.map_or_else(|| "Void".to_string(), boxed_java_type)
+    )
 }
 
 fn adapter_for(shape: &'static Shape) -> String {
@@ -1033,7 +1194,7 @@ fn generate_primitive_adapters(package: &str) -> String {
         );
         let _ = writeln!(
             out,
-            "    @Override public SchemaClosure schema() throws PhonException {{ return SchemaClosure.of(Schema.primitive(Schema.Primitive.{primitive})); }}"
+            "    @Override public SchemaClosure schema() {{ return SchemaClosure.uncheckedOf(Schema.primitive(Schema.Primitive.{primitive})); }}"
         );
         let _ = writeln!(
             out,
@@ -1386,11 +1547,11 @@ mod tests {
         let files = [
             (
                 "org/facet/phon/PhonAdapter.java",
-                "package org.facet.phon; public interface PhonAdapter<T> { SchemaClosure schema() throws PhonException; void encode(PhonEncoder e,T v) throws PhonException; T decode(PhonDecoder d) throws PhonException; }",
+                "package org.facet.phon; public interface PhonAdapter<T> { SchemaClosure schema(); void encode(PhonEncoder e,T v) throws PhonException; T decode(PhonDecoder d) throws PhonException; }",
             ),
             (
                 "org/facet/phon/SchemaClosure.java",
-                "package org.facet.phon; public final class SchemaClosure { public static SchemaClosure of(Schema s,Schema... r) throws PhonException{return new SchemaClosure();} }",
+                "package org.facet.phon; public final class SchemaClosure { public static SchemaClosure uncheckedOf(Schema s,Schema... r){return new SchemaClosure();} public static SchemaClosure fromCanonicalBytes(SchemaId id,byte[][] b,PhonLimits l)throws PhonException{return new SchemaClosure();} }",
             ),
             (
                 "org/facet/phon/SchemaId.java",
@@ -1402,7 +1563,7 @@ mod tests {
             ),
             (
                 "org/facet/phon/PhonException.java",
-                "package org.facet.phon; public class PhonException extends Exception { public PhonException(String m){super(m);} }",
+                "package org.facet.phon; public class PhonException extends Exception { public enum Kind { ENCODE,DECODE,MALFORMED } public PhonException(Kind k,String m){super(m);} }",
             ),
             (
                 "org/facet/phon/PhonEncoder.java",
@@ -1418,7 +1579,7 @@ mod tests {
             ),
             (
                 "org/facet/phon/PhonCodec.java",
-                "package org.facet.phon; public final class PhonCodec { public static <T> byte[] encode(PhonAdapter<?> a,T v,PhonLimits l){return new byte[0];} @SuppressWarnings(\"unchecked\") public static <T> T decode(PhonAdapter<?> a,byte[] b,PhonLimits l){return (T)null;} }",
+                "package org.facet.phon; public final class PhonCodec { public static <T> byte[] encode(PhonAdapter<T> a,T v,PhonLimits l)throws PhonException{return new byte[0];} public static <T> T decode(PhonAdapter<T> a,byte[] b,PhonLimits l)throws PhonException{return null;} }",
             ),
             (
                 "org/facet/vox/MethodDescriptor.java",
@@ -1434,7 +1595,7 @@ mod tests {
             ),
             (
                 "org/facet/vox/VoxResult.java",
-                "package org.facet.vox; public final class VoxResult<O,E> {}",
+                "package org.facet.vox; public final class VoxResult<O,E> { public enum Kind { SUCCESS,APPLICATION_ERROR,UNKNOWN_METHOD,INVALID_PAYLOAD,CANCELLED,CONNECTION_CLOSED,CONNECTION_SHUTDOWN,SEND_FAILED,TIMED_OUT,INDETERMINATE } public static <O,E> VoxResult<O,E> success(O v){return new VoxResult<>();} public static <O,E> VoxResult<O,E> applicationError(E v){return new VoxResult<>();} public static <O,E> VoxResult<O,E> infrastructure(Kind k){return new VoxResult<>();} public static <O,E> VoxResult<O,E> infrastructure(Kind k,String d){return new VoxResult<>();} public Kind kind(){return Kind.SUCCESS;} public boolean isSuccess(){return true;} public boolean isInfrastructureError(){return false;} public String detail(){return null;} public O success(){return null;} public E applicationError(){return null;} }",
             ),
             (
                 "org/facet/vox/VoxException.java",

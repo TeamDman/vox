@@ -366,6 +366,14 @@ public final class ServiceLane implements AutoCloseable {
 }
 ```
 
+The byte array returned by `call` and accepted by `InboundCall.respond(byte[])`
+is the complete Phon encoding of the method's normative
+`Result<T, VoxError<E>>` response shape. Success, declared application errors,
+and protocol-defined request errors are variants inside that Phon value. There
+is no runtime-owned or generated outer payload tag. Generated result adapters
+encode and decode the full response shape; transport failures that prevent a
+response still complete the future exceptionally.
+
 `ServiceRegistry` rejects duplicate service identities. `ServiceLane` owns
 request-id allocation, pending-call correlation, schema-binding reuse, timeout,
 cancellation, and lane-close propagation.

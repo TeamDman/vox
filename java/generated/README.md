@@ -22,3 +22,9 @@ filtered into a misleading partial Java service.
 
 Generated files are not hand edited. They compile against the Phon and Vox Java
 runtime interfaces frozen in `docs/design/java-17-vertical-slice.md`.
+
+Each method also receives a generated response adapter for the complete
+`Result<T, VoxError<E>>` Phon wire shape. Clients unwrap successful results,
+retain declared `User(E)` errors as `VoxResult`, and surface infrastructure
+variants exceptionally. No generated or runtime-specific outer payload tag is
+added.

@@ -17,7 +17,7 @@ public final class NestedRequest {
 
   public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x9739e75616e652f1L), List.of(), new Schema.RecordKind("NestedRequest", List.of(new Schema.Field("message", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true))));
   public static final PhonAdapter<NestedRequest> ADAPTER = new PhonAdapter<>() {
-    @Override public SchemaClosure schema() throws PhonException { return SchemaClosure.of(SCHEMA); }
+    @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA); }
     @Override public void encode(PhonEncoder encoder, NestedRequest value) throws PhonException {
       encoder.writeString(value.message());
     }

@@ -14,7 +14,7 @@ public final class JavaFixtureEchoArgs {
   public String value() { return value; }
   public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x31253570ab7d4573L), List.of(), new Schema.TupleKind(List.of(Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)))));
   public static final PhonAdapter<JavaFixtureEchoArgs> ADAPTER = new PhonAdapter<>() {
-    @Override public SchemaClosure schema() throws PhonException { return SchemaClosure.of(SCHEMA); }
+    @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA); }
     @Override public void encode(PhonEncoder encoder, JavaFixtureEchoArgs value) throws PhonException {
       encoder.writeString(value.value());
     }

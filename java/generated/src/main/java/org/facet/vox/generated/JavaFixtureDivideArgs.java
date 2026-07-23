@@ -14,7 +14,7 @@ public final class JavaFixtureDivideArgs {
   public DivideRequest request() { return request; }
   public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x0115269aea5cc048L), List.of(), new Schema.TupleKind(List.of(Schema.Ref.concrete(SchemaId.fromLong(0x1a9631092d2f02e2L)))));
   public static final PhonAdapter<JavaFixtureDivideArgs> ADAPTER = new PhonAdapter<>() {
-    @Override public SchemaClosure schema() throws PhonException { return SchemaClosure.of(SCHEMA, DivideRequest.SCHEMA); }
+    @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA, DivideRequest.SCHEMA); }
     @Override public void encode(PhonEncoder encoder, JavaFixtureDivideArgs value) throws PhonException {
       encoder.writeAdapted(DivideRequest.ADAPTER, value.request());
     }

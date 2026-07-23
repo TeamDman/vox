@@ -13,9 +13,23 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.facet.phon.PhonAdapter;
+import org.facet.phon.PhonDecoder;
+import org.facet.phon.PhonEncoder;
+import org.facet.phon.PhonException;
+import org.facet.phon.Schema;
+import org.facet.phon.SchemaClosure;
 
 public final class VoxRuntimeTest {
-    private static final PhonAdapter<Object> ADAPTER = new PhonAdapter<>() {};
+    private static final PhonAdapter<String> ADAPTER = new PhonAdapter<>() {
+        private final SchemaClosure schema = stringSchema();
+        public SchemaClosure schema() { return schema; }
+        public void encode(PhonEncoder encoder, String value) throws PhonException {
+            encoder.writeString(value);
+        }
+        public String decode(PhonDecoder decoder) throws PhonException {
+            return decoder.readString();
+        }
+    };
 
     public static void main(String[] args) throws Exception {
         boundsAreFiniteAndPositive();
@@ -192,6 +206,14 @@ public final class VoxRuntimeTest {
 
     private static MethodDescriptor method() {
         return new MethodDescriptor(0x8000_0000_0000_0001L, "echo", ADAPTER, ADAPTER);
+    }
+
+    private static SchemaClosure stringSchema() {
+        try {
+            return SchemaClosure.of(Schema.primitive(Schema.Primitive.STRING));
+        } catch (PhonException failure) {
+            throw new ExceptionInInitializerError(failure);
+        }
     }
 
     private static final class FakeDriver implements ServiceLane.DriverCommands {

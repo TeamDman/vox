@@ -14,7 +14,7 @@ public final class JavaFixtureInspectArgs {
   public NestedRequest request() { return request; }
   public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0xefc77e84a6ea3f7fL), List.of(), new Schema.TupleKind(List.of(Schema.Ref.concrete(SchemaId.fromLong(0x9739e75616e652f1L)))));
   public static final PhonAdapter<JavaFixtureInspectArgs> ADAPTER = new PhonAdapter<>() {
-    @Override public SchemaClosure schema() throws PhonException { return SchemaClosure.of(SCHEMA, NestedRequest.SCHEMA); }
+    @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA, NestedRequest.SCHEMA); }
     @Override public void encode(PhonEncoder encoder, JavaFixtureInspectArgs value) throws PhonException {
       encoder.writeAdapted(NestedRequest.ADAPTER, value.request());
     }

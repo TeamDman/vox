@@ -3,8 +3,8 @@
 package org.facet.vox.generated;
 
 import java.util.concurrent.CompletableFuture;
-import org.facet.phon.PhonCodec;
-import org.facet.phon.PhonLimits;
+import java.util.concurrent.CompletionException;
+import org.facet.phon.*;
 import org.facet.vox.*;
 
 public final class JavaFixtureClient {
@@ -12,17 +12,57 @@ public final class JavaFixtureClient {
   public JavaFixtureClient(ServiceLane lane) { this.lane = java.util.Objects.requireNonNull(lane); }
   public CompletableFuture<String> echo(String value) { return echo(value, CallOptions.defaults()); }
   public CompletableFuture<String> echo(String value, CallOptions options) {
-    byte[] encoded = PhonCodec.encode(JavaFixtureServiceDescriptor.ECHO.argumentAdapter(), new JavaFixtureEchoArgs(value), PhonLimits.defaults());
-    return lane.call(JavaFixtureServiceDescriptor.ECHO, encoded, options).thenApply(bytes -> PhonCodec.decode(JavaFixtureServiceDescriptor.ECHO.returnAdapter(), bytes, PhonLimits.defaults()));
+    try {
+      byte[] encoded = PhonCodec.encode(JavaFixtureEchoArgs.ADAPTER, new JavaFixtureEchoArgs(value), PhonLimits.defaults());
+      return lane.call(JavaFixtureServiceDescriptor.ECHO, encoded, options).thenApply(bytes -> {
+        try {
+          VoxResult<String, Void> result = PhonCodec.decode(JavaFixtureEchoResponse.ADAPTER, bytes, PhonLimits.defaults());
+          if (!result.isSuccess()) throw remoteFailure(result);
+          return result.success();
+        } catch (PhonException error) {
+          throw new CompletionException(error);
+        }
+      });
+    } catch (PhonException error) {
+      return CompletableFuture.failedFuture(error);
+    }
   }
   public CompletableFuture<NestedResponse> inspect(NestedRequest request) { return inspect(request, CallOptions.defaults()); }
   public CompletableFuture<NestedResponse> inspect(NestedRequest request, CallOptions options) {
-    byte[] encoded = PhonCodec.encode(JavaFixtureServiceDescriptor.INSPECT.argumentAdapter(), new JavaFixtureInspectArgs(request), PhonLimits.defaults());
-    return lane.call(JavaFixtureServiceDescriptor.INSPECT, encoded, options).thenApply(bytes -> PhonCodec.decode(JavaFixtureServiceDescriptor.INSPECT.returnAdapter(), bytes, PhonLimits.defaults()));
+    try {
+      byte[] encoded = PhonCodec.encode(JavaFixtureInspectArgs.ADAPTER, new JavaFixtureInspectArgs(request), PhonLimits.defaults());
+      return lane.call(JavaFixtureServiceDescriptor.INSPECT, encoded, options).thenApply(bytes -> {
+        try {
+          VoxResult<NestedResponse, Void> result = PhonCodec.decode(JavaFixtureInspectResponse.ADAPTER, bytes, PhonLimits.defaults());
+          if (!result.isSuccess()) throw remoteFailure(result);
+          return result.success();
+        } catch (PhonException error) {
+          throw new CompletionException(error);
+        }
+      });
+    } catch (PhonException error) {
+      return CompletableFuture.failedFuture(error);
+    }
   }
   public CompletableFuture<VoxResult<DivideResponse, DivideByZero>> divide(DivideRequest request) { return divide(request, CallOptions.defaults()); }
   public CompletableFuture<VoxResult<DivideResponse, DivideByZero>> divide(DivideRequest request, CallOptions options) {
-    byte[] encoded = PhonCodec.encode(JavaFixtureServiceDescriptor.DIVIDE.argumentAdapter(), new JavaFixtureDivideArgs(request), PhonLimits.defaults());
-    return lane.call(JavaFixtureServiceDescriptor.DIVIDE, encoded, options).thenApply(bytes -> PhonCodec.decode(JavaFixtureServiceDescriptor.DIVIDE.returnAdapter(), bytes, PhonLimits.defaults()));
+    try {
+      byte[] encoded = PhonCodec.encode(JavaFixtureDivideArgs.ADAPTER, new JavaFixtureDivideArgs(request), PhonLimits.defaults());
+      return lane.call(JavaFixtureServiceDescriptor.DIVIDE, encoded, options).thenApply(bytes -> {
+        try {
+          VoxResult<DivideResponse, DivideByZero> result = PhonCodec.decode(JavaFixtureDivideResponse.ADAPTER, bytes, PhonLimits.defaults());
+          if (result.isInfrastructureError()) throw remoteFailure(result);
+          return result;
+        } catch (PhonException error) {
+          throw new CompletionException(error);
+        }
+      });
+    } catch (PhonException error) {
+      return CompletableFuture.failedFuture(error);
+    }
   }
+  private static CompletionException remoteFailure(VoxResult<?, ?> result) {
+String detail = result.detail() == null ? "" : ": " + result.detail();
+return new CompletionException(new VoxException("remote Vox error " + result.kind() + detail));
+}
 }

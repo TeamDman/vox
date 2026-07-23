@@ -36,18 +36,24 @@ non-daemon executor.
 constants. The generator integration replaces it with a generated source file;
 runtime and tests must not acquire additional copies.
 
-## Focused Java 17 gate
+## Focused Java 17 gates
 
 The runtime now compiles directly against the dependency-free Phon Java
 runtime; the temporary test-only `PhonAdapter` fixture has been removed. The
-repository task compiles main, generated, test, and subject sources together
-and runs:
+repository tasks discover JDK tools through `JAVA_HOME` and then `PATH`:
 
-```text
-javac --release 17 -Xlint:all -Werror ...
-java -ea org.facet.vox.tcp.StreamFramingTest
-java -ea org.facet.vox.VoxRuntimeTest
+```console
+cargo run -p vox-xtask -- test-java
+cargo run -p vox-xtask -- package-java
 ```
+
+`test-java` checks generated-source drift, compiles main, generated, test, and
+subject sources with `javac --release 17 -Xlint:all -Werror`, and runs the Phon
+conformance and focused Vox tests. `package-java` repeats that gate, builds only
+the Phon and Vox runtime classes, and writes
+`vox/java/target/vox-java-<version>.jar`. It assembles the JAR twice to verify
+byte-for-byte reproducibility, compiles and runs a fresh Java consumer against
+the artifact, and rejects unresolved non-JDK dependencies with `jdeps`.
 
 `GeneratedResponseIntegrationTest` additionally proves that complete
 `Result<T, VoxError<E>>` response bytes round-trip without a private outer tag.

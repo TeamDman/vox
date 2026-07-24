@@ -3,9 +3,14 @@ package org.facet.vox;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
@@ -16,6 +21,8 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import org.facet.vox.tcp.StreamFraming;
 import org.facet.vox.tcp.TransportPrologue;
+import org.facet.phon.SchemaClosure;
+import org.facet.phon.Value;
 
 /**
  * One explicitly-driven Vox TCP connection.
@@ -41,6 +48,10 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
         final long laneId;
         CloseLaneCommand(long laneId) { this.laneId = laneId; }
     }
+    private static final class OpenLaneCommand implements DriverCommand {
+        final ServiceLane lane;
+        OpenLaneCommand(ServiceLane lane) { this.lane = lane; }
+    }
 
     private final Socket socket;
     private final boolean initiator;
@@ -53,6 +64,9 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
             new AtomicReference<>(ConnectionState.NEW);
     private final AtomicLong nextLaneId;
     private final List<ServiceLane> lanes = new ArrayList<>();
+    private final Map<String, ServiceLane.OutboundCall> inFlight = new HashMap<>();
+    private final Map<String, SchemaClosure> receivedBindings = new HashMap<>();
+    private final Set<String> sentBindings = new HashSet<>();
     private final CompletableFuture<Void> closed = new CompletableFuture<>();
 
     private VoxConnection(
@@ -129,7 +143,10 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
             ServiceLane lane = new ServiceLane(
                     id, service, this, options, LaneState.OPENING);
             lanes.add(lane);
-            // LaneOpen encoding is owned by the post-handshake message codec integration.
+            if (!commands.offer(new OpenLaneCommand(lane))) {
+                lanes.remove(lane);
+                lane.terminate(new VoxException("outbound queue is full"), LaneState.FAILED);
+            }
             return lane;
         }
     }
@@ -193,10 +210,12 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
                 TransportPrologue.accept(framing);
             }
             state.set(ConnectionState.HANDSHAKING);
-            establishSelfDescribingHandshake(framing);
+            WireCodec codec = new WireCodec(options);
+            establishSelfDescribingHandshake(framing, codec);
             state.set(ConnectionState.OPEN);
-            socket.setSoTimeout(0);
-            runOpenDriver(framing);
+            dlog("connection open");
+            socket.setSoTimeout(25);
+            runOpenDriver(framing, codec);
             close();
         } catch (IOException | VoxException | RuntimeException failure) {
             fail(failure);
@@ -206,35 +225,194 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
         }
     }
 
-    private void establishSelfDescribingHandshake(StreamFraming framing) throws VoxException {
-        throw new VoxException(
-                "Phon self-describing connection handshake is not integrated: "
-                        + "wire schema/adapters from the Phon Java track are required");
+    private void establishSelfDescribingHandshake(
+            StreamFraming framing, WireCodec codec) throws IOException, VoxException {
+        if (initiator) {
+            framing.writeFrame(codec.encodeHello(true));
+            Value response = codec.decodeHandshake(requireFrame(framing, "HelloYourself"));
+            String variant = WireCodec.variant(response);
+            if ("Decline".equals(variant) || "Sorry".equals(variant)) {
+                throw new VoxException("peer rejected Vox handshake with " + variant);
+            }
+            if (!"HelloYourself".equals(variant)) {
+                throw new VoxException("expected HelloYourself, got " + variant);
+            }
+            Value helloYourself = WireCodec.variantPayload(response);
+            validateSettings(WireCodec.required(helloYourself, "connection_settings"));
+            codec.bindPeerMessageSchema(
+                    WireCodec.byteList(
+                            WireCodec.required(helloYourself, "message_payload_schema")));
+            framing.writeFrame(codec.encodeLetsGo());
+        } else {
+            Value request = codec.decodeHandshake(requireFrame(framing, "Hello"));
+            if (!"Hello".equals(WireCodec.variant(request))) {
+                throw new VoxException("expected Hello, got " + WireCodec.variant(request));
+            }
+            Value hello = WireCodec.variantPayload(request);
+            validateSettings(WireCodec.required(hello, "connection_settings"));
+            codec.bindPeerMessageSchema(
+                    WireCodec.byteList(
+                            WireCodec.required(hello, "message_payload_schema")));
+            framing.writeFrame(codec.encodeHelloYourself(false));
+            Value confirmation = codec.decodeHandshake(requireFrame(framing, "LetsGo"));
+            if (!"LetsGo".equals(WireCodec.variant(confirmation))) {
+                throw new VoxException("expected LetsGo, got " + WireCodec.variant(confirmation));
+            }
+        }
     }
 
-    private void runOpenDriver(StreamFraming framing) throws IOException, VoxException {
-        // This loop is deliberately unreachable until establishSelfDescribingHandshake is
-        // implemented. Keeping the queue/state ownership here makes the integration boundary
-        // explicit: only this driver will encode messages or mutate protocol state.
+    private void runOpenDriver(StreamFraming framing, WireCodec codec)
+            throws IOException, VoxException {
         while (state.get() == ConnectionState.OPEN) {
-            DriverCommand command;
+            DriverCommand command = commands.poll();
+            while (command != null) {
+                processCommand(command, framing, codec);
+                command = commands.poll();
+            }
             try {
-                command = commands.take();
-            } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-                throw new VoxException("connection driver interrupted", interrupted);
+                byte[] frame = framing.readFrame();
+                if (frame == null) return;
+                processInbound(codec.decodeMessage(frame), framing, codec);
+            } catch (SocketTimeoutException timeout) {
+                // The short read timeout lets this single owner service outbound commands.
             }
-            if (command instanceof CallCommand call) {
-                queuedBytes.addAndGet(-call.call.arguments.length);
-                if (!call.call.tryCommit()) {
-                    continue;
+        }
+    }
+
+    private void processCommand(
+            DriverCommand command, StreamFraming framing, WireCodec codec)
+            throws IOException, VoxException {
+        if (command instanceof OpenLaneCommand open) {
+            dlog("send LaneOpen lane=" + Long.toUnsignedString(open.lane.id()));
+            framing.writeFrame(codec.encodeMessage(
+                    open.lane.id(),
+                    codec.laneOpen(open.lane.service().name(), initiator)));
+        } else if (command instanceof CallCommand call) {
+            queuedBytes.addAndGet(-call.call.arguments.length);
+            if (!call.call.tryCommit()) return;
+            String binding = bindingKey(call.call.method.id(), WireCodec.Direction.ARGS);
+            if (sentBindings.add(binding)) {
+                dlog("send Args SchemaMessage method="
+                        + Long.toUnsignedString(call.call.method.id()));
+                byte[] schemas;
+                try {
+                    schemas = call.call.method.argumentAdapter().schema().bundleBytes();
+                } catch (org.facet.phon.PhonException failure) {
+                    call.call.fail(failure);
+                    return;
                 }
-                throw new VoxException("post-handshake RequestCall codec is not integrated");
-            } else if (command instanceof CloseLaneCommand) {
-                // LaneClose encoding joins this state machine with the generated message codec.
-            } else if (command instanceof CancelCommand) {
-                // RequestCancel encoding joins this state machine with the generated message codec.
+                framing.writeFrame(codec.encodeMessage(
+                        call.call.laneId,
+                        codec.schemaMessage(
+                                call.call.method.id(), WireCodec.Direction.ARGS, schemas)));
             }
+            inFlight.put(requestKey(call.call.laneId, call.call.requestId), call.call);
+            dlog("send RequestCall lane=" + Long.toUnsignedString(call.call.laneId)
+                    + " request=" + Long.toUnsignedString(call.call.requestId));
+            framing.writeFrame(codec.encodeMessage(
+                    call.call.laneId,
+                    codec.requestCall(
+                            call.call.requestId, call.call.method.id(), call.call.arguments)));
+        } else if (command instanceof CloseLaneCommand close) {
+            framing.writeFrame(codec.encodeMessage(close.laneId, codec.laneClose()));
+        } else if (command instanceof CancelCommand cancel) {
+            framing.writeFrame(codec.encodeMessage(
+                    cancel.laneId, codec.requestCancel(cancel.requestId)));
+        }
+    }
+
+    private void processInbound(
+            Value message, StreamFraming framing, WireCodec codec)
+            throws IOException, VoxException {
+        long laneId = WireCodec.laneId(message);
+        Value payload = WireCodec.payload(message);
+        String variant = WireCodec.variant(payload);
+        dlog("recv " + variant + " lane=" + Long.toUnsignedString(laneId));
+        Value body = WireCodec.variantPayload(payload);
+        switch (variant) {
+            case "LaneAccept" -> requireLane(laneId).markOpen();
+            case "LaneReject" -> requireLane(laneId).terminate(
+                    new VoxException("peer rejected service lane"), LaneState.FAILED);
+            case "SchemaMessage" -> {
+                long methodId = WireCodec.unsignedLong(
+                        WireCodec.required(body, "method_id"));
+                String directionVariant = WireCodec.variant(
+                        WireCodec.required(body, "direction"));
+                WireCodec.Direction direction = switch (directionVariant) {
+                    case "Args" -> WireCodec.Direction.ARGS;
+                    case "Response" -> WireCodec.Direction.RESPONSE;
+                    default -> throw new VoxException(
+                            "unsupported binding direction " + directionVariant);
+                };
+                receivedBindings.put(
+                        bindingKey(methodId, direction),
+                        codec.parseBinding(WireCodec.byteList(
+                                WireCodec.required(body, "schemas"))));
+            }
+            case "RequestMessage" -> processInboundRequest(laneId, body, codec);
+            case "LaneClose" -> requireLane(laneId).terminate(
+                    new VoxException("peer closed service lane"), LaneState.CLOSED);
+            default -> throw new VoxException(
+                    "unsupported Java wire message " + variant);
+        }
+    }
+
+    private void processInboundRequest(long laneId, Value request, WireCodec codec)
+            throws VoxException {
+        long requestId = WireCodec.unsignedLong(WireCodec.required(request, "id"));
+        Value requestBody = WireCodec.required(request, "body");
+        String variant = WireCodec.variant(requestBody);
+        if (!"Response".equals(variant)) {
+            throw new VoxException("Java caller slice received unsupported request " + variant);
+        }
+        ServiceLane.OutboundCall call = inFlight.remove(requestKey(laneId, requestId));
+        if (call == null) return; // Late response after cancellation/timeout.
+        Value response = WireCodec.variantPayload(requestBody);
+        byte[] encoded = WireCodec.required(response, "ret").asBytes();
+        SchemaClosure writer = receivedBindings.get(
+                bindingKey(call.method.id(), WireCodec.Direction.RESPONSE));
+        if (writer == null) {
+            call.fail(new VoxException("response arrived before its schema binding"));
+            return;
+        }
+        byte[] local = codec.transcode(
+                writer, call.method.responseWireAdapter().schema(), encoded);
+        call.succeed(local);
+    }
+
+    private ServiceLane requireLane(long laneId) throws VoxException {
+        synchronized (lanes) {
+            for (ServiceLane lane : lanes) {
+                if (lane.id() == laneId) return lane;
+            }
+        }
+        throw new VoxException("message for unknown lane " + Long.toUnsignedString(laneId));
+    }
+
+    private static byte[] requireFrame(StreamFraming framing, String part)
+            throws IOException, VoxException {
+        byte[] frame = framing.readFrame();
+        if (frame == null) throw new VoxException("peer closed before " + part);
+        return frame;
+    }
+
+    private static void validateSettings(Value settings) throws VoxException {
+        long credit = WireCodec.unsignedLong(
+                WireCodec.required(settings, "initial_channel_credit"));
+        if (credit == 0) throw new VoxException("initial_channel_credit must be nonzero");
+    }
+
+    private static String bindingKey(long methodId, WireCodec.Direction direction) {
+        return Long.toUnsignedString(methodId) + ":" + direction;
+    }
+
+    private static String requestKey(long laneId, long requestId) {
+        return Long.toUnsignedString(laneId) + ":" + Long.toUnsignedString(requestId);
+    }
+
+    private static void dlog(String message) {
+        if ("1".equals(System.getenv("VOX_DLOG"))) {
+            System.err.println("[vox-java] " + message);
         }
     }
 

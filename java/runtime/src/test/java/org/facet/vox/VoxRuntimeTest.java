@@ -38,7 +38,7 @@ public final class VoxRuntimeTest {
         laneCorrelatesAndDiscardsLateResponses();
         laneCancellationAndTimeoutAreTerminal();
         inboundCallIsExactlyOnce();
-        connectionDriverOwnershipAndHandshakeSeam();
+        connectionDriverOwnershipAndHandshake();
         System.out.println("VoxRuntimeTest: PASS");
     }
 
@@ -161,7 +161,7 @@ public final class VoxRuntimeTest {
         expectThrows(IllegalStateException.class, () -> call.fail(new VoxException("late")));
     }
 
-    private static void connectionDriverOwnershipAndHandshakeSeam() throws Exception {
+    private static void connectionDriverOwnershipAndHandshake() throws Exception {
         try (ServerSocket listener = new ServerSocket(0)) {
             CompletableFuture<VoxConnection> accepted = new CompletableFuture<>();
             Thread acceptThread = new Thread(() -> {
@@ -182,19 +182,28 @@ public final class VoxRuntimeTest {
                     server.start(command -> new Thread(command, "server-driver").start());
             CompletableFuture<Void> clientDone =
                     client.start(command -> new Thread(command, "client-driver").start());
-            expectThrows(ExecutionException.class, () -> serverDone.get(2, TimeUnit.SECONDS));
-            ExecutionException clientFailure = expectThrows(
-                    ExecutionException.class, () -> clientDone.get(2, TimeUnit.SECONDS));
-            check(clientFailure.getCause().getMessage().contains("Phon self-describing"),
-                    "explicit handshake integration seam");
-            check(client.state() == ConnectionState.FAILED, "terminal failed state");
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while ((client.state() != ConnectionState.OPEN
+                            || server.state() != ConnectionState.OPEN)
+                    && System.nanoTime() < deadline) {
+                Thread.sleep(5);
+            }
+            check(client.state() == ConnectionState.OPEN,
+                    "client handshake opens; state=" + client.state()
+                            + ", failure=" + completionFailure(clientDone));
+            check(server.state() == ConnectionState.OPEN,
+                    "server handshake opens; state=" + server.state()
+                            + ", failure=" + completionFailure(serverDone));
             CompletableFuture<Void> duplicate = client.start(Runnable::run);
             expectThrows(ExecutionException.class, duplicate::get);
             client.close();
             server.close();
+            try { clientDone.get(2, TimeUnit.SECONDS); } catch (ExecutionException ignored) {}
+            try { serverDone.get(2, TimeUnit.SECONDS); } catch (ExecutionException ignored) {}
             acceptThread.join();
         }
     }
+
 
     private static ServiceLane lane(
             ServiceLane.DriverCommands driver,
@@ -248,6 +257,23 @@ public final class VoxRuntimeTest {
             throw new AssertionError("expected " + type.getName() + ", got " + failure, failure);
         }
         throw new AssertionError("expected " + type.getName());
+    }
+
+    private static String completionFailure(CompletableFuture<?> future) {
+        if (!future.isDone()) return "<pending>";
+        try {
+            future.join();
+            return "<none>";
+        } catch (java.util.concurrent.CompletionException failure) {
+            StringBuilder result = new StringBuilder();
+            Throwable cause = failure.getCause();
+            while (cause != null) {
+                if (result.length() != 0) result.append(" <- ");
+                result.append(cause);
+                cause = cause.getCause();
+            }
+            return result.toString();
+        }
     }
 
     private static void check(boolean condition, String description) {

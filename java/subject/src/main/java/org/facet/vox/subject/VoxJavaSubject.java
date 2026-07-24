@@ -4,19 +4,33 @@ import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.time.Duration;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import org.facet.phon.PhonCodec;
+import org.facet.phon.PhonLimits;
+import org.facet.vox.CallOptions;
 import org.facet.vox.ConnectionOptions;
+import org.facet.vox.ConnectionState;
+import org.facet.vox.LaneOptions;
+import org.facet.vox.MethodDescriptor;
+import org.facet.vox.ServiceDescriptor;
+import org.facet.vox.ServiceLane;
 import org.facet.vox.ServiceRegistry;
 import org.facet.vox.VoxConnection;
+import org.facet.vox.VoxResult;
+import org.facet.vox.generated.JavaFixtureEchoArgs;
+import org.facet.vox.generated.JavaFixtureEchoResponse;
+import org.facet.vox.generated.JavaFixtureServiceDescriptor;
+import org.facet.vox.generated.TestbedWireConstants;
 
 /**
  * Hosted-subject lifecycle shell.
  *
- * <p>It intentionally cannot announce a usable Vox connection until the Phon handshake and
- * generated Testbed dispatcher integrate. Server-listen announces only its bound address, as the
- * existing harness requires before it can create the peer.
+ * <p>The first interoperable client scenario is Testbed.echo over TCP. Server-listen still
+ * announces only its bound address, as the existing harness requires before it creates the peer.
  */
 public final class VoxJavaSubject {
     private VoxJavaSubject() {}
@@ -75,7 +89,55 @@ public final class VoxJavaSubject {
         InetSocketAddress address =
                 new InetSocketAddress(peer.substring(0, colon), Integer.parseInt(peer.substring(colon + 1)));
         try (VoxConnection connection = VoxConnection.connect(address, options)) {
-            await(connection, driver);
+            CompletableFuture<Void> driven = connection.start(driver);
+            awaitOpen(connection, driven);
+            String scenario = System.getenv().getOrDefault("CLIENT_SCENARIO", "echo");
+            if (!"echo".equals(scenario)) {
+                throw new IllegalArgumentException(
+                        "unsupported Java CLIENT_SCENARIO: " + scenario);
+            }
+            runEcho(connection);
+        }
+    }
+
+    private static void runEcho(VoxConnection connection) throws Exception {
+        MethodDescriptor fixture = JavaFixtureServiceDescriptor.ECHO;
+        MethodDescriptor echo = new MethodDescriptor(
+                TestbedWireConstants.ECHO_METHOD_ID,
+                "echo",
+                fixture.argumentAdapter(),
+                fixture.returnAdapter(),
+                fixture.applicationErrorAdapter(),
+                fixture.responseWireAdapter());
+        ServiceDescriptor service =
+                new ServiceDescriptor(TestbedWireConstants.SERVICE, java.util.List.of(echo));
+        ServiceLane lane = connection.openLane(service, LaneOptions.defaults());
+        lane.opened().get(5, TimeUnit.SECONDS);
+        byte[] arguments = PhonCodec.encode(
+                JavaFixtureEchoArgs.ADAPTER,
+                new JavaFixtureEchoArgs("hello from client"),
+                PhonLimits.defaults());
+        byte[] response = lane.call(echo, arguments, CallOptions.defaults())
+                .get(5, TimeUnit.SECONDS);
+        VoxResult<String, Void> result = PhonCodec.decode(
+                JavaFixtureEchoResponse.ADAPTER, response, PhonLimits.defaults());
+        if (!result.isSuccess() || !"hello from client".equals(result.success())) {
+            throw new IllegalStateException("echo returned " + result);
+        }
+        System.err.println("echo result: " + result.success());
+        lane.close();
+    }
+
+    private static void awaitOpen(
+            VoxConnection connection, CompletableFuture<Void> driven) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (connection.state() != ConnectionState.OPEN && System.nanoTime() < deadline) {
+            if (driven.isDone()) driven.get();
+            Thread.sleep(5);
+        }
+        if (connection.state() != ConnectionState.OPEN) {
+            throw new IllegalStateException(
+                    "connection did not open: " + connection.state());
         }
     }
 

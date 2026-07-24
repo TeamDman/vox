@@ -136,6 +136,7 @@ where
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SubjectLanguage {
+    Java,
     Rust,
     Swift,
     TypeScript,
@@ -201,6 +202,13 @@ pub fn subject_cmd() -> String {
 
 pub fn subject_cmd_for_language(language: SubjectLanguage) -> String {
     match language {
+        SubjectLanguage::Java => {
+            if cfg!(windows) {
+                "java\\subject\\subject-java.cmd".to_string()
+            } else {
+                "./java/subject/subject-java.sh".to_string()
+            }
+        }
         SubjectLanguage::Rust => {
             let exe = format!("subject-rust{}", std::env::consts::EXE_SUFFIX);
             let target_dir = cargo_target_dir();
@@ -3246,6 +3254,9 @@ fn sample_styx_lsp_position_to_offset_params() -> StyxLspPositionToOffsetParams 
 
 impl Testbed for TestbedService {
     async fn echo(&self, message: String) -> String {
+        if std::env::var_os("VOX_DLOG").is_some() {
+            eprintln!("[harness] Testbed.echo received {message:?}");
+        }
         message
     }
 
@@ -4305,6 +4316,10 @@ async fn spawn_subject_cmd_with_env(
         let mut c = Command::new("sh");
         c.arg("-c").arg(cmd);
         c
+    } else if cmd.ends_with(".cmd") {
+        let mut c = Command::new("cmd");
+        c.arg("/D").arg("/S").arg("/C").arg(cmd);
+        c
     } else {
         Command::new(cmd)
     };
@@ -4520,6 +4535,10 @@ pub async fn spawn_server_subject(spec: SubjectSpec) -> Result<(String, Child), 
     let mut command = if cmd.ends_with(".sh") {
         let mut c = Command::new("sh");
         c.arg("-c").arg(cmd);
+        c
+    } else if cmd.ends_with(".cmd") {
+        let mut c = Command::new("cmd");
+        c.arg("/D").arg("/S").arg("/C").arg(cmd);
         c
     } else {
         Command::new(cmd)

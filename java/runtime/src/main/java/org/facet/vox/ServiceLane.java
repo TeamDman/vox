@@ -93,6 +93,7 @@ public final class ServiceLane implements AutoCloseable {
     private final AtomicReference<LaneState> state;
     private final AtomicLong nextRequestId = new AtomicLong(1);
     private final Map<Long, Pending> pending = new ConcurrentHashMap<>();
+    private final CompletableFuture<Void> opened = new CompletableFuture<>();
 
     ServiceLane(
             long id,
@@ -138,6 +139,7 @@ public final class ServiceLane implements AutoCloseable {
     }
 
     public LaneState state() { return state.get(); }
+    public CompletableFuture<Void> opened() { return opened; }
 
     @Override
     public void close() {
@@ -151,11 +153,14 @@ public final class ServiceLane implements AutoCloseable {
     ServiceDescriptor service() { return service; }
 
     void markOpen() {
-        state.compareAndSet(LaneState.OPENING, LaneState.OPEN);
+        if (state.compareAndSet(LaneState.OPENING, LaneState.OPEN)) {
+            opened.complete(null);
+        }
     }
 
     void terminate(Throwable failure, LaneState terminalState) {
         state.set(terminalState);
+        opened.completeExceptionally(failure);
         for (Map.Entry<Long, Pending> item : pending.entrySet()) {
             Pending removed = pending.remove(item.getKey());
             if (removed != null) {

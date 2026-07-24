@@ -4,6 +4,7 @@ mod testbed;
 use spec_tests::harness::{
     SubjectLanguage, SubjectSpec, accept_bidirectional_subject_spec, accept_subject_spec,
     run_async, run_subject_cancel_timeout, run_subject_client_scenario,
+    run_subject_incompatible_schema_evolution,
 };
 use std::time::Duration;
 
@@ -58,6 +59,24 @@ fn committed_java_timeout_cancels_rust_handler() {
 #[test]
 fn invalid_java_payload_fails_before_rust_dispatch() {
     run_subject_client_scenario(SubjectSpec::tcp(SubjectLanguage::Java), "invalid_payload");
+}
+
+#[test]
+fn unknown_java_method_returns_normative_terminal_outcome() {
+    run_subject_client_scenario(SubjectSpec::tcp(SubjectLanguage::Java), "unknown_method");
+}
+
+#[test]
+fn compatible_java_schema_evolution_negotiates_on_the_wire() {
+    run_subject_client_scenario(
+        SubjectSpec::tcp(SubjectLanguage::Java),
+        "compatible_schema_evolution",
+    );
+}
+
+#[test]
+fn incompatible_java_argument_schema_fails_before_rust_dispatch() {
+    run_subject_incompatible_schema_evolution(SubjectSpec::tcp(SubjectLanguage::Java));
 }
 
 #[test]

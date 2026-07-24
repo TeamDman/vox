@@ -104,6 +104,7 @@ const SUBJECT_WAIT_HEARTBEAT: Duration = Duration::from_millis(500);
 const SPEC_RUNTIME_STACK_BYTES: usize = 32 * 1024 * 1024;
 static CANCEL_ECHO_STARTED: AtomicBool = AtomicBool::new(false);
 static CANCEL_ECHO_DROPPED: AtomicBool = AtomicBool::new(false);
+static INCOMPATIBLE_MEASUREMENT_DISPATCHED: AtomicBool = AtomicBool::new(false);
 
 struct CancelEchoDropSignal;
 
@@ -3571,6 +3572,9 @@ impl Testbed for TestbedService {
     }
 
     async fn echo_measurement(&self, m: Measurement) -> Measurement {
+        if m.unit == "java-incompatible" {
+            INCOMPATIBLE_MEASUREMENT_DISPATCHED.store(true, Ordering::SeqCst);
+        }
         m
     }
 
@@ -4746,6 +4750,15 @@ pub fn run_subject_cancel_timeout(spec: SubjectSpec) {
     assert!(
         CANCEL_ECHO_DROPPED.load(Ordering::SeqCst),
         "committed Java RequestCancel did not abort/drop the Rust handler future"
+    );
+}
+
+pub fn run_subject_incompatible_schema_evolution(spec: SubjectSpec) {
+    INCOMPATIBLE_MEASUREMENT_DISPATCHED.store(false, Ordering::SeqCst);
+    run_subject_client_scenario(spec, "incompatible_schema_evolution");
+    assert!(
+        !INCOMPATIBLE_MEASUREMENT_DISPATCHED.load(Ordering::SeqCst),
+        "incompatible Java argument schema reached the Rust handler"
     );
 }
 

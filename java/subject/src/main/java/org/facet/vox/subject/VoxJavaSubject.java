@@ -4,6 +4,7 @@ import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -13,18 +14,33 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import org.facet.phon.PhonCodec;
+import org.facet.phon.PhonAdapter;
+import org.facet.phon.PhonDecoder;
+import org.facet.phon.PhonEncoder;
+import org.facet.phon.PhonException;
 import org.facet.phon.PhonLimits;
+import org.facet.phon.SchemaClosure;
+import org.facet.phon.SchemaId;
+import org.facet.phon.Value;
 import org.facet.vox.CallOptions;
 import org.facet.vox.ConnectionOptions;
 import org.facet.vox.ConnectionState;
 import org.facet.vox.LaneOptions;
+import org.facet.vox.MethodDescriptor;
+import org.facet.vox.ServiceDescriptor;
 import org.facet.vox.ServiceLane;
 import org.facet.vox.ServiceRegistry;
 import org.facet.vox.VoxConnection;
 import org.facet.vox.VoxResult;
+import org.facet.vox.generated.EvolutionWireConstants;
+import org.facet.vox.generated.EvolvedMeasurementArgsWireSchemas;
+import org.facet.vox.generated.EvolvedMeasurementResponseWireSchemas;
+import org.facet.vox.generated.EvolvedProfileArgsWireSchemas;
+import org.facet.vox.generated.EvolvedProfileResponseWireSchemas;
 import org.facet.vox.generated.MathError;
 import org.facet.vox.generated.TestbedClient;
 import org.facet.vox.generated.TestbedDispatcher;
+import org.facet.vox.generated.TestbedEchoArgs;
 import org.facet.vox.generated.TestbedEchoResponse;
 import org.facet.vox.generated.TestbedHandler;
 import org.facet.vox.generated.TestbedServiceDescriptor;
@@ -135,6 +151,9 @@ public final class VoxJavaSubject {
             case "cancel_timeout" -> runCancelTimeout(connection);
             case "invalid_payload" -> runInvalidPayload(connection);
             case "divide_error" -> runDivideError(connection);
+            case "unknown_method" -> runUnknownMethod(connection);
+            case "compatible_schema_evolution" -> runCompatibleSchemaEvolution(connection);
+            case "incompatible_schema_evolution" -> runIncompatibleSchemaEvolution(connection);
             default -> throw new IllegalArgumentException(
                     "unsupported Java CLIENT_SCENARIO: " + scenario);
         }
@@ -187,6 +206,153 @@ public final class VoxJavaSubject {
                 throw new AssertionError("unexpected divide result " + result);
             }
         }
+    }
+
+    private static void runUnknownMethod(VoxConnection connection) throws Exception {
+        MethodDescriptor known = TestbedServiceDescriptor.ECHO;
+        MethodDescriptor unknown = new MethodDescriptor(
+                0x7fff_ffff_ffff_0042L,
+                "definitely_absent",
+                known.argumentAdapter(),
+                known.returnAdapter(),
+                known.applicationErrorAdapter(),
+                known.responseWireAdapter());
+        ServiceDescriptor descriptor =
+                new ServiceDescriptor(TestbedServiceDescriptor.INSTANCE.name(), List.of(unknown));
+        try (ServiceLane lane =
+                connection.openLane(descriptor, LaneOptions.defaults())) {
+            lane.opened().get(5, TimeUnit.SECONDS);
+            byte[] arguments = PhonCodec.encode(
+                    TestbedEchoArgs.ADAPTER,
+                    new TestbedEchoArgs("must not dispatch"),
+                    PhonLimits.defaults());
+            byte[] response = lane.call(
+                            unknown,
+                            arguments,
+                            new CallOptions(Duration.ofSeconds(2), Map.of()))
+                    .get(3, TimeUnit.SECONDS);
+            VoxResult<String, Void> result = PhonCodec.decode(
+                    TestbedEchoResponse.ADAPTER, response, PhonLimits.defaults());
+            if (result.kind() != VoxResult.Kind.UNKNOWN_METHOD) {
+                throw new AssertionError("expected UNKNOWN_METHOD, got " + result);
+            }
+        }
+    }
+
+    private static void runCompatibleSchemaEvolution(VoxConnection connection) throws Exception {
+        SchemaClosure argsSchema = schema(
+                EvolvedProfileArgsWireSchemas._SCHEMA_ID,
+                EvolvedProfileArgsWireSchemas.CANONICAL_SCHEMAS);
+        SchemaClosure responseSchema = schema(
+                EvolvedProfileResponseWireSchemas.RESULT_SCHEMA_ID,
+                EvolvedProfileResponseWireSchemas.CANONICAL_SCHEMAS);
+        MethodDescriptor method = genericMethod(
+                EvolutionWireConstants.ECHO_PROFILE_METHOD_ID,
+                "echo_profile",
+                argsSchema,
+                responseSchema);
+        ServiceDescriptor descriptor =
+                new ServiceDescriptor(EvolutionWireConstants.SERVICE_NAME, List.of(method));
+        Value profile = Value.map(Map.of(
+                "name", Value.string("Java evolution"),
+                "bio", Value.string("compatible optional field"),
+                "avatar", Value.string("ignored by v1")));
+        byte[] arguments =
+                PhonCodec.encodeValue(argsSchema, Value.list(List.of(profile)), PhonLimits.defaults());
+        try (ServiceLane lane = connection.openLane(descriptor, LaneOptions.defaults())) {
+            lane.opened().get(5, TimeUnit.SECONDS);
+            byte[] response = lane.call(
+                            method,
+                            arguments,
+                            new CallOptions(Duration.ofSeconds(2), Map.of()))
+                    .get(3, TimeUnit.SECONDS);
+            Value result = PhonCodec.decodeValue(responseSchema, response, PhonLimits.defaults());
+            if (!"Ok".equals(result.asEnum().variant())) {
+                throw new AssertionError("expected successful evolved response, got " + result);
+            }
+            Map<String, Value> returned = result.asEnum().payload().asMap();
+            if (!"Java evolution".equals(returned.get("name").asString())
+                    || !"compatible optional field".equals(returned.get("bio").asString())
+                    || returned.get("avatar").type() != Value.Type.NULL) {
+                throw new AssertionError("unexpected evolved profile " + returned);
+            }
+        }
+    }
+
+    private static void runIncompatibleSchemaEvolution(VoxConnection connection) throws Exception {
+        SchemaClosure argsSchema = schema(
+                EvolvedMeasurementArgsWireSchemas._SCHEMA_ID,
+                EvolvedMeasurementArgsWireSchemas.CANONICAL_SCHEMAS);
+        SchemaClosure responseSchema = schema(
+                EvolvedMeasurementResponseWireSchemas.RESULT_SCHEMA_ID,
+                EvolvedMeasurementResponseWireSchemas.CANONICAL_SCHEMAS);
+        MethodDescriptor method = genericMethod(
+                EvolutionWireConstants.ECHO_MEASUREMENT_METHOD_ID,
+                "echo_measurement",
+                argsSchema,
+                responseSchema);
+        ServiceDescriptor descriptor =
+                new ServiceDescriptor(EvolutionWireConstants.SERVICE_NAME, List.of(method));
+        Value measurement = Value.map(Map.of(
+                "unit", Value.string("java-incompatible"),
+                "value", Value.string("not-an-f64")));
+        byte[] arguments =
+                PhonCodec.encodeValue(argsSchema, Value.list(List.of(measurement)), PhonLimits.defaults());
+        try (ServiceLane lane = connection.openLane(descriptor, LaneOptions.defaults())) {
+            lane.opened().get(5, TimeUnit.SECONDS);
+            byte[] response = lane.call(
+                            method,
+                            arguments,
+                            new CallOptions(Duration.ofSeconds(2), Map.of()))
+                    .get(3, TimeUnit.SECONDS);
+            Value result = PhonCodec.decodeValue(responseSchema, response, PhonLimits.defaults());
+            if (!"Err".equals(result.asEnum().variant())
+                    || !"InvalidPayload".equals(
+                            result.asEnum().payload().asEnum().variant())) {
+                throw new AssertionError(
+                        "incompatible evolved arguments did not return InvalidPayload: " + result);
+            }
+        }
+    }
+
+    private static SchemaClosure schema(long rootId, byte[][] canonicalSchemas)
+            throws PhonException {
+        return SchemaClosure.fromCanonicalBytes(
+                SchemaId.fromLong(rootId), canonicalSchemas, PhonLimits.defaults());
+    }
+
+    private static MethodDescriptor genericMethod(
+            long id, String name, SchemaClosure arguments, SchemaClosure response) {
+        return new MethodDescriptor(
+                id,
+                name,
+                valueAdapter(arguments),
+                valueAdapter(response),
+                null,
+                valueAdapter(response));
+    }
+
+    private static PhonAdapter<Value> valueAdapter(SchemaClosure schema) {
+        return new PhonAdapter<>() {
+            @Override
+            public SchemaClosure schema() {
+                return schema;
+            }
+
+            @Override
+            public void encode(PhonEncoder encoder, Value value) throws PhonException {
+                throw new PhonException(
+                        PhonException.Kind.ENCODE,
+                        "generic wire adapter is schema-only");
+            }
+
+            @Override
+            public Value decode(PhonDecoder decoder) throws PhonException {
+                throw new PhonException(
+                        PhonException.Kind.DECODE,
+                        "generic wire adapter is schema-only");
+            }
+        };
     }
 
     private static boolean hasCause(Throwable failure, Class<? extends Throwable> type) {

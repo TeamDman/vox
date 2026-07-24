@@ -451,7 +451,7 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
             call.fail(new VoxException("response arrived before its schema binding"));
             return;
         }
-        byte[] local = codec.transcode(
+        byte[] local = codec.transcodeResponse(
                 writer, call.method.responseWireAdapter().schema(), encoded);
         call.succeed(local);
     }

@@ -203,6 +203,36 @@ final class WireCodec {
         }
     }
 
+    byte[] transcodeResponse(
+            SchemaClosure writer, SchemaClosure reader, byte[] payload) throws VoxException {
+        try {
+            return PhonCodec.transcode(writer, reader, payload, limits);
+        } catch (PhonException incompatibleSchemas) {
+            try {
+                Value response = PhonCodec.decodeValue(writer, payload, limits);
+                if (isInfrastructureError(response)) {
+                    // Infrastructure variants do not contain the method's success or
+                    // application-error types. They remain representable even when those
+                    // unused branches differ (notably UnknownMethod).
+                    return PhonCodec.encodeValue(reader, response, limits);
+                }
+            } catch (PhonException ignored) {
+                // Preserve the original compatibility failure below.
+            }
+            throw new VoxException("method payload schema is incompatible", incompatibleSchemas);
+        }
+    }
+
+    private static boolean isInfrastructureError(Value response) {
+        if (response.type() != Value.Type.ENUM
+                || !"Err".equals(response.asEnum().variant())) {
+            return false;
+        }
+        Value error = response.asEnum().payload();
+        return error.type() == Value.Type.ENUM
+                && !"User".equals(error.asEnum().variant());
+    }
+
     SchemaClosure parseBinding(byte[] bundle) throws VoxException {
         try {
             return SchemaClosure.fromBundleBytes(bundle, limits);

@@ -8,8 +8,9 @@ existing Phon and Vox specifications, Rust schema definitions, and checked-in
 golden vectors. This document does not create a second protocol.
 
 The first consumer is a Minecraft mod whose oldest supported runtime is Java
-17. The implementation therefore cannot require records, sealed types, virtual
-threads, or library APIs introduced after Java 17.
+17. The implementation may use Java 17 language features, including records
+and sealed types, but cannot require virtual threads or language/library APIs
+introduced after Java 17.
 
 ## Supported slice
 

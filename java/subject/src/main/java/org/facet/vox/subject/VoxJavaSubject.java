@@ -9,22 +9,15 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import org.facet.phon.PhonCodec;
-import org.facet.phon.PhonLimits;
-import org.facet.vox.CallOptions;
 import org.facet.vox.ConnectionOptions;
 import org.facet.vox.ConnectionState;
 import org.facet.vox.LaneOptions;
-import org.facet.vox.MethodDescriptor;
-import org.facet.vox.ServiceDescriptor;
 import org.facet.vox.ServiceLane;
 import org.facet.vox.ServiceRegistry;
 import org.facet.vox.VoxConnection;
-import org.facet.vox.VoxResult;
-import org.facet.vox.generated.JavaFixtureEchoArgs;
-import org.facet.vox.generated.JavaFixtureEchoResponse;
-import org.facet.vox.generated.JavaFixtureServiceDescriptor;
-import org.facet.vox.generated.TestbedWireConstants;
+import org.facet.vox.generated.TestbedClient;
+import org.facet.vox.generated.TestbedDispatcher;
+import org.facet.vox.generated.TestbedServiceDescriptor;
 
 /**
  * Hosted-subject lifecycle shell.
@@ -51,7 +44,7 @@ public final class VoxJavaSubject {
             if ("server-listen".equals(mode)) {
                 listenAndServe(options, driver);
             } else if ("server".equals(mode) || "client".equals(mode)) {
-                connectAndDrive(options, driver);
+                connectAndDrive(mode, options, driver);
             } else {
                 throw new IllegalArgumentException("unknown SUBJECT_MODE: " + mode);
             }
@@ -69,13 +62,17 @@ public final class VoxJavaSubject {
             System.out.flush();
             try (Socket socket = listener.accept();
                     VoxConnection connection =
-                            VoxConnection.accept(socket, new ServiceRegistry(), options)) {
+                            VoxConnection.accept(
+                                    socket,
+                                    serviceRegistry(CompletableFuture.completedFuture(null)),
+                                    options)) {
                 await(connection, driver);
             }
         }
     }
 
-    private static void connectAndDrive(ConnectionOptions options, ExecutorService driver)
+    private static void connectAndDrive(
+            String mode, ConnectionOptions options, ExecutorService driver)
             throws Exception {
         String peer = System.getenv("PEER_ADDR");
         if (peer == null || peer.isBlank()) {
@@ -88,44 +85,50 @@ public final class VoxJavaSubject {
         }
         InetSocketAddress address =
                 new InetSocketAddress(peer.substring(0, colon), Integer.parseInt(peer.substring(colon + 1)));
-        try (VoxConnection connection = VoxConnection.connect(address, options)) {
+        boolean bidirectional =
+                "1".equals(System.getenv("SUBJECT_BIDIRECTIONAL"));
+        CompletableFuture<Void> serveReady = bidirectional
+                ? new CompletableFuture<>()
+                : CompletableFuture.completedFuture(null);
+        try (VoxConnection connection =
+                VoxConnection.connect(address, serviceRegistry(serveReady), options)) {
             CompletableFuture<Void> driven = connection.start(driver);
             awaitOpen(connection, driven);
-            String scenario = System.getenv().getOrDefault("CLIENT_SCENARIO", "echo");
-            if (!"echo".equals(scenario)) {
-                throw new IllegalArgumentException(
-                        "unsupported Java CLIENT_SCENARIO: " + scenario);
+            if ("client".equals(mode) || bidirectional) {
+                String scenario = System.getenv().getOrDefault("CLIENT_SCENARIO", "echo");
+                if (!"echo".equals(scenario)) {
+                    throw new IllegalArgumentException(
+                            "unsupported Java CLIENT_SCENARIO: " + scenario);
+                }
+                runEcho(connection);
+                serveReady.complete(null);
             }
-            runEcho(connection);
+            if ("server".equals(mode)) driven.join();
         }
     }
 
     private static void runEcho(VoxConnection connection) throws Exception {
-        MethodDescriptor fixture = JavaFixtureServiceDescriptor.ECHO;
-        MethodDescriptor echo = new MethodDescriptor(
-                TestbedWireConstants.ECHO_METHOD_ID,
-                "echo",
-                fixture.argumentAdapter(),
-                fixture.returnAdapter(),
-                fixture.applicationErrorAdapter(),
-                fixture.responseWireAdapter());
-        ServiceDescriptor service =
-                new ServiceDescriptor(TestbedWireConstants.SERVICE, java.util.List.of(echo));
-        ServiceLane lane = connection.openLane(service, LaneOptions.defaults());
+        ServiceLane lane =
+                connection.openLane(TestbedServiceDescriptor.INSTANCE, LaneOptions.defaults());
         lane.opened().get(5, TimeUnit.SECONDS);
-        byte[] arguments = PhonCodec.encode(
-                JavaFixtureEchoArgs.ADAPTER,
-                new JavaFixtureEchoArgs("hello from client"),
-                PhonLimits.defaults());
-        byte[] response = lane.call(echo, arguments, CallOptions.defaults())
-                .get(5, TimeUnit.SECONDS);
-        VoxResult<String, Void> result = PhonCodec.decode(
-                JavaFixtureEchoResponse.ADAPTER, response, PhonLimits.defaults());
-        if (!result.isSuccess() || !"hello from client".equals(result.success())) {
-            throw new IllegalStateException("echo returned " + result);
+        TestbedClient client = new TestbedClient(lane);
+        for (String message : new String[] {"hello from client", "hello again"}) {
+            String result = client.echo(message).get(5, TimeUnit.SECONDS);
+            if (!message.equals(result)) {
+                throw new IllegalStateException("echo returned " + result);
+            }
+            System.err.println("echo result: " + result);
         }
-        System.err.println("echo result: " + result.success());
         lane.close();
+    }
+
+    private static ServiceRegistry serviceRegistry(CompletableFuture<Void> serveReady) {
+        return new ServiceRegistry().register(new TestbedDispatcher((context, message) -> {
+            return serveReady.thenApply(ignored -> {
+                System.err.println("echo request: " + message);
+                return message;
+            });
+        }));
     }
 
     private static void awaitOpen(

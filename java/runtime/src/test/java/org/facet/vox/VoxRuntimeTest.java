@@ -36,10 +36,56 @@ public final class VoxRuntimeTest {
         registryRejectsDuplicates();
         pendingAndOutboundBoundsFailClosed();
         laneCorrelatesAndDiscardsLateResponses();
+        requestIdsFollowNegotiatedParity();
         laneCancellationAndTimeoutAreTerminal();
+        controlQueueFailureTerminatesLane();
         inboundCallIsExactlyOnce();
         connectionDriverOwnershipAndHandshake();
         System.out.println("VoxRuntimeTest: PASS");
+    }
+
+    private static void requestIdsFollowNegotiatedParity() throws Exception {
+        FakeDriver driver = new FakeDriver();
+        ConnectionOptions options = ConnectionOptions.defaults();
+        MethodDescriptor method = method();
+        ServiceDescriptor service = new ServiceDescriptor("echo", List.of(method));
+        ServiceLane lane =
+                new ServiceLane(
+                        2,
+                        service,
+                        driver,
+                        options,
+                        LaneOptions.defaults(),
+                        LaneState.OPEN,
+                        2,
+                        64);
+        CompletableFuture<byte[]> first =
+                lane.call(method, new byte[0], CallOptions.defaults());
+        ServiceLane.OutboundCall firstCall = driver.take();
+        CompletableFuture<byte[]> second =
+                lane.call(method, new byte[0], CallOptions.defaults());
+        ServiceLane.OutboundCall secondCall = driver.take();
+        check(firstCall.requestId == 2 && secondCall.requestId == 4,
+                "request ids retain even negotiated parity");
+        first.cancel(false);
+        second.cancel(false);
+        lane.close();
+        options.closeOwnedResources();
+    }
+
+    private static void controlQueueFailureTerminatesLane() throws Exception {
+        ConnectionOptions options = ConnectionOptions.defaults();
+        MethodDescriptor method = method();
+        ControlRejectingDriver driver = new ControlRejectingDriver();
+        ServiceLane lane = lane(driver, options, method);
+        CompletableFuture<byte[]> pending =
+                lane.call(method, new byte[0], CallOptions.defaults());
+        ServiceLane.OutboundCall call = driver.take();
+        call.tryCommit();
+        pending.cancel(false);
+        check(lane.state() == LaneState.FAILED,
+                "lost cancel control command fails lane closed");
+        options.closeOwnedResources();
     }
 
     private static void boundsAreFiniteAndPositive() {
@@ -210,11 +256,25 @@ public final class VoxRuntimeTest {
             ConnectionOptions options,
             MethodDescriptor method) {
         ServiceDescriptor service = new ServiceDescriptor("echo", List.of(method));
-        return new ServiceLane(1, service, driver, options, LaneState.OPEN);
+        return new ServiceLane(
+                1,
+                service,
+                driver,
+                options,
+                LaneOptions.defaults(),
+                LaneState.OPEN,
+                1,
+                64);
     }
 
     private static MethodDescriptor method() {
-        return new MethodDescriptor(0x8000_0000_0000_0001L, "echo", ADAPTER, ADAPTER);
+        return new MethodDescriptor(
+                0x8000_0000_0000_0001L,
+                "echo",
+                ADAPTER,
+                ADAPTER,
+                null,
+                ADAPTER);
     }
 
     private static SchemaClosure stringSchema() {
@@ -233,8 +293,11 @@ public final class VoxRuntimeTest {
             submitted.add(call);
             return true;
         }
-        public void cancel(long laneId, long requestId) { cancels.incrementAndGet(); }
-        public void closeLane(long laneId) {}
+        public boolean cancel(long laneId, long requestId) {
+            cancels.incrementAndGet();
+            return true;
+        }
+        public boolean closeLane(long laneId) { return true; }
         ServiceLane.OutboundCall take() throws Exception {
             ServiceLane.OutboundCall value = submitted.poll(1, TimeUnit.SECONDS);
             if (value == null) throw new TimeoutException("no submitted call");
@@ -244,8 +307,24 @@ public final class VoxRuntimeTest {
 
     private static final class RejectingDriver implements ServiceLane.DriverCommands {
         public boolean submit(ServiceLane.OutboundCall call) { return false; }
-        public void cancel(long laneId, long requestId) {}
-        public void closeLane(long laneId) {}
+        public boolean cancel(long laneId, long requestId) { return true; }
+        public boolean closeLane(long laneId) { return true; }
+    }
+
+    private static final class ControlRejectingDriver implements ServiceLane.DriverCommands {
+        private final LinkedBlockingQueue<ServiceLane.OutboundCall> submitted =
+                new LinkedBlockingQueue<>();
+        public boolean submit(ServiceLane.OutboundCall call) {
+            submitted.add(call);
+            return true;
+        }
+        public boolean cancel(long laneId, long requestId) { return false; }
+        public boolean closeLane(long laneId) { return false; }
+        ServiceLane.OutboundCall take() throws Exception {
+            ServiceLane.OutboundCall value = submitted.poll(1, TimeUnit.SECONDS);
+            if (value == null) throw new TimeoutException("no submitted call");
+            return value;
+        }
     }
 
     private static <T extends Throwable> T expectThrows(

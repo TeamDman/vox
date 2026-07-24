@@ -33,6 +33,7 @@ public final class InboundCall {
     public MethodDescriptor method() { return method; }
     public byte[] encodedArguments() { return encodedArguments.clone(); }
     public CallContext context() { return context; }
+    boolean isTerminal() { return terminal.get(); }
 
     public void respond(byte[] encodedResponse) {
         Objects.requireNonNull(encodedResponse, "encodedResponse");

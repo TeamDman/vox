@@ -15,23 +15,6 @@ public final class MethodDescriptor {
             long id,
             String name,
             PhonAdapter<?> argumentAdapter,
-            PhonAdapter<?> returnAdapter) {
-        this(id, name, argumentAdapter, returnAdapter, null);
-    }
-
-    public MethodDescriptor(
-            long id,
-            String name,
-            PhonAdapter<?> argumentAdapter,
-            PhonAdapter<?> returnAdapter,
-            PhonAdapter<?> applicationErrorAdapter) {
-        this(id, name, argumentAdapter, returnAdapter, applicationErrorAdapter, returnAdapter);
-    }
-
-    public MethodDescriptor(
-            long id,
-            String name,
-            PhonAdapter<?> argumentAdapter,
             PhonAdapter<?> returnAdapter,
             PhonAdapter<?> applicationErrorAdapter,
             PhonAdapter<?> responseWireAdapter) {

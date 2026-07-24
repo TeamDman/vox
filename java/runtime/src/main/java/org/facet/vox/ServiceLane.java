@@ -14,8 +14,8 @@ import java.util.concurrent.atomic.AtomicReference;
 public final class ServiceLane implements AutoCloseable {
     interface DriverCommands {
         boolean submit(OutboundCall call);
-        void cancel(long laneId, long requestId);
-        void closeLane(long laneId);
+        boolean cancel(long laneId, long requestId);
+        boolean closeLane(long laneId);
     }
 
     static final class OutboundCall {
@@ -90,8 +90,11 @@ public final class ServiceLane implements AutoCloseable {
     private final ServiceDescriptor service;
     private final DriverCommands driver;
     private final ConnectionOptions connectionOptions;
+    private final LaneOptions laneOptions;
     private final AtomicReference<LaneState> state;
-    private final AtomicLong nextRequestId = new AtomicLong(1);
+    private final AtomicLong nextRequestId;
+    private final AtomicBoolean requestIdsExhausted = new AtomicBoolean();
+    private volatile int peerMaxPendingRequests;
     private final Map<Long, Pending> pending = new ConcurrentHashMap<>();
     private final CompletableFuture<Void> opened = new CompletableFuture<>();
 
@@ -100,12 +103,18 @@ public final class ServiceLane implements AutoCloseable {
             ServiceDescriptor service,
             DriverCommands driver,
             ConnectionOptions connectionOptions,
-            LaneState initialState) {
+            LaneOptions laneOptions,
+            LaneState initialState,
+            long firstRequestId,
+            int peerMaxPendingRequests) {
         this.id = id;
         this.service = service;
         this.driver = driver;
         this.connectionOptions = connectionOptions;
+        this.laneOptions = laneOptions;
         this.state = new AtomicReference<>(initialState);
+        this.nextRequestId = new AtomicLong(firstRequestId);
+        this.peerMaxPendingRequests = peerMaxPendingRequests;
     }
 
     public CompletableFuture<byte[]> call(
@@ -121,11 +130,17 @@ public final class ServiceLane implements AutoCloseable {
             return CompletableFuture.failedFuture(
                     new VoxException("lane is not open: " + state.get()));
         }
-        if (pending.size() >= connectionOptions.maxPendingRequests()) {
+        if (pending.size() >= Math.min(
+                connectionOptions.maxPendingRequests(), peerMaxPendingRequests)) {
             return CompletableFuture.failedFuture(
                     new VoxException("pending request bound exceeded"));
         }
-        long requestId = allocateRequestId();
+        final long requestId;
+        try {
+            requestId = allocateRequestId();
+        } catch (IllegalStateException exhausted) {
+            return CompletableFuture.failedFuture(new VoxException(exhausted.getMessage()));
+        }
         PendingFuture future = new PendingFuture(this, requestId);
         OutboundCall outbound = new OutboundCall(
                 this, id, requestId, method, encodedArguments.clone(), options);
@@ -151,8 +166,15 @@ public final class ServiceLane implements AutoCloseable {
 
     long id() { return id; }
     ServiceDescriptor service() { return service; }
+    LaneOptions options() { return laneOptions; }
 
-    void markOpen() {
+    void markOpen(int peerMaxPendingRequests) {
+        if (peerMaxPendingRequests <= 0) {
+            terminate(new VoxException("peer max concurrent requests must be positive"),
+                    LaneState.FAILED);
+            return;
+        }
+        this.peerMaxPendingRequests = peerMaxPendingRequests;
         if (state.compareAndSet(LaneState.OPENING, LaneState.OPEN)) {
             opened.complete(null);
         }
@@ -170,10 +192,19 @@ public final class ServiceLane implements AutoCloseable {
         }
     }
 
-    private long allocateRequestId() {
+    private synchronized long allocateRequestId() {
+        if (requestIdsExhausted.get()) {
+            throw new IllegalStateException("request id space exhausted");
+        }
         for (;;) {
-            long candidate = nextRequestId.getAndIncrement();
+            long candidate = nextRequestId.getAndAdd(2);
+            if (candidate == -1L || candidate == -2L) {
+                requestIdsExhausted.set(true);
+            }
             if (candidate != 0 && !pending.containsKey(candidate)) return candidate;
+            if (requestIdsExhausted.get()) {
+                throw new IllegalStateException("request id space exhausted");
+            }
         }
     }
 
@@ -193,7 +224,9 @@ public final class ServiceLane implements AutoCloseable {
                 new TimeoutException("vox request " + Long.toUnsignedString(requestId)
                         + " exceeded idle timeout"));
         if (removed.call.isCommitted()) {
-            driver.cancel(id, requestId);
+            if (!driver.cancel(id, requestId)) {
+                terminate(new VoxException("outbound control queue is full"), LaneState.FAILED);
+            }
         }
     }
 
@@ -202,7 +235,9 @@ public final class ServiceLane implements AutoCloseable {
         if (removed == null) return;
         cancelTimeout(removed);
         if (!removed.call.cancelBeforeCommit()) {
-            driver.cancel(id, requestId);
+            if (!driver.cancel(id, requestId)) {
+                terminate(new VoxException("outbound control queue is full"), LaneState.FAILED);
+            }
         }
     }
 

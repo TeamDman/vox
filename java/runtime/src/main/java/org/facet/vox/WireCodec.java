@@ -130,18 +130,24 @@ final class WireCodec {
         }
     }
 
-    Value laneOpen(String service, boolean odd) {
-        Map<String, Value> metadata = new LinkedHashMap<>();
+    Value laneOpen(String service, Map<String, String> configuredMetadata) {
+        Map<String, Value> metadata = stringMetadata(configuredMetadata);
         metadata.put("vox-service", Value.string(service));
         return enumValue("LaneOpen", map(
-                "connection_settings", connectionSettings(odd),
+                "connection_settings", connectionSettings(true),
                 "metadata", Value.map(metadata)));
     }
 
-    Value laneAccept(boolean odd) {
+    Value laneAccept() {
         return enumValue("LaneAccept", map(
-                "connection_settings", connectionSettings(odd),
+                "connection_settings", connectionSettings(false),
                 "metadata", Value.nullValue()));
+    }
+
+    Value laneReject(String reason) {
+        return enumValue("LaneReject", map(
+                "metadata", Value.map(Map.of(
+                        "vox-lane-reject-reason", Value.string(reason)))));
     }
 
     Value schemaMessage(long methodId, Direction direction, byte[] schemas) {
@@ -154,11 +160,14 @@ final class WireCodec {
     }
 
     Value requestCall(
-            long requestId, long methodId, byte[] arguments) {
+            long requestId,
+            long methodId,
+            byte[] arguments,
+            Map<String, String> metadata) {
         Value call = map(
                 "method_id", unsigned(methodId),
                 "channels", Value.list(List.of()),
-                "metadata", Value.nullValue(),
+                "metadata", Value.map(stringMetadata(metadata)),
                 "args", Value.bytes(arguments),
                 "schemas", Value.list(List.of()));
         return enumValue("RequestMessage", map(
@@ -174,6 +183,15 @@ final class WireCodec {
         return enumValue("RequestMessage", map(
                 "id", unsigned(requestId),
                 "body", enumValue("Cancel", map("metadata", Value.nullValue()))));
+    }
+
+    Value requestResponse(long requestId, byte[] response) {
+        return enumValue("RequestMessage", map(
+                "id", unsigned(requestId),
+                "body", enumValue("Response", map(
+                        "metadata", Value.nullValue(),
+                        "ret", Value.bytes(response),
+                        "schemas", Value.list(List.of())))));
     }
 
     byte[] transcode(
@@ -287,6 +305,15 @@ final class WireCodec {
         java.util.ArrayList<Value> result = new java.util.ArrayList<>(bytes.length);
         for (byte value : bytes) result.add(Value.unsigned(Byte.toUnsignedInt(value)));
         return Value.list(result);
+    }
+
+    private static LinkedHashMap<String, Value> stringMetadata(
+            Map<String, String> metadata) {
+        LinkedHashMap<String, Value> result = new LinkedHashMap<>();
+        for (Map.Entry<String, String> entry : metadata.entrySet()) {
+            result.put(entry.getKey(), Value.string(entry.getValue()));
+        }
+        return result;
     }
 
     private static long u32(byte[] bytes, int offset) {

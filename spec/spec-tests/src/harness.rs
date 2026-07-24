@@ -4440,6 +4440,16 @@ pub async fn accept_subject_spec(
     }
 }
 
+pub async fn accept_bidirectional_subject_spec(
+    spec: SubjectSpec,
+) -> Result<(TestbedClient, Child, ConnectionHandle), String> {
+    if spec.transport != SubjectTestTransport::Tcp {
+        return Err("bidirectional hosted-subject proof currently requires TCP".to_string());
+    }
+    let cmd = subject_cmd_for_language(spec.language);
+    accept_subject_tcp_with_env(&cmd, &[("SUBJECT_BIDIRECTIONAL", "1")]).await
+}
+
 /// Accept a subject over TCP given a custom command string.
 pub async fn accept_subject_cmd_tcp(
     cmd: &str,
@@ -4978,6 +4988,13 @@ where
 }
 
 async fn accept_subject_tcp(cmd: &str) -> Result<(TestbedClient, Child, ConnectionHandle), String> {
+    accept_subject_tcp_with_env(cmd, &[]).await
+}
+
+async fn accept_subject_tcp_with_env(
+    cmd: &str,
+    extra_env: &[(&str, &str)],
+) -> Result<(TestbedClient, Child, ConnectionHandle), String> {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .map_err(|e| format!("bind: {e}"))?;
@@ -4985,7 +5002,7 @@ async fn accept_subject_tcp(cmd: &str) -> Result<(TestbedClient, Child, Connecti
         .local_addr()
         .map_err(|e| format!("local_addr: {e}"))?;
 
-    let mut child = spawn_subject_cmd_with_env(cmd, &addr.to_string(), &[]).await?;
+    let mut child = spawn_subject_cmd_with_env(cmd, &addr.to_string(), extra_env).await?;
     let pid = child.id().unwrap_or_default();
     let wait_started = tokio::time::Instant::now();
     let wait_deadline = wait_started + Duration::from_secs(5);
@@ -5038,6 +5055,7 @@ async fn accept_subject_tcp(cmd: &str) -> Result<(TestbedClient, Child, Connecti
     stream.set_nodelay(true).unwrap();
 
     let client = match acceptor_transport(StreamLink::tcp(stream))
+        .on_lane(TestbedDispatcher::new(TestbedService::new()))
         .establish::<TestbedClient>()
         .await
     {

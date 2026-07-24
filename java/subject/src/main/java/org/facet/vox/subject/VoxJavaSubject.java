@@ -4,19 +4,29 @@ import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.time.Duration;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import org.facet.phon.PhonCodec;
+import org.facet.phon.PhonLimits;
+import org.facet.vox.CallOptions;
 import org.facet.vox.ConnectionOptions;
 import org.facet.vox.ConnectionState;
 import org.facet.vox.LaneOptions;
 import org.facet.vox.ServiceLane;
 import org.facet.vox.ServiceRegistry;
 import org.facet.vox.VoxConnection;
+import org.facet.vox.VoxResult;
+import org.facet.vox.generated.MathError;
 import org.facet.vox.generated.TestbedClient;
 import org.facet.vox.generated.TestbedDispatcher;
+import org.facet.vox.generated.TestbedEchoResponse;
+import org.facet.vox.generated.TestbedHandler;
 import org.facet.vox.generated.TestbedServiceDescriptor;
 
 /**
@@ -96,11 +106,7 @@ public final class VoxJavaSubject {
             awaitOpen(connection, driven);
             if ("client".equals(mode) || bidirectional) {
                 String scenario = System.getenv().getOrDefault("CLIENT_SCENARIO", "echo");
-                if (!"echo".equals(scenario)) {
-                    throw new IllegalArgumentException(
-                            "unsupported Java CLIENT_SCENARIO: " + scenario);
-                }
-                runEcho(connection);
+                runClientScenario(connection, scenario);
                 serveReady.complete(null);
             }
             if ("server".equals(mode)) driven.join();
@@ -122,12 +128,98 @@ public final class VoxJavaSubject {
         lane.close();
     }
 
+    private static void runClientScenario(
+            VoxConnection connection, String scenario) throws Exception {
+        switch (scenario) {
+            case "echo" -> runEcho(connection);
+            case "cancel_timeout" -> runCancelTimeout(connection);
+            case "invalid_payload" -> runInvalidPayload(connection);
+            case "divide_error" -> runDivideError(connection);
+            default -> throw new IllegalArgumentException(
+                    "unsupported Java CLIENT_SCENARIO: " + scenario);
+        }
+    }
+
+    private static ServiceLane openTestbed(VoxConnection connection) throws Exception {
+        ServiceLane lane =
+                connection.openLane(TestbedServiceDescriptor.INSTANCE, LaneOptions.defaults());
+        lane.opened().get(5, TimeUnit.SECONDS);
+        return lane;
+    }
+
+    private static void runCancelTimeout(VoxConnection connection) throws Exception {
+        try (ServiceLane lane = openTestbed(connection)) {
+            try {
+                new TestbedClient(lane)
+                        .echo(
+                                "cancel-me",
+                                new CallOptions(Duration.ofMillis(100), Map.of()))
+                        .get(3, TimeUnit.SECONDS);
+                throw new AssertionError("cancel-me unexpectedly completed");
+            } catch (ExecutionException failure) {
+                if (!hasCause(failure, TimeoutException.class)) throw failure;
+            }
+            Thread.sleep(100);
+        }
+    }
+
+    private static void runInvalidPayload(VoxConnection connection) throws Exception {
+        try (ServiceLane lane = openTestbed(connection)) {
+            byte[] response = lane.call(
+                            TestbedServiceDescriptor.ECHO,
+                            new byte[] {0},
+                            CallOptions.defaults())
+                    .get(3, TimeUnit.SECONDS);
+            VoxResult<String, Void> result = PhonCodec.decode(
+                    TestbedEchoResponse.ADAPTER, response, PhonLimits.defaults());
+            if (result.kind() != VoxResult.Kind.INVALID_PAYLOAD) {
+                throw new AssertionError("expected INVALID_PAYLOAD, got " + result);
+            }
+        }
+    }
+
+    private static void runDivideError(VoxConnection connection) throws Exception {
+        try (ServiceLane lane = openTestbed(connection)) {
+            VoxResult<Long, MathError> result =
+                    new TestbedClient(lane).divide(10, 0).get(3, TimeUnit.SECONDS);
+            if (result.kind() != VoxResult.Kind.APPLICATION_ERROR
+                    || result.applicationError() != MathError.DIVISION_BY_ZERO) {
+                throw new AssertionError("unexpected divide result " + result);
+            }
+        }
+    }
+
+    private static boolean hasCause(Throwable failure, Class<? extends Throwable> type) {
+        for (Throwable current = failure; current != null; current = current.getCause()) {
+            if (type.isInstance(current)) return true;
+        }
+        return false;
+    }
+
     private static ServiceRegistry serviceRegistry(CompletableFuture<Void> serveReady) {
-        return new ServiceRegistry().register(new TestbedDispatcher((context, message) -> {
-            return serveReady.thenApply(ignored -> {
-                System.err.println("echo request: " + message);
-                return message;
-            });
+        return new ServiceRegistry().register(new TestbedDispatcher(new TestbedHandler() {
+            @Override
+            public CompletableFuture<String> echo(
+                    org.facet.vox.CallContext context, String message) {
+                if ("disconnect-pending".equals(message)) {
+                    return new CompletableFuture<>();
+                }
+                return serveReady.thenApply(ignored -> {
+                    System.err.println("echo request: " + message);
+                    return message;
+                });
+            }
+
+            @Override
+            public CompletableFuture<VoxResult<Long, MathError>> divide(
+                    org.facet.vox.CallContext context, long dividend, long divisor) {
+                if (divisor == 0) {
+                    return CompletableFuture.completedFuture(
+                            VoxResult.applicationError(MathError.DIVISION_BY_ZERO));
+                }
+                return CompletableFuture.completedFuture(
+                        VoxResult.success(dividend / divisor));
+            }
         }));
     }
 

@@ -351,7 +351,7 @@ fn codegen_java(workspace_root: &std::path::Path) -> Result<(), Box<dyn std::err
     std::fs::create_dir_all(&out_dir)?;
     let mut expected = vox_codegen::targets::java::generate_service(&java_fixture_service())?;
     expected.extend(vox_codegen::targets::java::generate_wire_schemas()?);
-    expected.extend(java_testbed_echo_files()?);
+    expected.extend(java_testbed_unary_files()?);
     expected.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
     for file in expected {
         write_if_changed(&out_dir.join(file.relative_path), file.source)?;
@@ -365,7 +365,7 @@ fn check_codegen_java(workspace_root: &std::path::Path) -> Result<(), Box<dyn st
     let out_dir = java_generated_dir(workspace_root);
     let mut generated = vox_codegen::targets::java::generate_service(&java_fixture_service())?;
     generated.extend(vox_codegen::targets::java::generate_wire_schemas()?);
-    generated.extend(java_testbed_echo_files()?);
+    generated.extend(java_testbed_unary_files()?);
     let expected: BTreeMap<_, _> = generated
         .into_iter()
         .map(|file| (file.relative_path, file.source))
@@ -406,21 +406,27 @@ fn check_codegen_java(workspace_root: &std::path::Path) -> Result<(), Box<dyn st
     Ok(())
 }
 
-fn java_testbed_echo_files()
+fn java_testbed_unary_files()
 -> Result<Vec<vox_codegen::targets::java::JavaFile>, Box<dyn std::error::Error>> {
     let service = spec_proto::testbed_service_descriptor();
-    let echo = service
-        .methods
-        .iter()
-        .find(|method| method.method_name == "echo")
-        .ok_or("Testbed.echo is absent from the Rust service descriptor")?;
-    let methods = Box::leak(vec![*echo].into_boxed_slice());
-    let echo_service = vox_types::ServiceDescriptor {
+    let methods = ["echo", "divide"]
+        .into_iter()
+        .map(|name| {
+            service
+                .methods
+                .iter()
+                .find(|method| method.method_name == name)
+                .copied()
+                .ok_or_else(|| format!("Testbed.{name} is absent from the Rust service descriptor"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let methods = Box::leak(methods.into_boxed_slice());
+    let unary_service = vox_types::ServiceDescriptor {
         service_name: service.service_name,
         methods,
-        doc: Some("Rust-authoritative Testbed.echo Java wire slice"),
+        doc: Some("Rust-authoritative Testbed Java unary wire slice"),
     };
-    let mut files = vox_codegen::targets::java::generate_service(&echo_service)?;
+    let mut files = vox_codegen::targets::java::generate_service(&unary_service)?;
     // `PrimitiveAdapters` is shared with the fixture service and generated identically.
     files.retain(|file| file.relative_path != "PrimitiveAdapters.java");
     Ok(files)

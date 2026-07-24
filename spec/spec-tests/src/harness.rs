@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::path::Path;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use facet_value::{VObject, VString, Value};
@@ -101,6 +102,16 @@ use vox_websocket::WsLink;
 
 const SUBJECT_WAIT_HEARTBEAT: Duration = Duration::from_millis(500);
 const SPEC_RUNTIME_STACK_BYTES: usize = 32 * 1024 * 1024;
+static CANCEL_ECHO_STARTED: AtomicBool = AtomicBool::new(false);
+static CANCEL_ECHO_DROPPED: AtomicBool = AtomicBool::new(false);
+
+struct CancelEchoDropSignal;
+
+impl Drop for CancelEchoDropSignal {
+    fn drop(&mut self) {
+        CANCEL_ECHO_DROPPED.store(true, Ordering::SeqCst);
+    }
+}
 /// Spawn a task that catches panics and makes them loud.
 ///
 /// If the spawned future panics, the panic message is printed to stderr
@@ -3257,6 +3268,11 @@ impl Testbed for TestbedService {
         if std::env::var_os("VOX_DLOG").is_some() {
             eprintln!("[harness] Testbed.echo received {message:?}");
         }
+        if message == "cancel-me" {
+            CANCEL_ECHO_STARTED.store(true, Ordering::SeqCst);
+            let _drop_signal = CancelEchoDropSignal;
+            return std::future::pending::<String>().await;
+        }
         message
     }
 
@@ -4717,6 +4733,20 @@ pub fn run_subject_client_scenario(spec: SubjectSpec, scenario: &str) {
         }
     });
     result.unwrap();
+}
+
+pub fn run_subject_cancel_timeout(spec: SubjectSpec) {
+    CANCEL_ECHO_STARTED.store(false, Ordering::SeqCst);
+    CANCEL_ECHO_DROPPED.store(false, Ordering::SeqCst);
+    run_subject_client_scenario(spec, "cancel_timeout");
+    assert!(
+        CANCEL_ECHO_STARTED.load(Ordering::SeqCst),
+        "Rust cancel sentinel handler never started"
+    );
+    assert!(
+        CANCEL_ECHO_DROPPED.load(Ordering::SeqCst),
+        "committed Java RequestCancel did not abort/drop the Rust handler future"
+    );
 }
 
 async fn run_subject_client_scenario_tcp(

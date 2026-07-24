@@ -23,6 +23,16 @@ public final class TestbedDispatcher implements ServiceDispatcher {
           }
         });
       }
+      if (call.method().id() == TestbedServiceDescriptor.DIVIDE.id()) {
+        TestbedDivideArgs args = PhonCodec.decode(TestbedDivideArgs.ADAPTER, call.encodedArguments(), PhonLimits.defaults());
+        return handler.divide(call.context(), args.dividend(), args.divisor()).thenAccept(value -> {
+          try {
+            call.respond(PhonCodec.encode(TestbedDivideResponse.ADAPTER, value, PhonLimits.defaults()));
+          } catch (PhonException error) {
+            throw new CompletionException(error);
+          }
+        });
+      }
       return CompletableFuture.failedFuture(new VoxException("unknown method " + call.method().id()));
     } catch (Exception error) {
       return CompletableFuture.failedFuture(error);

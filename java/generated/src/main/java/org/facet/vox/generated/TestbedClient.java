@@ -27,6 +27,23 @@ public final class TestbedClient {
       return CompletableFuture.failedFuture(error);
     }
   }
+  public CompletableFuture<VoxResult<Long, MathError>> divide(long dividend, long divisor) { return divide(dividend, divisor, CallOptions.defaults()); }
+  public CompletableFuture<VoxResult<Long, MathError>> divide(long dividend, long divisor, CallOptions options) {
+    try {
+      byte[] encoded = PhonCodec.encode(TestbedDivideArgs.ADAPTER, new TestbedDivideArgs(dividend, divisor), PhonLimits.defaults());
+      return lane.call(TestbedServiceDescriptor.DIVIDE, encoded, options).thenApply(bytes -> {
+        try {
+          VoxResult<Long, MathError> result = PhonCodec.decode(TestbedDivideResponse.ADAPTER, bytes, PhonLimits.defaults());
+          if (result.isInfrastructureError()) throw remoteFailure(result);
+          return result;
+        } catch (PhonException error) {
+          throw new CompletionException(error);
+        }
+      });
+    } catch (PhonException error) {
+      return CompletableFuture.failedFuture(error);
+    }
+  }
   private static CompletionException remoteFailure(VoxResult<?, ?> result) {
 String detail = result.detail() == null ? "" : ": " + result.detail();
 return new CompletionException(new VoxException("remote Vox error " + result.kind() + detail));

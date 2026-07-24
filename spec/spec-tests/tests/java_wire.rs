@@ -2,8 +2,10 @@
 mod testbed;
 
 use spec_tests::harness::{
-    SubjectLanguage, SubjectSpec, accept_bidirectional_subject_spec, accept_subject_spec, run_async,
+    SubjectLanguage, SubjectSpec, accept_bidirectional_subject_spec, accept_subject_spec,
+    run_async, run_subject_cancel_timeout, run_subject_client_scenario,
 };
+use std::time::Duration;
 
 #[test]
 fn java_subject_calls_rust_echo_over_tcp() {
@@ -44,6 +46,60 @@ fn rust_calls_java_subject_echo_over_tcp() {
         }
         child.kill().await.ok();
         Ok::<_, String>(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn committed_java_timeout_cancels_rust_handler() {
+    run_subject_cancel_timeout(SubjectSpec::tcp(SubjectLanguage::Java));
+}
+
+#[test]
+fn invalid_java_payload_fails_before_rust_dispatch() {
+    run_subject_client_scenario(SubjectSpec::tcp(SubjectLanguage::Java), "invalid_payload");
+}
+
+#[test]
+fn application_error_result_round_trips_both_directions() {
+    run_subject_client_scenario(SubjectSpec::tcp(SubjectLanguage::Java), "divide_error");
+    testbed::run_rpc_user_error_roundtrip(SubjectSpec::tcp(SubjectLanguage::Java));
+}
+
+#[test]
+fn disconnect_completes_pending_call_and_java_subject_exits() {
+    run_async(async {
+        let (client, mut child, connection) =
+            accept_subject_spec(SubjectSpec::tcp(SubjectLanguage::Java)).await?;
+        {
+            let pending = client.echo("disconnect-pending".to_string());
+            tokio::pin!(pending);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            connection
+                .shutdown()
+                .map_err(|error| format!("connection shutdown: {error:?}"))?;
+            match tokio::time::timeout(Duration::from_secs(2), &mut pending).await {
+                Ok(Err(_)) => {}
+                Ok(Ok(value)) => {
+                    return Err(format!("pending call unexpectedly returned {value:?}"));
+                }
+                Err(_) => {
+                    return Err("pending call remained stranded after disconnect".to_string());
+                }
+            }
+        }
+        drop(client);
+        drop(connection);
+        match tokio::time::timeout(Duration::from_secs(3), child.wait()).await {
+            Ok(Ok(status)) if status.success() => Ok(()),
+            Ok(Ok(status)) => Err(format!("Java subject exited with {status}")),
+            Ok(Err(error)) => Err(format!("waiting for Java subject: {error}")),
+            Err(_) => {
+                let _ = child.start_kill();
+                let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+                Err("Java subject remained alive after disconnect".to_string())
+            }
+        }
     })
     .unwrap();
 }

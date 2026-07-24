@@ -8,4 +8,5 @@ import org.facet.vox.VoxResult;
 
 public interface TestbedHandler {
   CompletableFuture<String> echo(CallContext context, String message);
+  CompletableFuture<VoxResult<Long, MathError>> divide(CallContext context, long dividend, long divisor);
 }

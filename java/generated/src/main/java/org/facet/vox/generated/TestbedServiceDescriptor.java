@@ -8,6 +8,7 @@ import org.facet.vox.ServiceDescriptor;
 
 public final class TestbedServiceDescriptor {
   public static final MethodDescriptor ECHO = new MethodDescriptor(0x880bc4eee23574beL, "echo", TestbedEchoArgs.ADAPTER, PrimitiveAdapters.STRING, null, TestbedEchoResponse.ADAPTER);
-  public static final ServiceDescriptor INSTANCE = new ServiceDescriptor("Testbed", List.of(ECHO));
+  public static final MethodDescriptor DIVIDE = new MethodDescriptor(0xfb68d9318f830875L, "divide", TestbedDivideArgs.ADAPTER, PrimitiveAdapters.I64, MathError.ADAPTER, TestbedDivideResponse.ADAPTER);
+  public static final ServiceDescriptor INSTANCE = new ServiceDescriptor("Testbed", List.of(ECHO, DIVIDE));
   private TestbedServiceDescriptor() {}
 }

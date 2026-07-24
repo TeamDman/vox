@@ -17,11 +17,21 @@ public final class PhonConformanceTest {
         Path repository=Path.of(args.length==0?".":args[0]).toAbsolutePath().normalize();
         primitiveIdsMatchRust();
         acceptedSchemaCorpusRoundTrips(repository);
+        schemaBundlesRoundTrip(repository);
         valueCorpusRoundTrips(repository);
         typedCodecRoundTrips();
         compatibilityPlansEagerly();
         malformedAndLimitsFail(repository);
         System.out.println("Phon Java conformance passed ("+assertions+" assertions)");
+    }
+
+    private static void schemaBundlesRoundTrip(Path repository)throws Exception{
+        byte[]point=Files.readAllBytes(repository.resolve("phon/conformance/cases/point/Point.phon"));
+        SchemaClosure original=SchemaClosure.of(SchemaWire.decode(point,PhonLimits.DEFAULT));
+        SchemaClosure decoded=SchemaClosure.fromBundleBytes(original.bundleBytes(),PhonLimits.DEFAULT);
+        equal(original.id(),decoded.id(),"schema bundle root");
+        same(original.canonicalBytes(),decoded.canonicalBytes(),"schema bundle canonical root");
+        same(original.bundleBytes(),decoded.bundleBytes(),"schema bundle bytes");
     }
 
     private static void valueCorpusRoundTrips(Path repository)throws Exception{

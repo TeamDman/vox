@@ -26,4 +26,22 @@ public final class PhonCodec {
         decoder.requireFinished();
         return value;
     }
+
+    public static byte[] encodeValue(
+            SchemaClosure schema, Value value, PhonLimits limits) throws PhonException {
+        return CompactValues.encode(schema, value, limits);
+    }
+
+    public static Value decodeCompatibleValue(
+            SchemaClosure writer, SchemaClosure reader, byte[] bytes, PhonLimits limits)
+            throws PhonException {
+        Value source = decodeValue(writer, bytes, limits);
+        return CompatibilityPlan.plan(writer, reader, limits).translate(source);
+    }
+
+    public static byte[] transcode(
+            SchemaClosure writer, SchemaClosure reader, byte[] bytes, PhonLimits limits)
+            throws PhonException {
+        return encodeValue(reader, decodeCompatibleValue(writer, reader, bytes, limits), limits);
+    }
 }

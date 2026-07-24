@@ -32,6 +32,7 @@ final class CompactValues {
         if(k instanceof Schema.OptionKind)return d.readPresence()?decodeRef(c,((Schema.OptionKind)k).element(),d,depth):Value.nullValue();
         if(k instanceof Schema.ArrayKind){Schema.ArrayKind x=(Schema.ArrayKind)k;long n=1;for(long dim:x.dimensions()){try{n=Math.multiplyExact(n,dim);}catch(ArithmeticException e){throw new PhonException(PhonException.Kind.LIMIT,"array dimensions overflow");}}if(n>Integer.MAX_VALUE)throw new PhonException(PhonException.Kind.LIMIT,"array too large");List<Value>v=new ArrayList<>();for(int q=0;q<(int)n;q++)v.add(decodeRef(c,x.element(),d,depth));return Value.list(v);}
         if(k instanceof Schema.EnumKind){long index=d.readU32();for(Schema.Variant v:((Schema.EnumKind)k).variants())if(Integer.toUnsignedLong(v.index())==index)return Value.enumValue(v.name(),decodePayload(c,v.payload(),d,depth));throw new PhonException(PhonException.Kind.MALFORMED,"invalid enum discriminant "+index,d.position(),null);}
+        if(k instanceof Schema.DynamicKind)return d.readDynamic();
         throw new PhonException(PhonException.Kind.DECODE,"unsupported compact kind");
     }
     private static Value decodePayload(SchemaClosure c,Schema.Payload p,PhonDecoder d,int depth)throws PhonException{
@@ -60,6 +61,7 @@ final class CompactValues {
         if(k instanceof Schema.MapKind){require(v,Value.Type.MAP);Schema.MapKind x=(Schema.MapKind)k;e.writeCount(v.asMap().size());for(Map.Entry<String,Value>q:v.asMap().entrySet()){encodeRef(c,x.key(),Value.string(q.getKey()),e,depth);encodeRef(c,x.value(),q.getValue(),e,depth);}return;}
         if(k instanceof Schema.OptionKind){boolean present=v.type()!=Value.Type.NULL;e.writePresence(present);if(present)encodeRef(c,((Schema.OptionKind)k).element(),v,e,depth);return;}
         if(k instanceof Schema.EnumKind){require(v,Value.Type.ENUM);for(Schema.Variant x:((Schema.EnumKind)k).variants())if(x.name().equals(v.asEnum().variant())){e.writeU32(Integer.toUnsignedLong(x.index()));encodePayload(c,x.payload(),v.asEnum().payload(),e,depth);return;}throw new PhonException(PhonException.Kind.ENCODE,"unknown enum variant");}
+        if(k instanceof Schema.DynamicKind){e.writeDynamic(v);return;}
         throw new PhonException(PhonException.Kind.ENCODE,"unsupported compact kind");
     }
     private static void encodePayload(SchemaClosure c,Schema.Payload p,Value v,PhonEncoder e,int depth)throws PhonException{

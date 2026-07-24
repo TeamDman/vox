@@ -34,6 +34,15 @@ public final class CompatibilityPlan {
         return PhonCodec.decode(readerAdapter,CompactValues.encode(reader,translated,limits),limits);
     }
 
+    public Value translate(Value source) throws PhonException {
+        Translator translator = new Translator(writer, reader, planningLimits);
+        return translator.translate(
+                Schema.Ref.concrete(writer.id()),
+                Schema.Ref.concrete(reader.id()),
+                source,
+                "$");
+    }
+
     private static final class Planner {
         final SchemaClosure w,r;final PhonLimits limits;int work;final Set<String>seen=new HashSet<>();
         Planner(SchemaClosure w,SchemaClosure r,PhonLimits l){this.w=w;this.r=r;this.limits=l;}
@@ -43,6 +52,7 @@ public final class CompatibilityPlan {
             if(wk instanceof Schema.PrimitiveKind&&rk instanceof Schema.PrimitiveKind){
                 if(((Schema.PrimitiveKind)wk).primitive()!=((Schema.PrimitiveKind)rk).primitive())bad(path,"primitive mismatch");return;
             }
+            if(wk instanceof Schema.DynamicKind&&rk instanceof Schema.DynamicKind)return;
             if(wk instanceof Schema.RecordKind&&rk instanceof Schema.RecordKind){
                 Map<String,Schema.Field>wf=fields(((Schema.RecordKind)wk).fields());
                 for(Schema.Field f:((Schema.RecordKind)rk).fields()){Schema.Field from=wf.get(f.name());if(from==null){if(f.required())bad(path+"."+f.name(),"required reader field absent from writer");}else check(from.schema(),f.schema(),path+"."+f.name());}return;
@@ -76,6 +86,7 @@ public final class CompatibilityPlan {
             if(++work>limits.planningWork())throw new PhonException(PhonException.Kind.LIMIT,"translation exceeds planningWork");
             Schema.Kind wk=w.resolve(wr).kind(),rk=r.resolve(rr).kind();
             if(wk instanceof Schema.PrimitiveKind)return value;
+            if(wk instanceof Schema.DynamicKind&&rk instanceof Schema.DynamicKind)return value;
             if(wk instanceof Schema.RecordKind){Map<String,Value>out=new LinkedHashMap<>(),input=value.asMap();Map<String,Schema.Field>wf=fields(((Schema.RecordKind)wk).fields());for(Schema.Field f:((Schema.RecordKind)rk).fields()){Schema.Field source=wf.get(f.name());out.put(f.name(),source==null?Value.nullValue():translate(source.schema(),f.schema(),input.get(f.name()),path+"."+f.name()));}return Value.map(out);}
             if(wk instanceof Schema.TupleKind){List<Value>out=new ArrayList<>(),in=value.asList();List<Schema.Ref>a=((Schema.TupleKind)wk).elements(),b=((Schema.TupleKind)rk).elements();for(int i=0;i<a.size();i++)out.add(translate(a.get(i),b.get(i),in.get(i),path+"["+i+"]"));return Value.list(out);}
             if(wk instanceof Schema.ListKind){List<Value>out=new ArrayList<>();for(Value x:value.asList())out.add(translate(((Schema.ListKind)wk).element(),((Schema.ListKind)rk).element(),x,path+"[]"));return Value.list(out);}

@@ -574,6 +574,30 @@ fn java_source_roots(
     Ok(sources)
 }
 
+fn java_runtime_sources(
+    workspace_root: &std::path::Path,
+) -> Result<Vec<std::path::PathBuf>, Box<dyn std::error::Error>> {
+    let mut sources = java_source_roots(workspace_root, false)?;
+    let generated = java_generated_dir(workspace_root);
+    // These two projections are Rust-derived protocol support required by
+    // WireCodec. Generated application services remain consumer artifacts.
+    sources.extend([
+        generated.join("HandshakeWireSchemas.java"),
+        generated.join("MessageWireSchemas.java"),
+    ]);
+    for source in &sources {
+        if !source.is_file() {
+            return Err(format!(
+                "Java runtime support source is absent: {}; run `cargo xtask codegen --java`",
+                source.display()
+            )
+            .into());
+        }
+    }
+    sources.sort();
+    Ok(sources)
+}
+
 fn test_java(workspace_root: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     check_codegen_java(workspace_root)?;
     let javac = java_tool("javac")?;
@@ -651,7 +675,7 @@ fn package_java(workspace_root: &std::path::Path) -> Result<(), Box<dyn std::err
     compile_java(
         &javac,
         &classes,
-        &java_source_roots(workspace_root, false)?,
+        &java_runtime_sources(workspace_root)?,
         None,
     )?;
     let manifest = target.join("runtime-manifest.mf");
@@ -662,6 +686,33 @@ fn package_java(workspace_root: &std::path::Path) -> Result<(), Box<dyn std::err
     let version = vox_java_version(workspace_root)?;
     let artifact = target.join(format!("vox-java-{version}.jar"));
     let class_files = collect_files(&classes, "class")?;
+    let packaged_classes = class_files
+        .iter()
+        .map(|path| {
+            path.strip_prefix(&classes)
+                .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+        })
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+    for required in [
+        "org/facet/vox/generated/HandshakeWireSchemas.class",
+        "org/facet/vox/generated/MessageWireSchemas.class",
+    ] {
+        if !packaged_classes.contains(required) {
+            return Err(format!(
+                "Java runtime JAR input is missing required wire support class {required}"
+            )
+            .into());
+        }
+    }
+    if let Some(application_class) = packaged_classes
+        .iter()
+        .find(|path| path.starts_with("org/facet/vox/generated/Testbed"))
+    {
+        return Err(format!(
+            "Java runtime JAR must not contain generated application class {application_class}"
+        )
+        .into());
+    }
     assemble_java_jar(&artifact, &classes, &manifest, &class_files)?;
     let first = std::fs::read(&artifact)?;
     assemble_java_jar(&artifact, &classes, &manifest, &class_files)?;

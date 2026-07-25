@@ -16,3 +16,6 @@ facet.workspace = true
 facet-value.workspace = true
 vox = { path = "../../rust/vox", version = "0.10.0-rc.5", default-features = false, features = ["runtime"] }
 vox-schema.workspace = true
+
+[dev-dependencies]
+vox-phon.workspace = true

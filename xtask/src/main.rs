@@ -352,6 +352,7 @@ fn codegen_java(workspace_root: &std::path::Path) -> Result<(), Box<dyn std::err
     let mut expected = vox_codegen::targets::java::generate_service(&java_fixture_service())?;
     expected.extend(vox_codegen::targets::java::generate_wire_schemas()?);
     expected.extend(java_testbed_unary_files()?);
+    expected.extend(java_terminal_files()?);
     expected.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
     for file in expected {
         write_if_changed(&out_dir.join(file.relative_path), file.source)?;
@@ -366,6 +367,7 @@ fn check_codegen_java(workspace_root: &std::path::Path) -> Result<(), Box<dyn st
     let mut generated = vox_codegen::targets::java::generate_service(&java_fixture_service())?;
     generated.extend(vox_codegen::targets::java::generate_wire_schemas()?);
     generated.extend(java_testbed_unary_files()?);
+    generated.extend(java_terminal_files()?);
     let expected: BTreeMap<_, _> = generated
         .into_iter()
         .map(|file| (file.relative_path, file.source))
@@ -472,6 +474,12 @@ fn java_testbed_unary_files()
         source: constants_source,
     });
     Ok(files)
+}
+
+fn java_terminal_files()
+-> Result<Vec<vox_codegen::targets::java::JavaFile>, Box<dyn std::error::Error>> {
+    let service = spec_proto::terminal::terminal_service_descriptor();
+    Ok(vox_codegen::targets::java::generate_service(service)?)
 }
 
 fn java_tool(name: &str) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {

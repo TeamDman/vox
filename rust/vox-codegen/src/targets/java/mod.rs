@@ -1558,7 +1558,12 @@ mod tests {
         let dir = unique_temp_dir();
         let generated = dir.join("org/facet/vox/generated");
         fs::create_dir_all(&generated).expect("create generated package");
-        for file in generate_service(&fixture_service()).expect("generate fixture") {
+        let mut files = generate_service(&fixture_service()).expect("generate fixture");
+        files.extend(
+            generate_service(spec_proto::terminal::terminal_service_descriptor())
+                .expect("generate terminal fixture"),
+        );
+        for file in files {
             fs::write(generated.join(file.relative_path), file.source).expect("write Java file");
         }
         write_compile_stubs(&dir);

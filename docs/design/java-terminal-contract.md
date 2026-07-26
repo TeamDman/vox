@@ -26,15 +26,19 @@ infrastructure outcomes; `TerminalError` is reserved for structured
 application errors.
 
 `TerminalSnapshot.payload` is bounded bytes whose representation is selected
-by `TerminalFrameEncoding`: structured cells, RGBA8, BGRA8, or PNG. A decoder
-checks the negotiated `max_frame_bytes` before allocating. The contract fixture
-uses a 512×256 logical maximum and a 16 MiB frame maximum as conservative
-defaults; an embedding may advertise smaller values.
+by `TerminalFrameEncoding`: structured cells, RGBA8, BGRA8, or PNG. The
+snapshot also carries stride, full-frame versus dirty-tile metadata, cursor
+state, and a bounded linear selection range with an explicit presence flag. A
+decoder checks the negotiated
+`max_frame_bytes` before allocating. The contract fixture uses a 512×256
+logical maximum and a 16 MiB frame maximum as conservative defaults; an
+embedding may advertise smaller values.
 
-The Java 17 generator currently accepts the scalar/record/unit-enum shapes
-used here. Sequence fields are deliberately absent from the first DTO slice;
-the frame payload remains a bounded byte run so Java can upload a texture or
-fall back to structured-cell rendering without a second wire contract.
+The Java 17 generator currently accepts the scalar/record/unit-enum shapes used
+here. Presence flags keep the snapshot shape compatible with the Java target;
+the frame payload remains a bounded byte run so Java can
+upload a texture or fall back to structured-cell rendering without a second
+wire contract.
 
 ## Evidence
 

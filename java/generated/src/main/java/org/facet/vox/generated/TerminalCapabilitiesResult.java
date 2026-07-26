@@ -21,7 +21,7 @@ public final class TerminalCapabilitiesResult {
   public TerminalCapabilities capabilities() { return capabilities; }
   public long serverSequence() { return serverSequence; }
 
-  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x85daf91d1c65f0cdL), List.of(), new Schema.RecordKind("TerminalCapabilitiesResult", List.of(new Schema.Field("session_id", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true), new Schema.Field("capabilities", Schema.Ref.concrete(SchemaId.fromLong(0xefb30625d2ca1c4cL)), true), new Schema.Field("server_sequence", Schema.Ref.concrete(SchemaId.fromLong(0xc6eb8c46f1e17fbaL)), true))));
+  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x0dce92a8b367b5b2L), List.of(), new Schema.RecordKind("TerminalCapabilitiesResult", List.of(new Schema.Field("session_id", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true), new Schema.Field("capabilities", Schema.Ref.concrete(SchemaId.fromLong(0x19d5c76a5d82ca17L)), true), new Schema.Field("server_sequence", Schema.Ref.concrete(SchemaId.fromLong(0xc6eb8c46f1e17fbaL)), true))));
   public static final PhonAdapter<TerminalCapabilitiesResult> ADAPTER = new PhonAdapter<>() {
     @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA, TerminalCapabilities.SCHEMA); }
     @Override public void encode(PhonEncoder encoder, TerminalCapabilitiesResult value) throws PhonException {

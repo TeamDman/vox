@@ -77,6 +77,9 @@ pub struct TerminalCapabilities {
     pub mouse_input: bool,
     pub structured_cells: bool,
     pub raster_frames: bool,
+    pub selection: bool,
+    pub scrollback: bool,
+    pub dirty_frames: bool,
     pub max_width: u16,
     pub max_height: u16,
     pub max_frame_bytes: u32,
@@ -163,6 +166,8 @@ pub struct TerminalMouseInput {
     pub x: u16,
     pub y: u16,
     pub buttons: u8,
+    pub button: u8,
+    pub pressed: bool,
     pub wheel_x: i32,
     pub wheel_y: i32,
     pub client_sequence: i64,
@@ -194,8 +199,17 @@ pub struct TerminalSnapshot {
     pub width: u16,
     pub height: u16,
     pub encoding: TerminalFrameEncoding,
+    pub kind: TerminalFrameKind,
+    pub stride: u32,
+    pub tile_x: u16,
+    pub tile_y: u16,
+    pub tile_width: u16,
+    pub tile_height: u16,
     pub payload: Vec<u8>,
     pub complete: bool,
+    pub cursor: TerminalCursor,
+    pub selection_present: bool,
+    pub selection: TerminalSelection,
 }
 
 /// Frame payload representation negotiated by the peers.
@@ -206,6 +220,31 @@ pub enum TerminalFrameEncoding {
     Rgba8,
     Bgra8,
     Png,
+}
+
+/// Identifies whether a snapshot replaces the complete frame or one tile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum TerminalFrameKind {
+    Full,
+    DirtyTile,
+}
+
+/// The visible terminal cursor associated with a snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+pub struct TerminalCursor {
+    pub x: u16,
+    pub y: u16,
+    pub visible: bool,
+}
+
+/// A linear visible-grid selection associated with a snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+pub struct TerminalSelection {
+    pub anchor_x: u16,
+    pub anchor_y: u16,
+    pub focus_x: u16,
+    pub focus_y: u16,
 }
 
 /// Cancels a request while retaining the session.
@@ -278,8 +317,26 @@ mod tests {
             width: 80,
             height: 24,
             encoding: TerminalFrameEncoding::Rgba8,
+            kind: TerminalFrameKind::Full,
+            stride: 320,
+            tile_x: 0,
+            tile_y: 0,
+            tile_width: 80,
+            tile_height: 24,
             payload: vec![0, 16, 32, 255, 255, 128, 64, 255],
             complete: true,
+            cursor: TerminalCursor {
+                x: 3,
+                y: 4,
+                visible: true,
+            },
+            selection_present: true,
+            selection: TerminalSelection {
+                anchor_x: 1,
+                anchor_y: 2,
+                focus_x: 5,
+                focus_y: 2,
+            },
         };
         let bytes = vox_phon::to_vec(&snapshot).expect("encode terminal snapshot");
         let decoded: TerminalSnapshot =
@@ -309,5 +366,6 @@ mod tests {
         assert!(fixture.contains("\"max_width\": 512"));
         assert!(fixture.contains("\"max_height\": 256"));
         assert!(fixture.contains("\"max_frame_bytes\": 16777216"));
+        assert!(fixture.contains("\"frame_fields\": [\"sequence\", \"stride\", \"kind\", \"tile_bounds\", \"cursor\", \"selection\"]"));
     }
 }

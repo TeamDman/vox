@@ -13,7 +13,7 @@
     {"name": "disconnect", "id": "babc04d89ee3e7a7", "request": "TerminalDisconnectRequest", "success": "TerminalOperationResult", "error": "TerminalError"}
   ],
   "frame_encodings": ["StructuredCells", "Rgba8", "Bgra8", "Png"],
-  "frame_fields": ["sequence", "stride", "kind", "tile_bounds", "cursor", "selection"],
+  "frame_fields": ["sequence", "stride", "kind", "tile_bounds", "cursor", "selection", "prompt", "command_range"],
   "states": ["Ready", "Closing", "Closed", "Disconnected"],
   "bounds": {"max_width": 512, "max_height": 256, "max_frame_bytes": 16777216}
 }

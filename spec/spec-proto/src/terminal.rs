@@ -210,6 +210,7 @@ pub struct TerminalSnapshot {
     pub cursor: TerminalCursor,
     pub selection_present: bool,
     pub selection: TerminalSelection,
+    pub prompt: TerminalPromptMetadata,
 }
 
 /// Frame payload representation negotiated by the peers.
@@ -245,6 +246,28 @@ pub struct TerminalSelection {
     pub anchor_y: u16,
     pub focus_x: u16,
     pub focus_y: u16,
+}
+
+/// Shell-integration markers associated with the latest visible prompt and
+/// completed command. Presence flags keep this record compatible with the
+/// Java 17 generator, which deliberately avoids nested Option fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+pub struct TerminalPromptMetadata {
+    pub prompt_present: bool,
+    pub prompt: TerminalRange,
+    pub command_present: bool,
+    pub command: TerminalRange,
+    pub command_status_present: bool,
+    pub command_status: i32,
+}
+
+/// A visible-grid range with inclusive start and exclusive end coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+pub struct TerminalRange {
+    pub start_x: u16,
+    pub start_y: u16,
+    pub end_x: u16,
+    pub end_y: u16,
 }
 
 /// Cancels a request while retaining the session.
@@ -337,6 +360,24 @@ mod tests {
                 focus_x: 5,
                 focus_y: 2,
             },
+            prompt: TerminalPromptMetadata {
+                prompt_present: true,
+                prompt: TerminalRange {
+                    start_x: 0,
+                    start_y: 0,
+                    end_x: 3,
+                    end_y: 0,
+                },
+                command_present: true,
+                command: TerminalRange {
+                    start_x: 3,
+                    start_y: 0,
+                    end_x: 12,
+                    end_y: 0,
+                },
+                command_status_present: true,
+                command_status: 0,
+            },
         };
         let bytes = vox_phon::to_vec(&snapshot).expect("encode terminal snapshot");
         let decoded: TerminalSnapshot =
@@ -366,6 +407,6 @@ mod tests {
         assert!(fixture.contains("\"max_width\": 512"));
         assert!(fixture.contains("\"max_height\": 256"));
         assert!(fixture.contains("\"max_frame_bytes\": 16777216"));
-        assert!(fixture.contains("\"frame_fields\": [\"sequence\", \"stride\", \"kind\", \"tile_bounds\", \"cursor\", \"selection\"]"));
+        assert!(fixture.contains("\"frame_fields\": [\"sequence\", \"stride\", \"kind\", \"tile_bounds\", \"cursor\", \"selection\", \"prompt\", \"command_range\"]"));
     }
 }

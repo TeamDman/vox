@@ -28,8 +28,10 @@ application errors.
 `TerminalSnapshot.payload` is bounded bytes whose representation is selected
 by `TerminalFrameEncoding`: structured cells, RGBA8, BGRA8, or PNG. The
 snapshot also carries stride, full-frame versus dirty-tile metadata, cursor
-state, and a bounded linear selection range with an explicit presence flag. A
-decoder checks the negotiated
+state, a bounded linear selection range, and OSC 133 prompt/command ranges
+with explicit presence flags. The prompt range is the shell-reported A-to-B
+interval; the command range is the B/C-to-D interval and includes the reported
+exit status when available. A decoder checks the negotiated
 `max_frame_bytes` before allocating. The contract fixture uses a 512×256
 logical maximum and a 16 MiB frame maximum as conservative defaults; an
 embedding may advertise smaller values.

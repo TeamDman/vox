@@ -641,6 +641,19 @@ fn java_runtime_sources(
         generated.join("HandshakeWireSchemas.java"),
         generated.join("MessageWireSchemas.java"),
     ]);
+    // The terminal service bindings are part of the reviewed public Java
+    // contract. Testbed/application bindings remain consumer fixtures and
+    // must not leak into the runtime artifact.
+    sources.extend(
+        collect_files(&generated, "java")?
+            .into_iter()
+            .filter(|source| {
+                source
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .is_some_and(|stem| stem.starts_with("Terminal"))
+            }),
+    );
     for source in &sources {
         if !source.is_file() {
             return Err(format!(
@@ -752,6 +765,9 @@ fn package_java(workspace_root: &std::path::Path) -> Result<(), Box<dyn std::err
     for required in [
         "org/facet/vox/generated/HandshakeWireSchemas.class",
         "org/facet/vox/generated/MessageWireSchemas.class",
+        "org/facet/vox/generated/TerminalClient.class",
+        "org/facet/vox/generated/TerminalServiceDescriptor.class",
+        "org/facet/vox/generated/TerminalSnapshot.class",
     ] {
         if !packaged_classes.contains(required) {
             return Err(format!(
@@ -783,9 +799,11 @@ fn package_java(workspace_root: &std::path::Path) -> Result<(), Box<dyn std::err
         &source,
         "import org.facet.phon.PhonLimits;\n\
          import org.facet.vox.VoxResult;\n\
+         import org.facet.vox.generated.TerminalSnapshotRequest;\n\
          public final class VoxJavaSmoke {\n\
          public static void main(String[] args) {\n\
-         if (PhonLimits.defaults().inputBytes() <= 0 || !VoxResult.success(\"ok\").isSuccess()) throw new AssertionError();\n\
+         TerminalSnapshotRequest request = new TerminalSnapshotRequest(\"session\", 0, 1024, 1);\n\
+         if (PhonLimits.defaults().inputBytes() <= 0 || !VoxResult.success(\"ok\").isSuccess() || !request.sessionId().equals(\"session\")) throw new AssertionError();\n\
          }\n}\n",
     )?;
     let smoke_classes = smoke.join("classes");

@@ -50,10 +50,13 @@ cargo run -p vox-xtask -- package-java
 `test-java` checks generated-source drift, compiles main, generated, test, and
 subject sources with `javac --release 17 -Xlint:all -Werror`, and runs the Phon
 conformance and focused Vox tests. `package-java` repeats that gate, builds only
-the Phon and Vox runtime classes, and writes
+the Phon and Vox runtime classes plus the generated `Terminal*` service
+bindings, and writes
 `vox/java/target/vox-java-<version>.jar`. It assembles the JAR twice to verify
 byte-for-byte reproducibility, compiles and runs a fresh Java consumer against
-the artifact, and rejects unresolved non-JDK dependencies with `jdeps`.
+the artifact (including a generated terminal request), and rejects unresolved
+non-JDK dependencies with `jdeps`. Generated testbed/application bindings are
+intentionally excluded from the runtime artifact.
 
 `GeneratedResponseIntegrationTest` additionally proves that complete
 `Result<T, VoxError<E>>` response bytes round-trip without a private outer tag.

@@ -55,7 +55,20 @@ enum Commands {
         /// Generate Swift wire protocol types (Wire.swift)
         #[facet(args::named, default)]
         swift_wire: bool,
+        /// Generate Java 17 unary fixtures into java/generated/
+        #[facet(args::named, default)]
+        java: bool,
     },
+    /// Check generated source for drift without changing the worktree
+    CheckCodegen {
+        /// Check Java 17 generated fixtures
+        #[facet(args::named, default)]
+        java: bool,
+    },
+    /// Compile and run the dependency-free Java 17 conformance suite
+    TestJava,
+    /// Test and assemble the deterministic combined Phon/Vox Java runtime JAR
+    PackageJava,
     /// Emit built-in schema compatibility snapshots as JSON.
     SchemaCompatSnapshot,
     /// Compare built-in schema snapshots and enforce acknowledged breaks.
@@ -210,9 +223,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             swift_client,
             swift_server,
             swift_wire,
+            java,
         } => {
             let none_specified =
-                !typescript && !swift && !swift_client && !swift_server && !swift_wire;
+                !typescript && !swift && !swift_client && !swift_server && !swift_wire && !java;
             if typescript || none_specified {
                 codegen_typescript(&workspace_root)?;
             }
@@ -227,7 +241,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             if swift_wire || none_specified {
                 codegen_swift_wire(&workspace_root)?;
             }
+            if java || none_specified {
+                codegen_java(&workspace_root)?;
+            }
         }
+        Commands::CheckCodegen { java } => {
+            if !java {
+                return Err("check-codegen currently requires --java".into());
+            }
+            check_codegen_java(&workspace_root)?;
+        }
+        Commands::TestJava => test_java(&workspace_root)?,
+        Commands::PackageJava => package_java(&workspace_root)?,
         Commands::SchemaCompatSnapshot => {
             emit_schema_compat_snapshot()?;
         }
@@ -236,6 +261,586 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    Ok(())
+}
+
+#[derive(Facet)]
+struct NestedRequest {
+    message: String,
+}
+
+#[derive(Facet)]
+struct NestedResponse {
+    echoed: String,
+}
+
+#[derive(Facet)]
+struct DivideRequest {
+    dividend: i64,
+    divisor: i64,
+}
+
+#[derive(Facet)]
+struct DivideResponse {
+    quotient: i64,
+}
+
+#[derive(Facet)]
+#[repr(u8)]
+enum DivideByZero {
+    Zero = 0,
+}
+
+fn java_fixture_service() -> vox_types::ServiceDescriptor {
+    use vox_types::{MethodDescriptorOptions, ServiceDescriptor, method_descriptor};
+
+    let echo = method_descriptor::<(String,), String>(
+        "JavaFixture",
+        "echo",
+        &["value"],
+        &[None],
+        MethodDescriptorOptions {
+            response_wire_shape: <Result<String, vox_types::VoxError> as Facet>::SHAPE,
+            doc: None,
+        },
+    );
+    let inspect = method_descriptor::<(NestedRequest,), NestedResponse>(
+        "JavaFixture",
+        "inspect",
+        &["request"],
+        &[None],
+        MethodDescriptorOptions {
+            response_wire_shape: <Result<NestedResponse, vox_types::VoxError> as Facet>::SHAPE,
+            doc: None,
+        },
+    );
+    let divide = method_descriptor::<(DivideRequest,), Result<DivideResponse, DivideByZero>>(
+        "JavaFixture",
+        "divide",
+        &["request"],
+        &[None],
+        MethodDescriptorOptions {
+            response_wire_shape:
+                <Result<DivideResponse, vox_types::VoxError<DivideByZero>> as Facet>::SHAPE,
+            doc: None,
+        },
+    );
+    let methods = Box::leak(vec![echo, inspect, divide].into_boxed_slice());
+    ServiceDescriptor {
+        service_name: "JavaFixture",
+        methods,
+        doc: Some("Frozen Java 17 unary generation fixture"),
+    }
+}
+
+fn java_generated_dir(workspace_root: &std::path::Path) -> std::path::PathBuf {
+    workspace_root
+        .join("java")
+        .join("generated")
+        .join("src")
+        .join("main")
+        .join("java")
+        .join("org")
+        .join("facet")
+        .join("vox")
+        .join("generated")
+}
+
+fn codegen_java(workspace_root: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    let out_dir = java_generated_dir(workspace_root);
+    std::fs::create_dir_all(&out_dir)?;
+    let mut expected = vox_codegen::targets::java::generate_service(&java_fixture_service())?;
+    expected.extend(vox_codegen::targets::java::generate_wire_schemas()?);
+    expected.extend(java_testbed_unary_files()?);
+    expected.extend(java_terminal_files()?);
+    expected.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    for file in expected {
+        write_if_changed(&out_dir.join(file.relative_path), file.source)?;
+    }
+    Ok(())
+}
+
+fn check_codegen_java(workspace_root: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    use std::collections::BTreeMap;
+
+    let out_dir = java_generated_dir(workspace_root);
+    let mut generated = vox_codegen::targets::java::generate_service(&java_fixture_service())?;
+    generated.extend(vox_codegen::targets::java::generate_wire_schemas()?);
+    generated.extend(java_testbed_unary_files()?);
+    generated.extend(java_terminal_files()?);
+    let expected: BTreeMap<_, _> = generated
+        .into_iter()
+        .map(|file| (file.relative_path, file.source))
+        .collect();
+    let mut actual = BTreeMap::new();
+    if out_dir.exists() {
+        for entry in std::fs::read_dir(&out_dir)? {
+            let path = entry?.path();
+            if path.extension().is_some_and(|ext| ext == "java") {
+                let name = path
+                    .file_name()
+                    .expect("generated Java file has a name")
+                    .to_string_lossy()
+                    .into_owned();
+                actual.insert(name, std::fs::read_to_string(path)?);
+            }
+        }
+    }
+    if expected != actual {
+        let missing: Vec<_> = expected
+            .keys()
+            .filter(|key| !actual.contains_key(*key))
+            .collect();
+        let unexpected: Vec<_> = actual
+            .keys()
+            .filter(|key| !expected.contains_key(*key))
+            .collect();
+        let changed: Vec<_> = expected
+            .keys()
+            .filter(|key| actual.get(*key) != expected.get(*key))
+            .collect();
+        return Err(format!(
+            "Java generated source drift (missing: {missing:?}, unexpected: {unexpected:?}, changed: {changed:?}); run `cargo xtask codegen --java`"
+        )
+        .into());
+    }
+    println!("Java generated sources are up to date");
+    Ok(())
+}
+
+fn java_testbed_unary_files()
+-> Result<Vec<vox_codegen::targets::java::JavaFile>, Box<dyn std::error::Error>> {
+    let service = spec_proto::testbed_service_descriptor();
+    let methods = ["echo", "divide"]
+        .into_iter()
+        .map(|name| {
+            service
+                .methods
+                .iter()
+                .find(|method| method.method_name == name)
+                .copied()
+                .ok_or_else(|| format!("Testbed.{name} is absent from the Rust service descriptor"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let methods = Box::leak(methods.into_boxed_slice());
+    let unary_service = vox_types::ServiceDescriptor {
+        service_name: service.service_name,
+        methods,
+        doc: Some("Rust-authoritative Testbed Java unary wire slice"),
+    };
+    let mut files = vox_codegen::targets::java::generate_service(&unary_service)?;
+    // `PrimitiveAdapters` is shared with the fixture service and generated identically.
+    files.retain(|file| file.relative_path != "PrimitiveAdapters.java");
+    let evolved = spec_proto::evolved::testbed_service_descriptor();
+    let mut evolution_constants = Vec::new();
+    for (method_name, prefix, constant_name) in [
+        ("echo_profile", "EvolvedProfile", "ECHO_PROFILE_METHOD_ID"),
+        (
+            "echo_measurement",
+            "EvolvedMeasurement",
+            "ECHO_MEASUREMENT_METHOD_ID",
+        ),
+    ] {
+        let method = evolved
+            .methods
+            .iter()
+            .find(|method| method.method_name == method_name)
+            .copied()
+            .ok_or_else(|| format!("evolved Testbed.{method_name} is absent"))?;
+        evolution_constants.push((constant_name, method.id.0));
+        files.push(vox_codegen::targets::java::generate_schema_table(
+            method.args_shape,
+            &format!("{prefix}ArgsWireSchemas"),
+        )?);
+        files.push(vox_codegen::targets::java::generate_schema_table(
+            method.response_wire_shape,
+            &format!("{prefix}ResponseWireSchemas"),
+        )?);
+    }
+    let mut constants_source = String::from(
+        "// @generated by vox-codegen; DO NOT EDIT.\n\
+         package org.facet.vox.generated;\n\n\
+         public final class EvolutionWireConstants {\n\
+         \x20 public static final String SERVICE_NAME = \"Testbed\";\n",
+    );
+    for (constant_name, id) in evolution_constants {
+        constants_source.push_str(&format!(
+            "  public static final long {constant_name} = 0x{id:016x}L;\n"
+        ));
+    }
+    constants_source.push_str("  private EvolutionWireConstants() {}\n}\n");
+    files.push(vox_codegen::targets::java::JavaFile {
+        relative_path: "EvolutionWireConstants.java".to_string(),
+        source: constants_source,
+    });
+    Ok(files)
+}
+
+fn java_terminal_files()
+-> Result<Vec<vox_codegen::targets::java::JavaFile>, Box<dyn std::error::Error>> {
+    let service = spec_proto::terminal::terminal_service_descriptor();
+    Ok(vox_codegen::targets::java::generate_service(service)?)
+}
+
+fn java_tool(name: &str) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let executable = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    };
+    if let Some(home) = std::env::var_os("JAVA_HOME") {
+        let candidate = std::path::PathBuf::from(home).join("bin").join(&executable);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+        return Err(format!(
+            "JAVA_HOME is set but {} does not exist",
+            candidate.display()
+        )
+        .into());
+    }
+    let candidate = std::path::PathBuf::from(executable);
+    let status = std::process::Command::new(&candidate)
+        .arg("--version")
+        .status()
+        .map_err(|error| format!("{name} was not found in PATH: {error}"))?;
+    if !status.success() {
+        return Err(format!("{name} --version failed with {status}").into());
+    }
+    Ok(candidate)
+}
+
+fn ensure_java_17(javac: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    let output = std::process::Command::new(javac).arg("-version").output()?;
+    if !output.status.success() {
+        return Err("javac -version failed".into());
+    }
+    let version = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let major = version
+        .split_whitespace()
+        .find_map(|token| {
+            let token = token.trim_start_matches("javac");
+            let token = token.trim();
+            (!token.is_empty())
+                .then(|| token.split('.').next()?.parse::<u32>().ok())
+                .flatten()
+        })
+        .ok_or_else(|| format!("could not parse javac version from {version:?}"))?;
+    if major < 17 {
+        return Err(format!("Java 17 or newer is required; found javac {major}").into());
+    }
+    Ok(())
+}
+
+fn collect_files(
+    root: &std::path::Path,
+    extension: &str,
+) -> Result<Vec<std::path::PathBuf>, Box<dyn std::error::Error>> {
+    fn visit(
+        path: &std::path::Path,
+        extension: &str,
+        files: &mut Vec<std::path::PathBuf>,
+    ) -> std::io::Result<()> {
+        if !path.exists() {
+            return Ok(());
+        }
+        for entry in std::fs::read_dir(path)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                visit(&path, extension, files)?;
+            } else if path.extension().is_some_and(|value| value == extension) {
+                files.push(path);
+            }
+        }
+        Ok(())
+    }
+    let mut files = Vec::new();
+    visit(root, extension, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
+fn recreate_dir(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    if path.exists() {
+        std::fs::remove_dir_all(path)?;
+    }
+    std::fs::create_dir_all(path)?;
+    Ok(())
+}
+
+fn run_checked(
+    command: &mut std::process::Command,
+    description: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let status = command.status()?;
+    if !status.success() {
+        return Err(format!("{description} failed with {status}").into());
+    }
+    Ok(())
+}
+
+fn compile_java(
+    javac: &std::path::Path,
+    classes: &std::path::Path,
+    sources: &[std::path::PathBuf],
+    classpath: Option<&std::path::Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    recreate_dir(classes)?;
+    let mut command = std::process::Command::new(javac);
+    command
+        .arg("--release")
+        .arg("17")
+        .arg("-Xlint:all")
+        .arg("-Werror")
+        .arg("-d")
+        .arg(classes);
+    if let Some(classpath) = classpath {
+        command.arg("-cp").arg(classpath);
+    }
+    command.args(sources);
+    run_checked(&mut command, "javac --release 17")
+}
+
+fn java_source_roots(
+    workspace_root: &std::path::Path,
+    include_tests_and_fixture: bool,
+) -> Result<Vec<std::path::PathBuf>, Box<dyn std::error::Error>> {
+    let facet_root = workspace_root.parent().expect("vox has repository parent");
+    let mut roots = vec![
+        facet_root.join("phon/java/runtime/src/main/java"),
+        workspace_root.join("java/runtime/src/main/java"),
+    ];
+    if include_tests_and_fixture {
+        roots.extend([
+            facet_root.join("phon/java/runtime/src/test/java"),
+            workspace_root.join("java/runtime/src/test/java"),
+            workspace_root.join("java/generated/src/main/java"),
+            workspace_root.join("java/subject/src/main/java"),
+        ]);
+    }
+    let mut sources = Vec::new();
+    for root in roots {
+        sources.extend(collect_files(&root, "java")?);
+    }
+    sources.sort();
+    Ok(sources)
+}
+
+fn java_runtime_sources(
+    workspace_root: &std::path::Path,
+) -> Result<Vec<std::path::PathBuf>, Box<dyn std::error::Error>> {
+    let mut sources = java_source_roots(workspace_root, false)?;
+    let generated = java_generated_dir(workspace_root);
+    // These two projections are Rust-derived protocol support required by
+    // WireCodec. Generated application services remain consumer artifacts.
+    sources.extend([
+        generated.join("HandshakeWireSchemas.java"),
+        generated.join("MessageWireSchemas.java"),
+    ]);
+    // The terminal service bindings are part of the reviewed public Java
+    // contract. Testbed/application bindings remain consumer fixtures and
+    // must not leak into the runtime artifact.
+    sources.extend(
+        collect_files(&generated, "java")?
+            .into_iter()
+            .filter(|source| {
+                source
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .is_some_and(|stem| stem.starts_with("Terminal"))
+            }),
+    );
+    for source in &sources {
+        if !source.is_file() {
+            return Err(format!(
+                "Java runtime support source is absent: {}; run `cargo xtask codegen --java`",
+                source.display()
+            )
+            .into());
+        }
+    }
+    sources.sort();
+    Ok(sources)
+}
+
+fn test_java(workspace_root: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    check_codegen_java(workspace_root)?;
+    let javac = java_tool("javac")?;
+    ensure_java_17(&javac)?;
+    let java = java_tool("java")?;
+    let classes = workspace_root.join("java/target/test-classes");
+    compile_java(
+        &javac,
+        &classes,
+        &java_source_roots(workspace_root, true)?,
+        None,
+    )?;
+    let facet_root = workspace_root.parent().expect("vox has repository parent");
+    for main_class in [
+        "org.facet.phon.PhonConformanceTest",
+        "org.facet.vox.tcp.StreamFramingTest",
+        "org.facet.vox.VoxRuntimeTest",
+        "org.facet.vox.GeneratedResponseIntegrationTest",
+    ] {
+        let mut command = std::process::Command::new(&java);
+        command.arg("-ea").arg("-cp").arg(&classes).arg(main_class);
+        if main_class == "org.facet.phon.PhonConformanceTest" {
+            command.arg(facet_root);
+        }
+        run_checked(&mut command, &format!("Java test {main_class}"))?;
+    }
+    println!("Java 17 Phon/Vox tests passed");
+    Ok(())
+}
+
+fn vox_java_version(
+    workspace_root: &std::path::Path,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let manifest = std::fs::read_to_string(workspace_root.join("rust/vox/Cargo.toml"))?;
+    manifest
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("version = \"")
+                .and_then(|value| value.strip_suffix('"'))
+                .map(str::to_string)
+        })
+        .ok_or_else(|| "vox package version is absent".into())
+}
+
+fn assemble_java_jar(
+    jar: &std::path::Path,
+    classes: &std::path::Path,
+    manifest: &std::path::Path,
+    class_files: &[std::path::PathBuf],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let jar_tool = java_tool("jar")?;
+    let mut command = std::process::Command::new(jar_tool);
+    command
+        .arg("--create")
+        .arg("--file")
+        .arg(jar)
+        .arg("--manifest")
+        .arg(manifest)
+        .arg("--date=1980-01-01T00:00:02Z");
+    for class_file in class_files {
+        command
+            .arg("-C")
+            .arg(classes)
+            .arg(class_file.strip_prefix(classes)?);
+    }
+    run_checked(&mut command, "deterministic jar assembly")
+}
+
+fn package_java(workspace_root: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    test_java(workspace_root)?;
+    let javac = java_tool("javac")?;
+    ensure_java_17(&javac)?;
+    let target = workspace_root.join("java/target");
+    let classes = target.join("runtime-classes");
+    compile_java(
+        &javac,
+        &classes,
+        &java_runtime_sources(workspace_root)?,
+        None,
+    )?;
+    let manifest = target.join("runtime-manifest.mf");
+    std::fs::write(
+        &manifest,
+        "Manifest-Version: 1.0\r\nAutomatic-Module-Name: org.facet.vox\r\n\r\n",
+    )?;
+    let version = vox_java_version(workspace_root)?;
+    let artifact = target.join(format!("vox-java-{version}.jar"));
+    let class_files = collect_files(&classes, "class")?;
+    let packaged_classes = class_files
+        .iter()
+        .map(|path| {
+            path.strip_prefix(&classes)
+                .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+        })
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+    for required in [
+        "org/facet/vox/generated/HandshakeWireSchemas.class",
+        "org/facet/vox/generated/MessageWireSchemas.class",
+        "org/facet/vox/generated/TerminalClient.class",
+        "org/facet/vox/generated/TerminalServiceDescriptor.class",
+        "org/facet/vox/generated/TerminalSnapshot.class",
+    ] {
+        if !packaged_classes.contains(required) {
+            return Err(format!(
+                "Java runtime JAR input is missing required wire support class {required}"
+            )
+            .into());
+        }
+    }
+    if let Some(application_class) = packaged_classes
+        .iter()
+        .find(|path| path.starts_with("org/facet/vox/generated/Testbed"))
+    {
+        return Err(format!(
+            "Java runtime JAR must not contain generated application class {application_class}"
+        )
+        .into());
+    }
+    assemble_java_jar(&artifact, &classes, &manifest, &class_files)?;
+    let first = std::fs::read(&artifact)?;
+    assemble_java_jar(&artifact, &classes, &manifest, &class_files)?;
+    if std::fs::read(&artifact)? != first {
+        return Err("Java runtime JAR is not reproducible across consecutive assembly".into());
+    }
+
+    let smoke = target.join("smoke");
+    recreate_dir(&smoke)?;
+    let source = smoke.join("VoxJavaSmoke.java");
+    std::fs::write(
+        &source,
+        "import org.facet.phon.PhonLimits;\n\
+         import org.facet.vox.VoxResult;\n\
+         import org.facet.vox.generated.TerminalSnapshotRequest;\n\
+         public final class VoxJavaSmoke {\n\
+         public static void main(String[] args) {\n\
+         TerminalSnapshotRequest request = new TerminalSnapshotRequest(\"session\", 0, 1024, 1);\n\
+         if (PhonLimits.defaults().inputBytes() <= 0 || !VoxResult.success(\"ok\").isSuccess() || !request.sessionId().equals(\"session\")) throw new AssertionError();\n\
+         }\n}\n",
+    )?;
+    let smoke_classes = smoke.join("classes");
+    compile_java(&javac, &smoke_classes, &[source], Some(&artifact))?;
+    let java = java_tool("java")?;
+    let separator = if cfg!(windows) { ";" } else { ":" };
+    let smoke_classpath = format!(
+        "{}{separator}{}",
+        smoke_classes.display(),
+        artifact.display()
+    );
+    run_checked(
+        std::process::Command::new(java)
+            .arg("-cp")
+            .arg(smoke_classpath)
+            .arg("VoxJavaSmoke"),
+        "Java runtime JAR smoke consumer",
+    )?;
+    let jdeps = java_tool("jdeps")?;
+    let output = std::process::Command::new(jdeps)
+        .arg("--multi-release")
+        .arg("17")
+        .arg("--missing-deps")
+        .arg(&artifact)
+        .output()?;
+    if !output.status.success() || !output.stdout.is_empty() || !output.stderr.is_empty() {
+        return Err(format!(
+            "runtime JAR has unresolved dependencies:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+    println!(
+        "Packaged deterministic dependency-free Java runtime: {}",
+        artifact.display()
+    );
     Ok(())
 }
 

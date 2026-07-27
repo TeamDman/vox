@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::path::Path;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use facet_value::{VObject, VString, Value};
@@ -101,6 +102,17 @@ use vox_websocket::WsLink;
 
 const SUBJECT_WAIT_HEARTBEAT: Duration = Duration::from_millis(500);
 const SPEC_RUNTIME_STACK_BYTES: usize = 32 * 1024 * 1024;
+static CANCEL_ECHO_STARTED: AtomicBool = AtomicBool::new(false);
+static CANCEL_ECHO_DROPPED: AtomicBool = AtomicBool::new(false);
+static INCOMPATIBLE_MEASUREMENT_DISPATCHED: AtomicBool = AtomicBool::new(false);
+
+struct CancelEchoDropSignal;
+
+impl Drop for CancelEchoDropSignal {
+    fn drop(&mut self) {
+        CANCEL_ECHO_DROPPED.store(true, Ordering::SeqCst);
+    }
+}
 /// Spawn a task that catches panics and makes them loud.
 ///
 /// If the spawned future panics, the panic message is printed to stderr
@@ -136,6 +148,7 @@ where
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SubjectLanguage {
+    Java,
     Rust,
     Swift,
     TypeScript,
@@ -201,6 +214,13 @@ pub fn subject_cmd() -> String {
 
 pub fn subject_cmd_for_language(language: SubjectLanguage) -> String {
     match language {
+        SubjectLanguage::Java => {
+            if cfg!(windows) {
+                "java\\subject\\subject-java.cmd".to_string()
+            } else {
+                "./java/subject/subject-java.sh".to_string()
+            }
+        }
         SubjectLanguage::Rust => {
             let exe = format!("subject-rust{}", std::env::consts::EXE_SUFFIX);
             let target_dir = cargo_target_dir();
@@ -3246,6 +3266,14 @@ fn sample_styx_lsp_position_to_offset_params() -> StyxLspPositionToOffsetParams 
 
 impl Testbed for TestbedService {
     async fn echo(&self, message: String) -> String {
+        if std::env::var_os("VOX_DLOG").is_some() {
+            eprintln!("[harness] Testbed.echo received {message:?}");
+        }
+        if message == "cancel-me" {
+            CANCEL_ECHO_STARTED.store(true, Ordering::SeqCst);
+            let _drop_signal = CancelEchoDropSignal;
+            return std::future::pending::<String>().await;
+        }
         message
     }
 
@@ -3544,6 +3572,9 @@ impl Testbed for TestbedService {
     }
 
     async fn echo_measurement(&self, m: Measurement) -> Measurement {
+        if m.unit == "java-incompatible" {
+            INCOMPATIBLE_MEASUREMENT_DISPATCHED.store(true, Ordering::SeqCst);
+        }
         m
     }
 
@@ -4305,6 +4336,10 @@ async fn spawn_subject_cmd_with_env(
         let mut c = Command::new("sh");
         c.arg("-c").arg(cmd);
         c
+    } else if cmd.ends_with(".cmd") {
+        let mut c = Command::new("cmd");
+        c.arg("/D").arg("/S").arg("/C").arg(cmd);
+        c
     } else {
         Command::new(cmd)
     };
@@ -4425,6 +4460,16 @@ pub async fn accept_subject_spec(
     }
 }
 
+pub async fn accept_bidirectional_subject_spec(
+    spec: SubjectSpec,
+) -> Result<(TestbedClient, Child, ConnectionHandle), String> {
+    if spec.transport != SubjectTestTransport::Tcp {
+        return Err("bidirectional hosted-subject proof currently requires TCP".to_string());
+    }
+    let cmd = subject_cmd_for_language(spec.language);
+    accept_subject_tcp_with_env(&cmd, &[("SUBJECT_BIDIRECTIONAL", "1")]).await
+}
+
 /// Accept a subject over TCP given a custom command string.
 pub async fn accept_subject_cmd_tcp(
     cmd: &str,
@@ -4520,6 +4565,10 @@ pub async fn spawn_server_subject(spec: SubjectSpec) -> Result<(String, Child), 
     let mut command = if cmd.ends_with(".sh") {
         let mut c = Command::new("sh");
         c.arg("-c").arg(cmd);
+        c
+    } else if cmd.ends_with(".cmd") {
+        let mut c = Command::new("cmd");
+        c.arg("/D").arg("/S").arg("/C").arg(cmd);
         c
     } else {
         Command::new(cmd)
@@ -4688,6 +4737,29 @@ pub fn run_subject_client_scenario(spec: SubjectSpec, scenario: &str) {
         }
     });
     result.unwrap();
+}
+
+pub fn run_subject_cancel_timeout(spec: SubjectSpec) {
+    CANCEL_ECHO_STARTED.store(false, Ordering::SeqCst);
+    CANCEL_ECHO_DROPPED.store(false, Ordering::SeqCst);
+    run_subject_client_scenario(spec, "cancel_timeout");
+    assert!(
+        CANCEL_ECHO_STARTED.load(Ordering::SeqCst),
+        "Rust cancel sentinel handler never started"
+    );
+    assert!(
+        CANCEL_ECHO_DROPPED.load(Ordering::SeqCst),
+        "committed Java RequestCancel did not abort/drop the Rust handler future"
+    );
+}
+
+pub fn run_subject_incompatible_schema_evolution(spec: SubjectSpec) {
+    INCOMPATIBLE_MEASUREMENT_DISPATCHED.store(false, Ordering::SeqCst);
+    run_subject_client_scenario(spec, "incompatible_schema_evolution");
+    assert!(
+        !INCOMPATIBLE_MEASUREMENT_DISPATCHED.load(Ordering::SeqCst),
+        "incompatible Java argument schema reached the Rust handler"
+    );
 }
 
 async fn run_subject_client_scenario_tcp(
@@ -4959,6 +5031,13 @@ where
 }
 
 async fn accept_subject_tcp(cmd: &str) -> Result<(TestbedClient, Child, ConnectionHandle), String> {
+    accept_subject_tcp_with_env(cmd, &[]).await
+}
+
+async fn accept_subject_tcp_with_env(
+    cmd: &str,
+    extra_env: &[(&str, &str)],
+) -> Result<(TestbedClient, Child, ConnectionHandle), String> {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .map_err(|e| format!("bind: {e}"))?;
@@ -4966,7 +5045,7 @@ async fn accept_subject_tcp(cmd: &str) -> Result<(TestbedClient, Child, Connecti
         .local_addr()
         .map_err(|e| format!("local_addr: {e}"))?;
 
-    let mut child = spawn_subject_cmd_with_env(cmd, &addr.to_string(), &[]).await?;
+    let mut child = spawn_subject_cmd_with_env(cmd, &addr.to_string(), extra_env).await?;
     let pid = child.id().unwrap_or_default();
     let wait_started = tokio::time::Instant::now();
     let wait_deadline = wait_started + Duration::from_secs(5);
@@ -5019,6 +5098,7 @@ async fn accept_subject_tcp(cmd: &str) -> Result<(TestbedClient, Child, Connecti
     stream.set_nodelay(true).unwrap();
 
     let client = match acceptor_transport(StreamLink::tcp(stream))
+        .on_lane(TestbedDispatcher::new(TestbedService::new()))
         .establish::<TestbedClient>()
         .await
     {

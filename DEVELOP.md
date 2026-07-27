@@ -106,17 +106,18 @@ swift test --package-path swift/vox-runtime --no-parallel -Xlinker -L$(pwd)/targ
 
 ### Code Generation
 
-```bash
-# Generate all language bindings
-cargo xtask codegen
+The implemented targets are TypeScript and Swift:
 
-# Generate specific language
+```bash
+cargo xtask codegen
 cargo xtask codegen --typescript
 cargo xtask codegen --swift
-cargo xtask codegen --go
-cargo xtask codegen --java
-cargo xtask codegen --python
 ```
+
+Java 17 generation is the active experiment described in
+[`docs/design/java-17-vertical-slice.md`](docs/design/java-17-vertical-slice.md).
+Its `cargo xtask codegen --java` command is part of the frozen target contract
+but must not be documented as available until the target and drift checks land.
 
 ### CI Checks
 

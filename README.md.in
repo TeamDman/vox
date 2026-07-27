@@ -141,6 +141,7 @@ let client = DownstreamClient::new(caller);
 | Rust | Reference implementation |
 | TypeScript | Generated client/server |
 | Swift | Generated client/server |
+| Java | Java 17 contract frozen; implementation in progress |
 
 ## Transport Bindings
 

@@ -1,6 +1,7 @@
 #![deny(unsafe_code)]
 
 pub mod evolved;
+pub mod terminal;
 
 use std::collections::{BTreeMap, BTreeSet};
 

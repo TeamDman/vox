@@ -9,6 +9,7 @@
     {"name": "send_key", "id": "e0e1cb7a111dc0c7", "request": "TerminalKeyInput", "success": "TerminalInputResult", "error": "TerminalError"},
     {"name": "send_mouse", "id": "fd17ea461870349a", "request": "TerminalMouseInput", "success": "TerminalInputResult", "error": "TerminalError"},
     {"name": "snapshot", "id": "4648749132a0ebb8", "request": "TerminalSnapshotRequest", "success": "TerminalSnapshot", "error": "TerminalError"},
+    {"name": "get_content", "id": "6f1917e81fe9c050", "request": "TerminalContentRequest", "success": "TerminalContentResult", "error": "TerminalError"},
     {"name": "cancel", "id": "94967d6dfd5fa677", "request": "TerminalCancelRequest", "success": "TerminalOperationResult", "error": "TerminalError"},
     {"name": "disconnect", "id": "babc04d89ee3e7a7", "request": "TerminalDisconnectRequest", "success": "TerminalOperationResult", "error": "TerminalError"}
   ],

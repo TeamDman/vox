@@ -173,8 +173,11 @@ pub struct TerminalMouseInput {
     pub x: u16,
     pub y: u16,
     pub buttons: u8,
+    /// Mouse button number for button transitions.
     pub button: u8,
     pub pressed: bool,
+    /// True when this is a motion event rather than a button transition.
+    pub motion: bool,
     pub wheel_x: i32,
     pub wheel_y: i32,
     pub client_sequence: i64,
@@ -414,6 +417,60 @@ mod tests {
     }
 
     #[test]
+    fn terminal_content_witness_round_trips_through_phon() {
+        let content = TerminalContentResult {
+            session_id: "session-01".to_string(),
+            sequence: 42,
+            text: "PS C:\\work> 100\\n".to_string(),
+            complete: true,
+            truncated: false,
+            prompt: TerminalPromptMetadata {
+                prompt_present: true,
+                prompt: TerminalRange {
+                    start_x: 0,
+                    start_y: 0,
+                    end_x: 11,
+                    end_y: 0,
+                },
+                command_present: false,
+                command: TerminalRange {
+                    start_x: 0,
+                    start_y: 0,
+                    end_x: 0,
+                    end_y: 0,
+                },
+                command_status_present: false,
+                command_status: 0,
+            },
+        };
+        let bytes = vox_phon::to_vec(&content).expect("encode terminal content witness");
+        let decoded: TerminalContentResult =
+            vox_phon::from_slice(&bytes).expect("decode terminal content witness");
+        assert_eq!(decoded, content);
+    }
+
+    #[test]
+    fn terminal_mouse_motion_round_trips_through_phon() {
+        let input = TerminalMouseInput {
+            session_id: "session-01".to_string(),
+            x: 4,
+            y: 5,
+            buttons: 1,
+            button: 0,
+            pressed: true,
+            motion: true,
+            wheel_x: 0,
+            wheel_y: 0,
+            client_sequence: 7,
+        };
+        let bytes = vox_phon::to_vec(&input).expect("encode terminal mouse motion");
+        let decoded: TerminalMouseInput =
+            vox_phon::from_slice(&bytes).expect("decode terminal mouse motion");
+        assert_eq!(decoded, input);
+        assert!(decoded.motion);
+    }
+
+    #[test]
     fn terminal_contract_fixture_matches_method_ids_and_bounds() {
         let fixture = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -421,7 +478,7 @@ mod tests {
         ));
         let service = terminal_service_descriptor();
         assert_eq!(service.service_name, "Terminal");
-        assert_eq!(service.methods.len(), 9);
+        assert_eq!(service.methods.len(), 10);
         for method in service.methods {
             let expected = format!(
                 "\"name\": \"{}\", \"id\": \"{:016x}\"",

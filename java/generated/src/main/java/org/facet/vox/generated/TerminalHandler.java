@@ -14,6 +14,7 @@ public interface TerminalHandler {
   CompletableFuture<VoxResult<TerminalInputResult, TerminalError>> sendKey(CallContext context, TerminalKeyInput request);
   CompletableFuture<VoxResult<TerminalInputResult, TerminalError>> sendMouse(CallContext context, TerminalMouseInput request);
   CompletableFuture<VoxResult<TerminalSnapshot, TerminalError>> snapshot(CallContext context, TerminalSnapshotRequest request);
+  CompletableFuture<VoxResult<TerminalContentResult, TerminalError>> getContent(CallContext context, TerminalContentRequest request);
   CompletableFuture<VoxResult<TerminalOperationResult, TerminalError>> cancel(CallContext context, TerminalCancelRequest request);
   CompletableFuture<VoxResult<TerminalOperationResult, TerminalError>> disconnect(CallContext context, TerminalDisconnectRequest request);
 }

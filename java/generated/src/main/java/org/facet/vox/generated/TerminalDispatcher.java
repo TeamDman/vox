@@ -83,6 +83,16 @@ public final class TerminalDispatcher implements ServiceDispatcher {
           }
         });
       }
+      if (call.method().id() == TerminalServiceDescriptor.GET_CONTENT.id()) {
+        TerminalGetContentArgs args = PhonCodec.decode(TerminalGetContentArgs.ADAPTER, call.encodedArguments(), PhonLimits.defaults());
+        return handler.getContent(call.context(), args.request()).thenAccept(value -> {
+          try {
+            call.respond(PhonCodec.encode(TerminalGetContentResponse.ADAPTER, value, PhonLimits.defaults()));
+          } catch (PhonException error) {
+            throw new CompletionException(error);
+          }
+        });
+      }
       if (call.method().id() == TerminalServiceDescriptor.CANCEL.id()) {
         TerminalCancelArgs args = PhonCodec.decode(TerminalCancelArgs.ADAPTER, call.encodedArguments(), PhonLimits.defaults());
         return handler.cancel(call.context(), args.request()).thenAccept(value -> {

@@ -55,6 +55,13 @@ pub trait Terminal {
         request: TerminalSnapshotRequest,
     ) -> Result<TerminalSnapshot, TerminalError>;
 
+    /// Return the bounded visible terminal text for deterministic probes and
+    /// accessibility/debug witnesses without requiring PNG interpretation.
+    async fn get_content(
+        &self,
+        request: TerminalContentRequest,
+    ) -> Result<TerminalContentResult, TerminalError>;
+
     /// Cancel an in-flight terminal operation without closing the session.
     async fn cancel(
         &self,
@@ -188,6 +195,27 @@ pub struct TerminalSnapshotRequest {
     pub after_sequence: i64,
     pub max_frame_bytes: u32,
     pub client_sequence: i64,
+}
+
+/// Requests bounded visible-grid text, optionally after a known sequence.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalContentRequest {
+    pub session_id: String,
+    pub after_sequence: i64,
+    pub max_chars: u32,
+    pub client_sequence: i64,
+}
+
+/// Rust-owned visible-grid text witness.  The text includes prompt rows and
+/// trailing blank rows exactly as the terminal core exposes them.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalContentResult {
+    pub session_id: String,
+    pub sequence: i64,
+    pub text: String,
+    pub complete: bool,
+    pub truncated: bool,
+    pub prompt: TerminalPromptMetadata,
 }
 
 /// Bounded terminal frame.  `payload` is cells, RGBA/BGRA bytes, or PNG as

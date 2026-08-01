@@ -129,6 +129,23 @@ public final class TerminalClient {
       return CompletableFuture.failedFuture(error);
     }
   }
+  public CompletableFuture<VoxResult<TerminalContentResult, TerminalError>> getContent(TerminalContentRequest request) { return getContent(request, CallOptions.defaults()); }
+  public CompletableFuture<VoxResult<TerminalContentResult, TerminalError>> getContent(TerminalContentRequest request, CallOptions options) {
+    try {
+      byte[] encoded = PhonCodec.encode(TerminalGetContentArgs.ADAPTER, new TerminalGetContentArgs(request), PhonLimits.defaults());
+      return lane.call(TerminalServiceDescriptor.GET_CONTENT, encoded, options).thenApply(bytes -> {
+        try {
+          VoxResult<TerminalContentResult, TerminalError> result = PhonCodec.decode(TerminalGetContentResponse.ADAPTER, bytes, PhonLimits.defaults());
+          if (result.isInfrastructureError()) throw remoteFailure(result);
+          return result;
+        } catch (PhonException error) {
+          throw new CompletionException(error);
+        }
+      });
+    } catch (PhonException error) {
+      return CompletableFuture.failedFuture(error);
+    }
+  }
   public CompletableFuture<VoxResult<TerminalOperationResult, TerminalError>> cancel(TerminalCancelRequest request) { return cancel(request, CallOptions.defaults()); }
   public CompletableFuture<VoxResult<TerminalOperationResult, TerminalError>> cancel(TerminalCancelRequest request, CallOptions options) {
     try {

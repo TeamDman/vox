@@ -14,8 +14,9 @@ public final class TerminalServiceDescriptor {
   public static final MethodDescriptor SEND_KEY = new MethodDescriptor(0xe0e1cb7a111dc0c7L, "send_key", TerminalSendKeyArgs.ADAPTER, TerminalInputResult.ADAPTER, TerminalError.ADAPTER, TerminalSendKeyResponse.ADAPTER);
   public static final MethodDescriptor SEND_MOUSE = new MethodDescriptor(0xfd17ea461870349aL, "send_mouse", TerminalSendMouseArgs.ADAPTER, TerminalInputResult.ADAPTER, TerminalError.ADAPTER, TerminalSendMouseResponse.ADAPTER);
   public static final MethodDescriptor SNAPSHOT = new MethodDescriptor(0x4648749132a0ebb8L, "snapshot", TerminalSnapshotArgs.ADAPTER, TerminalSnapshot.ADAPTER, TerminalError.ADAPTER, TerminalSnapshotResponse.ADAPTER);
+  public static final MethodDescriptor GET_CONTENT = new MethodDescriptor(0x6f1917e81fe9c050L, "get_content", TerminalGetContentArgs.ADAPTER, TerminalContentResult.ADAPTER, TerminalError.ADAPTER, TerminalGetContentResponse.ADAPTER);
   public static final MethodDescriptor CANCEL = new MethodDescriptor(0x94967d6dfd5fa677L, "cancel", TerminalCancelArgs.ADAPTER, TerminalOperationResult.ADAPTER, TerminalError.ADAPTER, TerminalCancelResponse.ADAPTER);
   public static final MethodDescriptor DISCONNECT = new MethodDescriptor(0xbabc04d89ee3e7a7L, "disconnect", TerminalDisconnectArgs.ADAPTER, TerminalOperationResult.ADAPTER, TerminalError.ADAPTER, TerminalDisconnectResponse.ADAPTER);
-  public static final ServiceDescriptor INSTANCE = new ServiceDescriptor("Terminal", List.of(CONNECT, CAPABILITIES, RESIZE, SEND_TEXT, SEND_KEY, SEND_MOUSE, SNAPSHOT, CANCEL, DISCONNECT));
+  public static final ServiceDescriptor INSTANCE = new ServiceDescriptor("Terminal", List.of(CONNECT, CAPABILITIES, RESIZE, SEND_TEXT, SEND_KEY, SEND_MOUSE, SNAPSHOT, GET_CONTENT, CANCEL, DISCONNECT));
   private TerminalServiceDescriptor() {}
 }

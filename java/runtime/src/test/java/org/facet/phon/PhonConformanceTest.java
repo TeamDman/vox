@@ -6,6 +6,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /** Dependency-free Java 17 test entry point against the checked-in Rust corpus. */
@@ -18,6 +19,7 @@ public final class PhonConformanceTest {
         primitiveIdsMatchRust();
         acceptedSchemaCorpusRoundTrips(repository);
         schemaBundlesRoundTrip(repository);
+        auxiliarySchemaBundlesRoundTripDeterministically();
         valueCorpusRoundTrips(repository);
         typedCodecRoundTrips();
         compatibilityPlansEagerly();
@@ -32,6 +34,28 @@ public final class PhonConformanceTest {
         equal(original.id(),decoded.id(),"schema bundle root");
         same(original.canonicalBytes(),decoded.canonicalBytes(),"schema bundle canonical root");
         same(original.bundleBytes(),decoded.bundleBytes(),"schema bundle bytes");
+    }
+
+    private static void auxiliarySchemaBundlesRoundTripDeterministically()throws Exception{
+        SchemaClosure root=closure(Schema.primitive(Schema.Primitive.STRING));
+        SchemaClosure numbers=closure(Schema.primitive(Schema.Primitive.U32));
+        SchemaClosure flags=closure(Schema.primitive(Schema.Primitive.BOOL));
+        LinkedHashMap<String,SchemaClosure>reverse=new LinkedHashMap<>();
+        reverse.put("zeta",flags);reverse.put("alpha",numbers);
+        LinkedHashMap<String,SchemaClosure>forward=new LinkedHashMap<>();
+        forward.put("alpha",numbers);forward.put("zeta",flags);
+        SchemaClosure a=SchemaClosure.uncheckedWithAuxiliaryClosures(root.root(),List.of(),reverse);
+        SchemaClosure b=SchemaClosure.uncheckedWithAuxiliaryClosures(root.root(),List.of(),forward);
+        same(a.bundleBytes(),b.bundleBytes(),"auxiliary roots have deterministic role order");
+        SchemaClosure decoded=SchemaClosure.fromBundleBytes(a.bundleBytes(),PhonLimits.DEFAULT);
+        equal(numbers.id(),decoded.auxiliaryRoots().get("alpha"),"auxiliary alpha root");
+        equal(flags.id(),decoded.auxiliaryRoots().get("zeta"),"auxiliary zeta root");
+        equal(numbers.id(),decoded.auxiliary("alpha").id(),"auxiliary closure lookup");
+
+        byte[]malformed=a.bundleBytes();int role=indexOf(malformed,new byte[]{'a','l','p','h','a'});
+        check(role>=0,"auxiliary role is present in bundle");malformed[role]=(byte)0x80;
+        boolean rejected=false;try{SchemaClosure.fromBundleBytes(malformed,PhonLimits.DEFAULT);}catch(PhonException e){rejected=e.kind()==PhonException.Kind.MALFORMED;}
+        check(rejected,"malformed UTF-8 auxiliary role is rejected");
     }
 
     private static void valueCorpusRoundTrips(Path repository)throws Exception{
@@ -122,6 +146,7 @@ public final class PhonConformanceTest {
         try{CompatibilityPlan.plan(pointClosure,pointClosure,new PhonLimits(1024,1024,8,8,8,8,1));}catch(PhonException e){workBound=e.kind()==PhonException.Kind.LIMIT;}check(workBound,"planning work limit");
     }
     private static SchemaClosure closure(Schema schema){try{return SchemaClosure.of(schema);}catch(PhonException e){throw new ExceptionInInitializerError(e);}}
+    private static int indexOf(byte[]haystack,byte[]needle){outer:for(int i=0;i<=haystack.length-needle.length;i++){for(int j=0;j<needle.length;j++)if(haystack[i+j]!=needle[j])continue outer;return i;}return -1;}
     private static void same(byte[]a,byte[]b,String message){check(Arrays.equals(a,b),message);}
     private static void equal(Object a,Object b,String message){check(a.equals(b),message+": expected "+a+", got "+b);}
     private static void check(boolean value,String message){assertions++;if(!value)throw new AssertionError(message);}

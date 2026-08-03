@@ -11,14 +11,25 @@ import java.util.Objects;
 public final class SchemaClosure {
     private final Schema root;
     private final Map<SchemaId, Schema> schemas;
+    private final Map<String, SchemaId> auxiliaryRoots;
     private final byte[] canonicalBytes;
+    private final PhonLimits limits;
 
     public SchemaClosure(Schema root, List<Schema> reachable) throws PhonException {
         this(root, reachable, PhonLimits.DEFAULT);
     }
 
     public SchemaClosure(Schema root, List<Schema> reachable, PhonLimits limits) throws PhonException {
+        this(root, reachable, Map.of(), limits);
+    }
+
+    public SchemaClosure(
+            Schema root,
+            List<Schema> reachable,
+            Map<String, SchemaId> auxiliaryRoots,
+            PhonLimits limits) throws PhonException {
         this.root = Objects.requireNonNull(root);
+        this.limits = Objects.requireNonNull(limits, "limits");
         if (reachable.size() + 1 > limits.referencedSchemas())
             throw new PhonException(PhonException.Kind.LIMIT, "schema count exceeds referencedSchemas");
         LinkedHashMap<SchemaId, Schema> table = new LinkedHashMap<>();
@@ -29,6 +40,26 @@ public final class SchemaClosure {
             table.put(schema.id(), schema);
         }
         this.schemas = java.util.Collections.unmodifiableMap(table);
+        LinkedHashMap<String, SchemaId> roots = new LinkedHashMap<>();
+        for (Map.Entry<String, SchemaId> entry : new java.util.TreeMap<>(
+                Objects.requireNonNull(auxiliaryRoots, "auxiliaryRoots")).entrySet()) {
+            String role = Objects.requireNonNull(entry.getKey(), "auxiliary root role");
+            SchemaId id = Objects.requireNonNull(entry.getValue(), "auxiliary root id");
+            if (role.isEmpty()) {
+                throw new PhonException(
+                        PhonException.Kind.SCHEMA, "auxiliary schema root role must not be empty");
+            }
+            if (!table.containsKey(id) && !isPrimitive(id)) {
+                throw new PhonException(
+                        PhonException.Kind.SCHEMA,
+                        "auxiliary schema root " + id + " is absent from schema table");
+            }
+            if (roots.put(role, id) != null) {
+                throw new PhonException(
+                        PhonException.Kind.SCHEMA, "duplicate auxiliary schema root role " + role);
+            }
+        }
+        this.auxiliaryRoots = java.util.Collections.unmodifiableMap(roots);
         this.canonicalBytes = SchemaWire.encode(root);
         if (canonicalBytes.length > limits.schemaBytes())
             throw new PhonException(PhonException.Kind.LIMIT, "schema bytes exceed schemaBytes");
@@ -52,6 +83,42 @@ public final class SchemaClosure {
             throw new ExceptionInInitializerError(failure);
         }
     }
+    public static SchemaClosure withAuxiliaryRoots(
+            Schema root,
+            List<Schema> reachable,
+            Map<String, SchemaId> auxiliaryRoots,
+            PhonLimits limits) throws PhonException {
+        return new SchemaClosure(root, reachable, auxiliaryRoots, limits);
+    }
+    public static SchemaClosure uncheckedWithAuxiliaryRoots(
+            Schema root, List<Schema> reachable, Map<String, SchemaId> auxiliaryRoots) {
+        try {
+            return withAuxiliaryRoots(root, reachable, auxiliaryRoots, PhonLimits.DEFAULT);
+        } catch (PhonException failure) {
+            throw new ExceptionInInitializerError(failure);
+        }
+    }
+    public static SchemaClosure uncheckedWithAuxiliaryClosures(
+            Schema root,
+            List<Schema> reachable,
+            Map<String, SchemaClosure> auxiliaryClosures) {
+        try {
+            LinkedHashMap<SchemaId, Schema> all = new LinkedHashMap<>();
+            for (Schema schema : reachable) mergeSchema(all, schema);
+            LinkedHashMap<String, SchemaId> roots = new LinkedHashMap<>();
+            for (Map.Entry<String, SchemaClosure> entry : auxiliaryClosures.entrySet()) {
+                SchemaClosure closure = Objects.requireNonNull(entry.getValue());
+                roots.put(entry.getKey(), closure.id());
+                for (Schema schema : closure.schemas()) mergeSchema(all, schema);
+            }
+            all.remove(root.id());
+            ArrayList<Schema> ordered = new ArrayList<>(all.values());
+            ordered.sort(java.util.Comparator.comparing(schema -> schema.id().toString()));
+            return new SchemaClosure(root, ordered, roots, PhonLimits.DEFAULT);
+        } catch (PhonException failure) {
+            throw new ExceptionInInitializerError(failure);
+        }
+    }
     public static SchemaClosure fromCanonicalBytes(
             SchemaId rootId, byte[][] canonicalSchemas, PhonLimits limits)
             throws PhonException {
@@ -71,7 +138,7 @@ public final class SchemaClosure {
                     "root schema " + rootId + " is absent from canonical schema table");
         }
         decoded.remove(root);
-        return new SchemaClosure(root, decoded, limits);
+        return new SchemaClosure(root, decoded, Map.of(), limits);
     }
     /** Parse the Rust `vox_phon::schema_bytes` closure format. */
     public static SchemaClosure fromBundleBytes(byte[] bytes, PhonLimits limits)
@@ -97,17 +164,56 @@ public final class SchemaClosure {
             }
             schemas[index] = reader.bytes((int) length, "schema bundle entry");
         }
-        // Auxiliary roots are not used by the connection envelope or handshake.
-        // Reject them rather than silently accepting a shape the Java slice cannot use.
+        LinkedHashMap<String, SchemaId> auxiliaryRoots = new LinkedHashMap<>();
         if (reader.remaining() != 0) {
             long auxiliaryCount = reader.u32("schema bundle auxiliary root count");
-            if (auxiliaryCount != 0) {
-                throw new PhonException(PhonException.Kind.SCHEMA,
-                        "auxiliary schema roots are outside the Java wire slice");
+            if (auxiliaryCount > limits.referencedSchemas()) {
+                throw new PhonException(
+                        PhonException.Kind.LIMIT,
+                        "auxiliary schema root count exceeds referencedSchemas");
+            }
+            for (long index = 0; index < auxiliaryCount; index++) {
+                long roleLength = reader.u32("auxiliary schema root role length");
+                if (roleLength > limits.schemaBytes()) {
+                    throw new PhonException(
+                            PhonException.Kind.LIMIT,
+                            "auxiliary schema root role exceeds schemaBytes");
+                }
+                String role;
+                try {
+                    role = java.nio.charset.StandardCharsets.UTF_8.newDecoder()
+                            .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                            .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+                            .decode(java.nio.ByteBuffer.wrap(reader.bytes(
+                                    (int) roleLength, "auxiliary schema root role")))
+                            .toString();
+                } catch (java.nio.charset.CharacterCodingException failure) {
+                    throw new PhonException(
+                            PhonException.Kind.MALFORMED,
+                            "invalid auxiliary schema root role", failure);
+                }
+                SchemaId auxiliaryRoot =
+                        SchemaId.fromLong(reader.u64("auxiliary schema root"));
+                if (auxiliaryRoots.put(role, auxiliaryRoot) != null) {
+                    throw new PhonException(
+                            PhonException.Kind.SCHEMA,
+                            "duplicate auxiliary schema root role " + role);
+                }
             }
         }
         reader.finished();
-        return fromCanonicalBytes(rootId, schemas, limits);
+        List<Schema> decoded = new ArrayList<>();
+        for (byte[] canonicalSchema : schemas) {
+            decoded.add(SchemaWire.decode(canonicalSchema, limits));
+        }
+        Schema root = decoded.stream()
+                .filter(schema -> schema.id().equals(rootId))
+                .findFirst()
+                .orElseThrow(() -> new PhonException(
+                        PhonException.Kind.SCHEMA,
+                        "root schema " + rootId + " is absent from canonical schema table"));
+        decoded.remove(root);
+        return new SchemaClosure(root, decoded, auxiliaryRoots, limits);
     }
 
     /** Encode the Rust `vox_phon::schema_bytes` closure format. */
@@ -120,12 +226,42 @@ public final class SchemaClosure {
             little(output, encoded.length, 4);
             output.write(encoded, 0, encoded.length);
         }
+        if (!auxiliaryRoots.isEmpty()) {
+            little(output, auxiliaryRoots.size(), 4);
+            for (Map.Entry<String, SchemaId> entry : auxiliaryRoots.entrySet()) {
+                byte[] role = entry.getKey().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                little(output, role.length, 4);
+                output.write(role, 0, role.length);
+                little(output, entry.getValue().asLong(), 8);
+            }
+        }
         return output.toByteArray();
     }
     public Schema root() { return root; }
     public SchemaId id() { return root.id(); }
     public byte[] canonicalBytes() { return canonicalBytes.clone(); }
     public List<Schema> schemas() { return List.copyOf(schemas.values()); }
+    public Map<String, SchemaId> auxiliaryRoots() { return auxiliaryRoots; }
+    public SchemaClosure auxiliary(String role) throws PhonException {
+        SchemaId id = auxiliaryRoots.get(role);
+        if (id == null) return null;
+        Schema auxiliaryRoot = schemas.get(id);
+        if (auxiliaryRoot == null) {
+            for (Schema.Primitive primitive : Schema.Primitive.values()) {
+                if (SchemaIdentity.primitiveId(primitive).equals(id)) {
+                    auxiliaryRoot = new Schema(id, List.of(), new Schema.PrimitiveKind(primitive));
+                    break;
+                }
+            }
+        }
+        if (auxiliaryRoot == null) {
+            throw new PhonException(
+                    PhonException.Kind.SCHEMA, "unknown auxiliary schema root " + id);
+        }
+        ArrayList<Schema> reachable = new ArrayList<>(schemas.values());
+        reachable.remove(auxiliaryRoot);
+        return new SchemaClosure(auxiliaryRoot, reachable, Map.of(), limits);
+    }
     Schema schema(SchemaId id) { return schemas.get(id); }
     Schema resolve(Schema.Ref ref) throws PhonException {
         if (ref.isVariable()) throw new PhonException(PhonException.Kind.SCHEMA, "unbound type variable " + ref.variable());
@@ -135,6 +271,25 @@ public final class SchemaClosure {
             if (SchemaIdentity.primitiveId(primitive).equals(ref.id()))
                 return new Schema(ref.id(), List.of(), new Schema.PrimitiveKind(primitive));
         throw new PhonException(PhonException.Kind.SCHEMA, "unknown schema " + ref.id());
+    }
+
+    private static boolean isPrimitive(SchemaId id) {
+        for (Schema.Primitive primitive : Schema.Primitive.values()) {
+            if (SchemaIdentity.primitiveId(primitive).equals(id)) return true;
+        }
+        return false;
+    }
+
+    private static void mergeSchema(Map<SchemaId, Schema> schemas, Schema candidate)
+            throws PhonException {
+        Schema existing = schemas.putIfAbsent(candidate.id(), candidate);
+        if (existing != null
+                && !java.util.Arrays.equals(
+                        SchemaWire.encode(existing), SchemaWire.encode(candidate))) {
+            throw new PhonException(
+                    PhonException.Kind.SCHEMA,
+                    "conflicting canonical schemas share id " + candidate.id());
+        }
     }
 
     private static void little(ByteArrayOutputStream output, long value, int width) {

@@ -60,6 +60,12 @@ public final class PhonEncoder {
         if (value < 0 || value > 0xffff_ffffL) throw new PhonException(PhonException.Kind.ENCODE, "u32 out of range");
         little(value, 4);
     }
+    /** Writes a Phon enum/result discriminant without scalar alignment padding. */
+    public void writeU32Unaligned(long value) throws PhonException {
+        if (value < 0 || value > 0xffff_ffffL) throw new PhonException(PhonException.Kind.ENCODE, "u32 out of range");
+        capacity(4);
+        for (int i = 0; i < 4; i++) out.write((int) (value >>> (8 * i)) & 0xff);
+    }
     public void writeU64(BigInteger value) throws PhonException { bigInteger(value, 8, false); }
     public void writeU128(BigInteger value) throws PhonException { bigInteger(value, 16, false); }
     public void writeI8(byte value) throws PhonException { raw(value); }

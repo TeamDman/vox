@@ -50,7 +50,7 @@ public final class PhonDecoder {
     }
     private void align(int alignment) throws PhonException {
         while (position % alignment != 0) {
-            if (raw() != 0) throw malformed("non-zero alignment padding");
+            if (raw() != 0) throw malformed("non-zero alignment padding at position " + (position - 1));
         }
     }
 
@@ -60,6 +60,13 @@ public final class PhonDecoder {
     public int readU8() throws PhonException { return raw(); }
     public int readU16() throws PhonException { return (int) little(2); }
     public long readU32() throws PhonException { return little(4) & 0xffff_ffffL; }
+    /** Reads a Phon enum/result discriminant without scalar alignment padding. */
+    public long readU32Unaligned() throws PhonException {
+        need(4);
+        long value = 0;
+        for (int i = 0; i < 4; i++) value |= (long) raw() << (8 * i);
+        return value & 0xffff_ffffL;
+    }
     public BigInteger readU64() throws PhonException { return bigInteger(8, false); }
     public BigInteger readU128() throws PhonException { return bigInteger(16, false); }
     public byte readI8() throws PhonException { return (byte) raw(); }

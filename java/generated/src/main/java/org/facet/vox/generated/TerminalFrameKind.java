@@ -9,7 +9,7 @@ public enum TerminalFrameKind { FULL, DIRTY_TILE;
   public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0xe9d0786e5baa1c44L), List.of(), new Schema.EnumKind("TerminalFrameKind", List.of(new Schema.Variant("Full", 0, Schema.Payload.unit()), new Schema.Variant("DirtyTile", 1, Schema.Payload.unit()))));
   public static final PhonAdapter<TerminalFrameKind> ADAPTER = new PhonAdapter<>() {
     @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA); }
-    @Override public void encode(PhonEncoder encoder, TerminalFrameKind value) throws PhonException { encoder.writeU32(value.ordinal()); }
-    @Override public TerminalFrameKind decode(PhonDecoder decoder) throws PhonException { long value = decoder.readU32(); if (value >= values().length) throw new PhonException(PhonException.Kind.MALFORMED, "invalid TerminalFrameKind discriminant " + value); return values()[(int) value]; }
+    @Override public void encode(PhonEncoder encoder, TerminalFrameKind value) throws PhonException { encoder.writeU32Unaligned(value.ordinal()); }
+    @Override public TerminalFrameKind decode(PhonDecoder decoder) throws PhonException { long value = decoder.readU32Unaligned(); if (value >= values().length) throw new PhonException(PhonException.Kind.MALFORMED, "invalid TerminalFrameKind discriminant " + value); return values()[(int) value]; }
   };
 }

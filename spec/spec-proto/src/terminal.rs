@@ -302,6 +302,8 @@ pub struct TerminalSnapshot {
     pub selection_present: bool,
     pub selection: TerminalSelection,
     pub prompt: TerminalPromptMetadata,
+    #[facet(default)]
+    pub timing: TerminalSnapshotTiming,
 }
 
 /// Frame payload representation negotiated by the peers.
@@ -359,6 +361,19 @@ pub struct TerminalRange {
     pub start_y: u16,
     pub end_x: u16,
     pub end_y: u16,
+}
+
+/// Rust-side timing stages for the full-PNG snapshot that contains this
+/// metadata. Java joins these values with its Vox wait and presentation
+/// measurements using the enclosing snapshot correlation ID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Facet)]
+pub struct TerminalSnapshotTiming {
+    pub pty_drain_us: i64,
+    pub terminal_snapshot_us: i64,
+    pub font_load_us: i64,
+    pub raster_us: i64,
+    pub png_encode_us: i64,
+    pub total_us: i64,
 }
 
 /// Cancels a request while retaining the session.
@@ -480,11 +495,84 @@ mod tests {
                 command_status_present: true,
                 command_status: 0,
             },
+            timing: TerminalSnapshotTiming::default(),
         };
         let bytes = vox_phon::to_vec(&snapshot).expect("encode terminal snapshot");
         let decoded: TerminalSnapshot =
             vox_phon::from_slice(&bytes).expect("decode terminal snapshot");
         assert_eq!(decoded, snapshot);
+    }
+
+    #[test]
+    fn terminal_snapshot_response_wire_payload_is_stable() {
+        type WireResponse = Result<TerminalSnapshot, vox::VoxError<TerminalError>>;
+
+        let snapshot = TerminalSnapshot {
+            session_id: "session-01".to_string(),
+            sequence: 42,
+            request_sequence: 41,
+            logical_columns: 80,
+            logical_rows: 24,
+            width: 80,
+            height: 24,
+            panel_width: 640,
+            panel_height: 384,
+            cell_width: 8,
+            cell_height: 16,
+            font_pixel_size: 16,
+            correlation_id: "snapshot-01".to_string(),
+            encoding: TerminalFrameEncoding::Rgba8,
+            kind: TerminalFrameKind::Full,
+            stride: 320,
+            tile_x: 0,
+            tile_y: 0,
+            tile_width: 80,
+            tile_height: 24,
+            payload: vec![0, 16, 32, 255, 255, 128, 64, 255],
+            complete: true,
+            cursor: TerminalCursor {
+                x: 3,
+                y: 4,
+                visible: true,
+            },
+            selection_present: true,
+            selection: TerminalSelection {
+                anchor_x: 1,
+                anchor_y: 2,
+                focus_x: 5,
+                focus_y: 2,
+            },
+            prompt: TerminalPromptMetadata {
+                prompt_present: true,
+                prompt: TerminalRange {
+                    start_x: 0,
+                    start_y: 0,
+                    end_x: 3,
+                    end_y: 0,
+                },
+                command_present: true,
+                command: TerminalRange {
+                    start_x: 3,
+                    start_y: 0,
+                    end_x: 12,
+                    end_y: 0,
+                },
+                command_status_present: true,
+                command_status: 0,
+            },
+            timing: TerminalSnapshotTiming {
+                pty_drain_us: 1,
+                terminal_snapshot_us: 2,
+                font_load_us: 3,
+                raster_us: 4,
+                png_encode_us: 5,
+                total_us: 15,
+            },
+        };
+        let payload = vox_phon::to_vec(&Ok::<_, vox::VoxError<TerminalError>>(snapshot))
+            .expect("encode terminal snapshot response");
+        let _: WireResponse = vox_phon::from_slice(&payload)
+            .expect("decode terminal snapshot response");
     }
 
     #[test]
@@ -518,6 +606,64 @@ mod tests {
         let decoded: TerminalContentResult =
             vox_phon::from_slice(&bytes).expect("decode terminal content witness");
         assert_eq!(decoded, content);
+    }
+
+    #[test]
+    fn terminal_content_response_wire_schema_matches_generated_java_root() {
+        type WireResponse = Result<TerminalContentResult, vox::VoxError<TerminalError>>;
+
+        let schema_id = vox_phon::schema_id_for_shape(<WireResponse as Facet>::SHAPE)
+            .expect("terminal content response wire schema id");
+        assert_eq!(schema_id.as_u64(), 0x0152_82f6_6494_f34c);
+        let schema = vox_phon::schema_bytes_for_shape(<WireResponse as Facet>::SHAPE)
+            .expect("terminal content response wire schema bytes");
+        assert!(!schema.is_empty(), "terminal content response schema bytes");
+        let wire = Ok::<_, vox::VoxError<TerminalError>>(TerminalContentResult {
+            session_id: "sfm-terminal-1".to_string(),
+            sequence: 7,
+            text: "PS C:\\work> hello\\n".to_string(),
+            complete: true,
+            truncated: false,
+            prompt: TerminalPromptMetadata {
+                prompt_present: true,
+                prompt: TerminalRange {
+                    start_x: 0,
+                    start_y: 0,
+                    end_x: 13,
+                    end_y: 0,
+                },
+                command_present: false,
+                command: TerminalRange {
+                    start_x: 0,
+                    start_y: 0,
+                    end_x: 0,
+                    end_y: 0,
+                },
+                command_status_present: false,
+                command_status: 0,
+            },
+        });
+        let payload = vox_phon::to_vec(&wire).expect("encode terminal content response");
+        let decoded: WireResponse = vox_phon::from_slice(&payload)
+            .expect("decode terminal content response");
+        assert!(matches!(decoded, Ok(TerminalContentResult { complete: true, .. })));
+
+        let error = Err::<TerminalContentResult, _>(vox::VoxError::User(Box::new(
+            TerminalError {
+                code: TerminalErrorCode::Internal,
+                message: "pty output unavailable".to_string(),
+                retryable: true,
+                server_sequence: 8,
+            },
+        )));
+        let error_payload = vox_phon::to_vec(&error)
+            .expect("encode terminal content application error");
+        let decoded_error: WireResponse = vox_phon::from_slice(&error_payload)
+            .expect("decode terminal content application error");
+        assert!(matches!(decoded_error, Err(vox::VoxError::User(error))
+            if error.code == TerminalErrorCode::Internal
+                && error.retryable
+                && error.server_sequence == 8));
     }
 
     #[test]

@@ -9,7 +9,7 @@ public enum MathError { DIVISION_BY_ZERO, OVERFLOW;
   public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0xf65a62d0f391974fL), List.of(), new Schema.EnumKind("MathError", List.of(new Schema.Variant("DivisionByZero", 0, Schema.Payload.unit()), new Schema.Variant("Overflow", 1, Schema.Payload.unit()))));
   public static final PhonAdapter<MathError> ADAPTER = new PhonAdapter<>() {
     @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA); }
-    @Override public void encode(PhonEncoder encoder, MathError value) throws PhonException { encoder.writeU32(value.ordinal()); }
-    @Override public MathError decode(PhonDecoder decoder) throws PhonException { long value = decoder.readU32(); if (value >= values().length) throw new PhonException(PhonException.Kind.MALFORMED, "invalid MathError discriminant " + value); return values()[(int) value]; }
+    @Override public void encode(PhonEncoder encoder, MathError value) throws PhonException { encoder.writeU32Unaligned(value.ordinal()); }
+    @Override public MathError decode(PhonDecoder decoder) throws PhonException { long value = decoder.readU32Unaligned(); if (value >= values().length) throw new PhonException(PhonException.Kind.MALFORMED, "invalid MathError discriminant " + value); return values()[(int) value]; }
   };
 }

@@ -9,7 +9,7 @@ public enum TerminalState { READY, CLOSING, CLOSED, DISCONNECTED;
   public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x2f10255352459c16L), List.of(), new Schema.EnumKind("TerminalState", List.of(new Schema.Variant("Ready", 0, Schema.Payload.unit()), new Schema.Variant("Closing", 1, Schema.Payload.unit()), new Schema.Variant("Closed", 2, Schema.Payload.unit()), new Schema.Variant("Disconnected", 3, Schema.Payload.unit()))));
   public static final PhonAdapter<TerminalState> ADAPTER = new PhonAdapter<>() {
     @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA); }
-    @Override public void encode(PhonEncoder encoder, TerminalState value) throws PhonException { encoder.writeU32(value.ordinal()); }
-    @Override public TerminalState decode(PhonDecoder decoder) throws PhonException { long value = decoder.readU32(); if (value >= values().length) throw new PhonException(PhonException.Kind.MALFORMED, "invalid TerminalState discriminant " + value); return values()[(int) value]; }
+    @Override public void encode(PhonEncoder encoder, TerminalState value) throws PhonException { encoder.writeU32Unaligned(value.ordinal()); }
+    @Override public TerminalState decode(PhonDecoder decoder) throws PhonException { long value = decoder.readU32Unaligned(); if (value >= values().length) throw new PhonException(PhonException.Kind.MALFORMED, "invalid TerminalState discriminant " + value); return values()[(int) value]; }
   };
 }

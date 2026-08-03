@@ -525,11 +525,11 @@ fn generate_named_type(package: &str, name: &str, shape: &'static Shape) -> Stri
             out.push_str("    @Override public void encode(PhonEncoder encoder, ");
             let _ = writeln!(
                 out,
-                "{name} value) throws PhonException {{ encoder.writeU32(value.ordinal()); }}"
+                "{name} value) throws PhonException {{ encoder.writeU32Unaligned(value.ordinal()); }}"
             );
             let _ = writeln!(
                 out,
-                "    @Override public {name} decode(PhonDecoder decoder) throws PhonException {{ long value = decoder.readU32(); if (value >= values().length) throw new PhonException(PhonException.Kind.MALFORMED, \"invalid {name} discriminant \" + value); return values()[(int) value]; }}"
+                "    @Override public {name} decode(PhonDecoder decoder) throws PhonException {{ long value = decoder.readU32Unaligned(); if (value >= values().length) throw new PhonException(PhonException.Kind.MALFORMED, \"invalid {name} discriminant \" + value); return values()[(int) value]; }}"
             );
             out.push_str("  };\n");
             out.push_str("}\n");
@@ -930,17 +930,17 @@ fn generate_response_type(
         "    @Override public void encode(PhonEncoder encoder, VoxResult<{ok_type}, {error_type}> value) throws PhonException {{"
     );
     out.push_str(
-        "      if (value.isSuccess()) {\n        encoder.writeU32(0);\n        encoder.writeAdapted(",
+        "      if (value.isSuccess()) {\n        encoder.writeU32Unaligned(0);\n        encoder.writeAdapted(",
     );
     let _ = writeln!(
         out,
         "{ok_adapter}, value.success());\n        return;\n      }}"
     );
-    out.push_str("      encoder.writeU32(1);\n      switch (value.kind()) {\n");
+    out.push_str("      encoder.writeU32Unaligned(1);\n      switch (value.kind()) {\n");
     if let Some(ref error_adapter) = error_adapter {
         let _ = writeln!(
             out,
-            "        case APPLICATION_ERROR:\n          encoder.writeU32(0);\n          encoder.writeAdapted({error_adapter}, value.applicationError());\n          return;"
+            "        case APPLICATION_ERROR:\n          encoder.writeU32Unaligned(0);\n          encoder.writeAdapted({error_adapter}, value.applicationError());\n          return;"
         );
     } else {
         out.push_str(
@@ -948,14 +948,14 @@ fn generate_response_type(
         );
     }
     out.push_str(
-        "        case UNKNOWN_METHOD: encoder.writeU32(1); return;\n\
-         case INVALID_PAYLOAD: encoder.writeU32(2); encoder.writeString(value.detail()); return;\n\
-         case CANCELLED: encoder.writeU32(3); return;\n\
-         case CONNECTION_CLOSED: encoder.writeU32(4); return;\n\
-         case CONNECTION_SHUTDOWN: encoder.writeU32(5); return;\n\
-         case SEND_FAILED: encoder.writeU32(6); return;\n\
-         case TIMED_OUT: encoder.writeU32(7); return;\n\
-         case INDETERMINATE: encoder.writeU32(8); return;\n\
+        "        case UNKNOWN_METHOD: encoder.writeU32Unaligned(1); return;\n\
+         case INVALID_PAYLOAD: encoder.writeU32Unaligned(2); encoder.writeString(value.detail()); return;\n\
+         case CANCELLED: encoder.writeU32Unaligned(3); return;\n\
+         case CONNECTION_CLOSED: encoder.writeU32Unaligned(4); return;\n\
+         case CONNECTION_SHUTDOWN: encoder.writeU32Unaligned(5); return;\n\
+         case SEND_FAILED: encoder.writeU32Unaligned(6); return;\n\
+         case TIMED_OUT: encoder.writeU32Unaligned(7); return;\n\
+         case INDETERMINATE: encoder.writeU32Unaligned(8); return;\n\
          default: throw new PhonException(PhonException.Kind.ENCODE, \"invalid response result kind\");\n\
          }\n    }\n",
     );
@@ -963,10 +963,10 @@ fn generate_response_type(
         out,
         "    @Override public VoxResult<{ok_type}, {error_type}> decode(PhonDecoder decoder) throws PhonException {{"
     );
-    out.push_str("      long outer = decoder.readU32();\n      if (outer == 0) return VoxResult.success(decoder.readAdapted(");
+    out.push_str("      long outer = decoder.readU32Unaligned();\n      if (outer == 0) return VoxResult.success(decoder.readAdapted(");
     let _ = writeln!(out, "{ok_adapter}));");
     out.push_str(
-        "      if (outer != 1) throw new PhonException(PhonException.Kind.MALFORMED, \"invalid Result discriminant\");\n      long error = decoder.readU32();\n      switch ((int) error) {\n",
+        "      if (outer != 1) throw new PhonException(PhonException.Kind.MALFORMED, \"invalid Result discriminant\");\n      long error = decoder.readU32Unaligned();\n      switch ((int) error) {\n",
     );
     if let Some(ref error_adapter) = error_adapter {
         let _ = writeln!(
@@ -1758,11 +1758,11 @@ mod tests {
             ),
             (
                 "org/facet/phon/PhonEncoder.java",
-                "package org.facet.phon; public final class PhonEncoder { public void writeBool(boolean v){} public void writeU8(int v){} public void writeU16(int v){} public void writeU32(long v){} public void writeI8(int v){} public void writeI16(int v){} public void writeI32(int v){} public void writeI64(long v){} public void writeF32(float v){} public void writeF64(double v){} public void writeChar(char v){} public void writeString(String v){} public void writeBytes(byte[] v){} public <T> void writeAdapted(PhonAdapter<T> a,T v){} }",
+                "package org.facet.phon; public final class PhonEncoder { public void writeBool(boolean v){} public void writeU8(int v){} public void writeU16(int v){} public void writeU32(long v){} public void writeU32Unaligned(long v){} public void writeI8(int v){} public void writeI16(int v){} public void writeI32(int v){} public void writeI64(long v){} public void writeF32(float v){} public void writeF64(double v){} public void writeChar(char v){} public void writeString(String v){} public void writeBytes(byte[] v){} public <T> void writeAdapted(PhonAdapter<T> a,T v){} }",
             ),
             (
                 "org/facet/phon/PhonDecoder.java",
-                "package org.facet.phon; public final class PhonDecoder { public boolean readBool(){return false;} public int readU8(){return 0;} public int readU16(){return 0;} public long readU32(){return 0;} public int readI8(){return 0;} public int readI16(){return 0;} public int readI32(){return 0;} public long readI64(){return 0;} public float readF32(){return 0;} public double readF64(){return 0;} public char readChar(){return 0;} public String readString(){return null;} public byte[] readBytes(){return null;} public <T> T readAdapted(PhonAdapter<T> a){return null;} }",
+                "package org.facet.phon; public final class PhonDecoder { public boolean readBool(){return false;} public int readU8(){return 0;} public int readU16(){return 0;} public long readU32(){return 0;} public long readU32Unaligned(){return 0;} public int readI8(){return 0;} public int readI16(){return 0;} public int readI32(){return 0;} public long readI64(){return 0;} public float readF32(){return 0;} public double readF64(){return 0;} public char readChar(){return 0;} public String readString(){return null;} public byte[] readBytes(){return null;} public <T> T readAdapted(PhonAdapter<T> a){return null;} }",
             ),
             (
                 "org/facet/phon/PhonLimits.java",

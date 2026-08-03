@@ -25,32 +25,32 @@ public final class TerminalResizeResponse {
     @Override public SchemaClosure schema() { return SCHEMA; }
     @Override public void encode(PhonEncoder encoder, VoxResult<TerminalResizeResult, TerminalError> value) throws PhonException {
       if (value.isSuccess()) {
-        encoder.writeU32(0);
+        encoder.writeU32Unaligned(0);
         encoder.writeAdapted(TerminalResizeResult.ADAPTER, value.success());
         return;
       }
-      encoder.writeU32(1);
+      encoder.writeU32Unaligned(1);
       switch (value.kind()) {
         case APPLICATION_ERROR:
-          encoder.writeU32(0);
+          encoder.writeU32Unaligned(0);
           encoder.writeAdapted(TerminalError.ADAPTER, value.applicationError());
           return;
-        case UNKNOWN_METHOD: encoder.writeU32(1); return;
-case INVALID_PAYLOAD: encoder.writeU32(2); encoder.writeString(value.detail()); return;
-case CANCELLED: encoder.writeU32(3); return;
-case CONNECTION_CLOSED: encoder.writeU32(4); return;
-case CONNECTION_SHUTDOWN: encoder.writeU32(5); return;
-case SEND_FAILED: encoder.writeU32(6); return;
-case TIMED_OUT: encoder.writeU32(7); return;
-case INDETERMINATE: encoder.writeU32(8); return;
+        case UNKNOWN_METHOD: encoder.writeU32Unaligned(1); return;
+case INVALID_PAYLOAD: encoder.writeU32Unaligned(2); encoder.writeString(value.detail()); return;
+case CANCELLED: encoder.writeU32Unaligned(3); return;
+case CONNECTION_CLOSED: encoder.writeU32Unaligned(4); return;
+case CONNECTION_SHUTDOWN: encoder.writeU32Unaligned(5); return;
+case SEND_FAILED: encoder.writeU32Unaligned(6); return;
+case TIMED_OUT: encoder.writeU32Unaligned(7); return;
+case INDETERMINATE: encoder.writeU32Unaligned(8); return;
 default: throw new PhonException(PhonException.Kind.ENCODE, "invalid response result kind");
 }
     }
     @Override public VoxResult<TerminalResizeResult, TerminalError> decode(PhonDecoder decoder) throws PhonException {
-      long outer = decoder.readU32();
+      long outer = decoder.readU32Unaligned();
       if (outer == 0) return VoxResult.success(decoder.readAdapted(TerminalResizeResult.ADAPTER));
       if (outer != 1) throw new PhonException(PhonException.Kind.MALFORMED, "invalid Result discriminant");
-      long error = decoder.readU32();
+      long error = decoder.readU32Unaligned();
       switch ((int) error) {
         case 0: return VoxResult.applicationError(decoder.readAdapted(TerminalError.ADAPTER));
         case 1: return VoxResult.infrastructure(VoxResult.Kind.UNKNOWN_METHOD);

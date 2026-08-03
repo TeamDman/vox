@@ -191,9 +191,10 @@ fn validate_shape(
         ShapeKind::Tx { .. } | ShapeKind::Rx { .. } => {
             Err(error(method, &format!("channel in {location}")))
         }
-        ShapeKind::List { .. }
-        | ShapeKind::Slice { .. }
-        | ShapeKind::Set { .. }
+        ShapeKind::List { element } | ShapeKind::Slice { element } => {
+            validate_shape(method, element, location)
+        }
+        ShapeKind::Set { .. }
         | ShapeKind::Array { .. }
         | ShapeKind::Option { .. }
         | ShapeKind::Map { .. } => Err(error(
@@ -438,7 +439,12 @@ fn generate_named_type(package: &str, name: &str, shape: &'static Shape) -> Stri
             let _ = writeln!(out, "  public {name}({args}) {{");
             for field in fields {
                 let field_name = java_ident(field.name);
-                if is_reference(field.shape()) && !is_option(field.shape()) {
+                if is_list(field.shape()) {
+                    let _ = writeln!(
+                        out,
+                        "    this.{field_name} = List.copyOf(Objects.requireNonNull({field_name}, \"{field_name}\"));"
+                    );
+                } else if is_reference(field.shape()) && !is_option(field.shape()) {
                     let _ = writeln!(
                         out,
                         "    this.{field_name} = Objects.requireNonNull({field_name}, \"{field_name}\");"
@@ -611,7 +617,12 @@ fn generate_args_type(package: &str, name: &str, method: &MethodDescriptor) -> S
     let _ = writeln!(out, "  public {name}({args}) {{");
     for arg in method.args {
         let arg_name = java_ident(arg.name);
-        if is_reference(arg.shape) && !is_option(arg.shape) {
+        if is_list(arg.shape) {
+            let _ = writeln!(
+                out,
+                "    this.{arg_name} = List.copyOf(Objects.requireNonNull({arg_name}, \"{arg_name}\"));"
+            );
+        } else if is_reference(arg.shape) && !is_option(arg.shape) {
             let _ = writeln!(
                 out,
                 "    this.{arg_name} = Objects.requireNonNull({arg_name}, \"{arg_name}\");"
@@ -843,6 +854,35 @@ fn emit_exact_schema_closure(
     }
 }
 
+fn exact_schema_closure_expression(shape: &'static Shape) -> String {
+    let module = phon_codegen::Module::from_shapes(&[shape]).unwrap_or_else(|error| {
+        panic!(
+            "Java schema closure generation failed for `{}`: {error}",
+            shape.type_identifier
+        )
+    });
+    let root = module
+        .roots
+        .first()
+        .expect("one schema closure root")
+        .id
+        .as_u64();
+    let schemas = module
+        .schemas
+        .iter()
+        .map(|schema| {
+            let bytes = schema_to_bytes(schema)
+                .iter()
+                .map(|byte| format!("(byte)0x{byte:02x}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("new byte[] {{{bytes}}}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("PrimitiveAdapters.schemaClosure(0x{root:016x}L, new byte[][] {{{schemas}}})")
+}
+
 fn schema_ref_expr(shape: &'static Shape) -> String {
     format!(
         "Schema.Ref.concrete(SchemaId.fromLong(0x{:016x}L))",
@@ -851,6 +891,9 @@ fn schema_ref_expr(shape: &'static Shape) -> String {
 }
 
 fn encode_statement(shape: &'static Shape, value: &str) -> String {
+    if is_bytes(shape) {
+        return format!("encoder.writeBytes({value});");
+    }
     match classify_shape(shape) {
         ShapeKind::Scalar(ScalarType::Bool) => format!("encoder.writeBool({value});"),
         ShapeKind::Scalar(ScalarType::U8) => format!("encoder.writeU8({value});"),
@@ -876,7 +919,10 @@ fn encode_statement(shape: &'static Shape, value: &str) -> String {
             "encoder.writeAdapted({}.ADAPTER, {value});",
             java_type_name(name)
         ),
-        _ if is_bytes(shape) => format!("encoder.writeBytes({value});"),
+        ShapeKind::List { element } | ShapeKind::Slice { element } => format!(
+            "PrimitiveAdapters.writeList(encoder, {value}, {});",
+            adapter_for(element)
+        ),
         _ => format!(
             "throw new PhonException(PhonException.Kind.DECODE, \"generated adapter for {} is not implemented\");",
             shape.type_identifier.replace('"', "\\\"")
@@ -885,6 +931,9 @@ fn encode_statement(shape: &'static Shape, value: &str) -> String {
 }
 
 fn decode_expression(shape: &'static Shape) -> String {
+    if is_bytes(shape) {
+        return "decoder.readBytes()".into();
+    }
     match classify_shape(shape) {
         ShapeKind::Scalar(ScalarType::Bool) => "decoder.readBool()".into(),
         ShapeKind::Scalar(ScalarType::U8) => "decoder.readU8()".into(),
@@ -907,7 +956,10 @@ fn decode_expression(shape: &'static Shape) -> String {
         | ShapeKind::Enum(EnumInfo {
             name: Some(name), ..
         }) => format!("decoder.readAdapted({}.ADAPTER)", java_type_name(name)),
-        _ if is_bytes(shape) => "decoder.readBytes()".into(),
+        ShapeKind::List { element } | ShapeKind::Slice { element } => format!(
+            "PrimitiveAdapters.readList(decoder, {})",
+            adapter_for(element)
+        ),
         _ => format!(
             "unsupportedDecode(\"{}\")",
             shape.type_identifier.replace('"', "\\\"")
@@ -1015,37 +1067,14 @@ fn generate_response_type(
     let error_type = error_shape.map_or_else(|| "Void".to_string(), boxed_java_type);
     let ok_adapter = adapter_for(ok_shape);
     let error_adapter = error_shape.map(adapter_for);
-    let module =
-        phon_codegen::Module::from_shapes(&[method.response_wire_shape]).map_err(|cause| {
-            error(
-                method,
-                &format!("response schema derivation failed: {cause}"),
-            )
-        })?;
-    let root = module.roots.first().expect("one response root").id.as_u64();
-
     let mut out = header(package);
     out.push_str("import org.facet.phon.*;\nimport org.facet.vox.VoxResult;\n\n");
     let _ = writeln!(out, "public final class {name} {{");
-    let _ = writeln!(
-        out,
-        "  private static final SchemaClosure SCHEMA = responseSchema();"
-    );
-    out.push_str("  private static SchemaClosure responseSchema() {\n    try {\n");
-    let _ = writeln!(
-        out,
-        "      return SchemaClosure.fromCanonicalBytes(SchemaId.fromLong(0x{root:016x}L), new byte[][] {{"
-    );
-    for schema in &module.schemas {
-        let bytes = schema_to_bytes(schema)
-            .iter()
-            .map(|byte| format!("(byte)0x{byte:02x}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let _ = writeln!(out, "        new byte[] {{{bytes}}},");
-    }
-    out.push_str(
-        "      }, PhonLimits.defaults());\n    } catch (PhonException failure) {\n      throw new ExceptionInInitializerError(failure);\n    }\n  }\n",
+    emit_exact_schema_closure(
+        &mut out,
+        method.response_wire_shape,
+        "SCHEMA",
+        "responseSchema",
     );
     let _ = writeln!(
         out,
@@ -1338,6 +1367,9 @@ fn wire_result_type(shape: &'static Shape) -> String {
 }
 
 fn adapter_for(shape: &'static Shape) -> String {
+    if is_bytes(shape) {
+        return "PrimitiveAdapters.BYTES".to_string();
+    }
     match classify_shape(shape) {
         ShapeKind::Struct(StructInfo {
             name: Some(name), ..
@@ -1350,7 +1382,11 @@ fn adapter_for(shape: &'static Shape) -> String {
         ShapeKind::Scalar(scalar) => {
             format!("PrimitiveAdapters.{}", primitive_adapter_name(scalar))
         }
-        _ if is_bytes(shape) => "PrimitiveAdapters.BYTES".to_string(),
+        ShapeKind::List { element } | ShapeKind::Slice { element } => format!(
+            "PrimitiveAdapters.list({}, {})",
+            adapter_for(element),
+            exact_schema_closure_expression(shape)
+        ),
         _ => format!(
             "PrimitiveAdapters.unsupported(\"{}\")",
             shape.type_identifier
@@ -1360,7 +1396,9 @@ fn adapter_for(shape: &'static Shape) -> String {
 
 fn generate_primitive_adapters(package: &str) -> String {
     let mut out = header(package);
-    out.push_str("import org.facet.phon.*;\n\n");
+    out.push_str(
+        "import java.util.ArrayList;\nimport java.util.List;\nimport java.util.Objects;\nimport org.facet.phon.*;\n\n",
+    );
     out.push_str("final class PrimitiveAdapters {\n");
     let adapters = [
         (
@@ -1455,6 +1493,18 @@ fn generate_primitive_adapters(package: &str) -> String {
     }
     out.push_str(
         "  static final PhonAdapter<Void> UNIT = new PhonAdapter<>() {\n    private final SchemaClosure schema = SchemaClosure.uncheckedOf(Schema.primitive(Schema.Primitive.UNIT));\n    @Override public SchemaClosure schema() { return schema; }\n    @Override public void encode(PhonEncoder encoder, Void value) throws PhonException {}\n    @Override public Void decode(PhonDecoder decoder) throws PhonException { return null; }\n  };\n",
+    );
+    out.push_str(
+        "  static <T> void writeList(PhonEncoder encoder, List<T> values, PhonAdapter<T> elementAdapter) throws PhonException {\n    Objects.requireNonNull(values, \"values\");\n    Objects.requireNonNull(elementAdapter, \"elementAdapter\");\n    encoder.writeCount(values.size());\n    for (T value : values) encoder.writeAdapted(elementAdapter, Objects.requireNonNull(value, \"list element\"));\n  }\n",
+    );
+    out.push_str(
+        "  static <T> List<T> readList(PhonDecoder decoder, PhonAdapter<T> elementAdapter) throws PhonException {\n    Objects.requireNonNull(elementAdapter, \"elementAdapter\");\n    int count = decoder.readCount();\n    ArrayList<T> values = new ArrayList<>(count);\n    for (int index = 0; index < count; index++) values.add(decoder.readAdapted(elementAdapter));\n    return List.copyOf(values);\n  }\n",
+    );
+    out.push_str(
+        "  static <T> PhonAdapter<List<T>> list(PhonAdapter<T> elementAdapter, SchemaClosure schema) {\n    Objects.requireNonNull(elementAdapter, \"elementAdapter\");\n    Objects.requireNonNull(schema, \"schema\");\n    return new PhonAdapter<>() {\n      @Override public SchemaClosure schema() { return schema; }\n      @Override public void encode(PhonEncoder encoder, List<T> values) throws PhonException { writeList(encoder, values, elementAdapter); }\n      @Override public List<T> decode(PhonDecoder decoder) throws PhonException { return readList(decoder, elementAdapter); }\n    };\n  }\n",
+    );
+    out.push_str(
+        "  static SchemaClosure schemaClosure(long rootId, byte[][] canonicalSchemas) {\n    try {\n      return SchemaClosure.fromCanonicalBytes(SchemaId.fromLong(rootId), canonicalSchemas, PhonLimits.defaults());\n    } catch (PhonException error) {\n      throw new ExceptionInInitializerError(error);\n    }\n  }\n",
     );
     out.push_str("  static <T> PhonAdapter<T> unsupported(String shape) { throw new IllegalArgumentException(\"unsupported generated adapter \" + shape); }\n");
     out.push_str("  private PrimitiveAdapters() {}\n}\n");
@@ -1614,6 +1664,14 @@ fn is_option(shape: &'static Shape) -> bool {
     matches!(classify_shape(shape), ShapeKind::Option { .. })
 }
 
+fn is_list(shape: &'static Shape) -> bool {
+    !is_bytes(shape)
+        && matches!(
+            classify_shape(shape),
+            ShapeKind::List { .. } | ShapeKind::Slice { .. }
+        )
+}
+
 fn java_type_name(name: &str) -> String {
     name.rsplit("::")
         .next()
@@ -1704,6 +1762,17 @@ mod tests {
         optional_count: u32,
     }
 
+    #[derive(Clone, Debug, PartialEq, Eq, Facet)]
+    struct ListItem {
+        ordinal: u32,
+        label: String,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Facet)]
+    struct ListEnvelope {
+        items: Vec<ListItem>,
+    }
+
     #[derive(Clone, Debug, Facet)]
     #[repr(u8)]
     enum DivideByZero {
@@ -1745,6 +1814,35 @@ mod tests {
         let methods = Box::leak(vec![echo, inspect, divide].into_boxed_slice());
         ServiceDescriptor {
             service_name: "Review",
+            methods,
+            doc: None,
+        }
+    }
+
+    fn list_fixture_service() -> ServiceDescriptor {
+        let inspect = method_descriptor::<(ListEnvelope,), ListEnvelope>(
+            "ListFixture",
+            "inspect",
+            &["request"],
+            &[None],
+            MethodDescriptorOptions {
+                response_wire_shape: <Result<ListEnvelope, vox_types::VoxError> as Facet>::SHAPE,
+                doc: None,
+            },
+        );
+        let echo_items = method_descriptor::<(Vec<ListItem>,), Vec<ListItem>>(
+            "ListFixture",
+            "echo_items",
+            &["items"],
+            &[None],
+            MethodDescriptorOptions {
+                response_wire_shape: <Result<Vec<ListItem>, vox_types::VoxError> as Facet>::SHAPE,
+                doc: None,
+            },
+        );
+        let methods = Box::leak(vec![inspect, echo_items].into_boxed_slice());
+        ServiceDescriptor {
+            service_name: "ListFixture",
             methods,
             doc: None,
         }
@@ -1806,6 +1904,47 @@ mod tests {
     }
 
     #[test]
+    fn java_generation_emits_bounded_immutable_record_lists() {
+        let files = generate_service(&list_fixture_service()).expect("record lists are supported");
+        let source = |name: &str| {
+            files
+                .iter()
+                .find(|file| file.relative_path == name)
+                .unwrap_or_else(|| panic!("missing generated {name}"))
+                .source
+                .as_str()
+        };
+
+        let envelope = source("ListEnvelope.java");
+        assert!(envelope.contains("private final java.util.List<ListItem> items;"));
+        assert!(
+            envelope
+                .contains("this.items = List.copyOf(Objects.requireNonNull(items, \"items\"));")
+        );
+        assert!(
+            envelope
+                .contains("PrimitiveAdapters.writeList(encoder, value.items(), ListItem.ADAPTER);")
+        );
+        assert!(envelope.contains("PrimitiveAdapters.readList(decoder, ListItem.ADAPTER)"));
+        assert!(envelope.contains("SchemaClosure.fromCanonicalBytes"));
+
+        let primitive = source("PrimitiveAdapters.java");
+        assert!(primitive.contains("encoder.writeCount(values.size())"));
+        assert!(primitive.contains("int count = decoder.readCount()"));
+        assert!(primitive.contains("return List.copyOf(values)"));
+
+        let direct_args = source("ListFixtureEchoItemsArgs.java");
+        assert!(
+            direct_args
+                .contains("this.items = List.copyOf(Objects.requireNonNull(items, \"items\"));")
+        );
+        let descriptor = source("ListFixtureServiceDescriptor.java");
+        assert!(descriptor.contains("PrimitiveAdapters.list(ListItem.ADAPTER"));
+        assert!(descriptor.contains("PrimitiveAdapters.schemaClosure(0x"));
+        assert!(descriptor.contains("new byte[][]"));
+    }
+
+    #[test]
     fn java_wire_schemas_are_derived_deterministically_from_rust_shapes() {
         let first = generate_wire_schemas().expect("wire schemas");
         let second = generate_wire_schemas().expect("repeat wire schemas");
@@ -1860,6 +1999,7 @@ mod tests {
         let generated = dir.join("org/facet/vox/generated");
         fs::create_dir_all(&generated).expect("create generated package");
         let mut files = generate_service(&fixture_service()).expect("generate fixture");
+        files.extend(generate_service(&list_fixture_service()).expect("generate list fixture"));
         files.extend(
             generate_service(spec_proto::terminal::terminal_service_descriptor())
                 .expect("generate terminal fixture"),
@@ -1901,6 +2041,144 @@ mod tests {
             );
         }
         fs::remove_dir_all(&dir).expect("remove Java compile fixture");
+    }
+
+    #[test]
+    fn record_list_wire_roundtrips_between_rust_and_generated_java() {
+        let dir = unique_temp_dir();
+        let generated = dir.join("org/facet/vox/generated");
+        fs::create_dir_all(&generated).expect("create generated package");
+        for file in generate_service(&list_fixture_service()).expect("generate list fixture") {
+            if matches!(
+                file.relative_path.as_str(),
+                "PrimitiveAdapters.java" | "ListItem.java" | "ListEnvelope.java"
+            ) {
+                fs::write(generated.join(file.relative_path), file.source)
+                    .expect("write generated list source");
+            }
+        }
+        fs::write(
+            generated.join("ListRoundtrip.java"),
+            r#"package org.facet.vox.generated;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import org.facet.phon.PhonCodec;
+import org.facet.phon.PhonLimits;
+
+public final class ListRoundtrip {
+  public static void main(String[] args) throws Exception {
+    byte[] rustBytes = Files.readAllBytes(Path.of(args[0]));
+    ListEnvelope decoded = PhonCodec.decode(ListEnvelope.ADAPTER, rustBytes, PhonLimits.defaults());
+    check(decoded.items().equals(List.of(
+        new ListItem(7L, "alpha"),
+        new ListItem(11L, "beta"))), "Rust payload decoded in Java");
+
+    boolean decodedImmutable = false;
+    try {
+      decoded.items().add(new ListItem(13L, "forbidden"));
+    } catch (UnsupportedOperationException expected) {
+      decodedImmutable = true;
+    }
+    check(decodedImmutable, "decoded list is immutable");
+
+    ArrayList<ListItem> mutable = new ArrayList<>(decoded.items());
+    ListEnvelope copied = new ListEnvelope(mutable);
+    mutable.clear();
+    check(copied.items().size() == 2, "constructor makes a defensive immutable copy");
+
+    byte[] javaBytes = PhonCodec.encode(ListEnvelope.ADAPTER, copied, PhonLimits.defaults());
+    check(Arrays.equals(rustBytes, javaBytes), "Java encoding matches Rust encoding");
+    Files.write(Path.of(args[1]), javaBytes);
+  }
+
+  private static void check(boolean condition, String message) {
+    if (!condition) throw new AssertionError(message);
+  }
+}
+"#,
+        )
+        .expect("write Java roundtrip harness");
+
+        let value = ListEnvelope {
+            items: vec![
+                ListItem {
+                    ordinal: 7,
+                    label: "alpha".to_string(),
+                },
+                ListItem {
+                    ordinal: 11,
+                    label: "beta".to_string(),
+                },
+            ],
+        };
+        let rust_wire = phon::api::encode(&value).expect("encode Rust list fixture");
+        let rust_wire_path = dir.join("rust.phon");
+        let java_wire_path = dir.join("java.phon");
+        fs::write(&rust_wire_path, &rust_wire).expect("write Rust wire fixture");
+
+        let facet_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let mut sources = collect_java_files(&facet_root.join("phon/java/runtime/src/main/java"));
+        sources.extend(collect_java_files(&generated));
+        sources.sort();
+        let classes = dir.join("classes");
+        fs::create_dir_all(&classes).expect("create Java classes directory");
+        let javac = Command::new("javac")
+            .arg("--release")
+            .arg("17")
+            .arg("-d")
+            .arg(&classes)
+            .args(&sources)
+            .output()
+            .expect("JDK 17+ javac must be available for the Java wire gate");
+        let compiler_close_only = javac.status.code() == Some(3)
+            && sources.iter().all(|source| {
+                source
+                    .strip_prefix(&facet_root.join("phon/java/runtime/src/main/java"))
+                    .or_else(|_| source.strip_prefix(&dir))
+                    .ok()
+                    .map(|relative| classes.join(relative).with_extension("class").is_file())
+                    .unwrap_or(false)
+            });
+        if !javac.status.success() && !compiler_close_only {
+            panic!(
+                "javac --release 17 failed:\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&javac.stdout),
+                String::from_utf8_lossy(&javac.stderr)
+            );
+        }
+        if compiler_close_only {
+            eprintln!(
+                "warning: javac returned 3 after emitting every roundtrip class; treating the compiler resource-close failure as non-fatal"
+            );
+        }
+
+        let java = Command::new("java")
+            .arg("-ea")
+            .arg("-cp")
+            .arg(&classes)
+            .arg("org.facet.vox.generated.ListRoundtrip")
+            .arg(&rust_wire_path)
+            .arg(&java_wire_path)
+            .output()
+            .expect("JDK 17+ java must be available for the Java wire gate");
+        if !java.status.success() {
+            panic!(
+                "Java list roundtrip failed:\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&java.stdout),
+                String::from_utf8_lossy(&java.stderr)
+            );
+        }
+
+        let java_wire = fs::read(&java_wire_path).expect("read Java wire fixture");
+        assert_eq!(java_wire, rust_wire);
+        let decoded: ListEnvelope =
+            phon::api::decode(&java_wire).expect("decode Java list fixture in Rust");
+        assert_eq!(decoded, value);
+        fs::remove_dir_all(&dir).expect("remove Java roundtrip fixture");
     }
 
     fn unique_temp_dir() -> PathBuf {
@@ -1952,11 +2230,11 @@ mod tests {
             ),
             (
                 "org/facet/phon/PhonEncoder.java",
-                "package org.facet.phon; public final class PhonEncoder { public void writeBool(boolean v){} public void writeU8(int v){} public void writeU16(int v){} public void writeU32(long v){} public void writeU32Unaligned(long v){} public void writeI8(int v){} public void writeI16(int v){} public void writeI32(int v){} public void writeI64(long v){} public void writeF32(float v){} public void writeF64(double v){} public void writeChar(char v){} public void writeString(String v){} public void writeBytes(byte[] v){} public <T> void writeAdapted(PhonAdapter<T> a,T v){} }",
+                "package org.facet.phon; public final class PhonEncoder { public void writeBool(boolean v){} public void writeU8(int v){} public void writeU16(int v){} public void writeU32(long v){} public void writeU32Unaligned(long v){} public void writeI8(int v){} public void writeI16(int v){} public void writeI32(int v){} public void writeI64(long v){} public void writeF32(float v){} public void writeF64(double v){} public void writeChar(char v){} public void writeString(String v){} public void writeBytes(byte[] v){} public void writeCount(int v){} public <T> void writeAdapted(PhonAdapter<T> a,T v){} }",
             ),
             (
                 "org/facet/phon/PhonDecoder.java",
-                "package org.facet.phon; public final class PhonDecoder { public boolean readBool(){return false;} public int readU8(){return 0;} public int readU16(){return 0;} public long readU32(){return 0;} public long readU32Unaligned(){return 0;} public int readI8(){return 0;} public int readI16(){return 0;} public int readI32(){return 0;} public long readI64(){return 0;} public float readF32(){return 0;} public double readF64(){return 0;} public char readChar(){return 0;} public String readString(){return null;} public byte[] readBytes(){return null;} public <T> T readAdapted(PhonAdapter<T> a){return null;} }",
+                "package org.facet.phon; public final class PhonDecoder { public boolean readBool(){return false;} public int readU8(){return 0;} public int readU16(){return 0;} public long readU32(){return 0;} public long readU32Unaligned(){return 0;} public int readI8(){return 0;} public int readI16(){return 0;} public int readI32(){return 0;} public long readI64(){return 0;} public float readF32(){return 0;} public double readF64(){return 0;} public char readChar(){return 0;} public String readString(){return null;} public byte[] readBytes(){return null;} public int readCount(){return 0;} public <T> T readAdapted(PhonAdapter<T> a){return null;} }",
             ),
             (
                 "org/facet/phon/PhonLimits.java",

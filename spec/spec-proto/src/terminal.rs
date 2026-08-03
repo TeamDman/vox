@@ -24,6 +24,13 @@ pub trait Terminal {
         request: TerminalCapabilitiesRequest,
     ) -> Result<TerminalCapabilitiesResult, TerminalError>;
 
+    /// Return exact renderer/damage/transport combinations available to a
+    /// raster subscriber without changing the legacy V2 capability record.
+    async fn presentation_capabilities(
+        &self,
+        request: TerminalPresentationCapabilitiesRequest,
+    ) -> Result<TerminalPresentationCapabilitiesResult, TerminalError>;
+
     /// Resize the session's logical terminal surface.
     async fn resize(
         &self,
@@ -60,6 +67,14 @@ pub trait Terminal {
         &self,
         request: TerminalSubscribeRequest,
         frames: Tx<TerminalFrameEvent>,
+    ) -> Result<TerminalOperationResult, TerminalError>;
+
+    /// Push V3 full or base-dependent raster frames for one explicitly
+    /// selected presentation mode.
+    async fn subscribe_raster_frames(
+        &self,
+        request: TerminalRasterSubscribeRequest,
+        frames: Tx<TerminalRasterFrameEvent>,
     ) -> Result<TerminalOperationResult, TerminalError>;
 
     /// Return the bounded visible terminal text for deterministic probes and
@@ -115,6 +130,42 @@ pub struct TerminalCapabilities {
     pub backend_id: String,
     #[facet(default)]
     pub transport_id: String,
+}
+
+/// Queries the exact V3 presentation combinations for one established
+/// terminal session.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalPresentationCapabilitiesRequest {
+    pub session_id: String,
+    pub client_sequence: i64,
+}
+
+/// V3 presentation capabilities accepted by both peers.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalPresentationCapabilitiesResult {
+    pub session_id: String,
+    pub default_transport_id: String,
+    pub modes: Vec<TerminalPresentationMode>,
+    pub server_sequence: i64,
+}
+
+/// One selectable renderer/damage/transport combination.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalPresentationMode {
+    pub renderer_id: String,
+    pub damage_mode_id: String,
+    pub transport_id: String,
+    pub transport_version: u16,
+    pub encoding: TerminalFrameEncoding,
+    pub steady_frame_kind: TerminalRasterFrameKind,
+    pub frame_contract_version: u16,
+    pub origin: TerminalFrameOrigin,
+    pub alpha_mode: TerminalAlphaMode,
+    pub color_space: TerminalColorSpace,
+    pub max_pixel_width: u16,
+    pub max_pixel_height: u16,
+    pub max_frame_bytes: u32,
+    pub max_regions: u16,
 }
 
 /// Creates a session and requests capabilities.
@@ -260,6 +311,24 @@ pub struct TerminalSubscribeRequest {
     pub correlation_id: String,
 }
 
+/// Opens one fresh V3 request-scoped raster subscription.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalRasterSubscribeRequest {
+    pub session_id: String,
+    pub requested_renderer_id: String,
+    pub requested_damage_mode_id: String,
+    pub requested_transport_id: String,
+    pub requested_transport_version: u16,
+    /// Client-chosen opaque identity that changes for every transport switch.
+    pub transport_generation: String,
+    pub after_terminal_sequence: i64,
+    pub after_frame_sequence: i64,
+    pub max_frame_bytes: u32,
+    pub max_regions: u16,
+    pub client_sequence: i64,
+    pub correlation_id: String,
+}
+
 /// Bounded producer evidence attached to each pushed frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Facet)]
 pub struct TerminalPublicationTelemetry {
@@ -290,6 +359,32 @@ pub struct TerminalFrameEvent {
     pub transport_id: String,
     pub correlation_id: String,
     pub frame: TerminalSnapshot,
+    #[facet(default)]
+    pub publication: TerminalPublicationTelemetry,
+}
+
+/// One authoritative V3 raster publication. Frame sequence is monotonic only
+/// within `transport_generation`; a dirty event extends exactly
+/// `base_frame_sequence` and otherwise requires a new full resynchronization.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalRasterFrameEvent {
+    pub session_id: String,
+    pub connection_epoch: String,
+    pub session_epoch: String,
+    pub transport_generation: String,
+    pub terminal_sequence: i64,
+    pub frame_sequence: i64,
+    pub base_frame_sequence: i64,
+    pub full_resync: bool,
+    pub renderer_id: String,
+    pub damage_mode_id: String,
+    pub transport_id: String,
+    pub transport_version: u16,
+    pub frame_contract_version: u16,
+    pub max_frame_bytes: u32,
+    pub max_regions: u16,
+    pub correlation_id: String,
+    pub frame: TerminalRasterFrame,
     #[facet(default)]
     pub publication: TerminalPublicationTelemetry,
 }
@@ -374,6 +469,93 @@ pub enum TerminalFrameEncoding {
 pub enum TerminalFrameKind {
     Full,
     DirtyTile,
+}
+
+/// V3 complete-versus-incremental raster semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum TerminalRasterFrameKind {
+    Full,
+    DirtyRegions,
+}
+
+/// Coordinate origin for raw raster payloads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Facet)]
+#[repr(u8)]
+pub enum TerminalFrameOrigin {
+    #[default]
+    TopLeft,
+}
+
+/// Alpha interpretation for raw raster payloads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Facet)]
+#[repr(u8)]
+pub enum TerminalAlphaMode {
+    #[default]
+    Straight,
+}
+
+/// Color interpretation for raw and decoded raster bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Facet)]
+#[repr(u8)]
+pub enum TerminalColorSpace {
+    #[default]
+    Srgb,
+}
+
+/// One complete or incremental V3 raster frame. Complete PNG/raw frames use
+/// `payload` directly and have no regions. Dirty RGBA8 frames pack every region
+/// into the single payload and address it with ordered descriptors.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalRasterFrame {
+    pub logical_columns: u16,
+    pub logical_rows: u16,
+    pub width: u16,
+    pub height: u16,
+    pub surface: TerminalSurfaceMetrics,
+    pub encoding: TerminalFrameEncoding,
+    pub kind: TerminalRasterFrameKind,
+    pub stride: u32,
+    pub origin: TerminalFrameOrigin,
+    pub alpha_mode: TerminalAlphaMode,
+    pub color_space: TerminalColorSpace,
+    pub font_id: String,
+    pub font_sha256: String,
+    pub payload: Vec<u8>,
+    pub regions: Vec<TerminalRasterRegion>,
+    pub complete: bool,
+    pub cursor: TerminalCursor,
+    pub selection_present: bool,
+    pub selection: TerminalSelection,
+    pub prompt: TerminalPromptMetadata,
+    pub timing: TerminalRasterSnapshotTiming,
+}
+
+/// One ordered, tightly bounded raw RGBA8 patch in a dirty frame. The payload
+/// range addresses the enclosing frame's single packed byte buffer.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalRasterRegion {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+    pub stride: u32,
+    pub payload_offset: u32,
+    pub payload_length: u32,
+}
+
+/// Producer-local stages for a V3 raster publication. This remains separate
+/// from the immutable V1/V2 snapshot timing record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Facet)]
+pub struct TerminalRasterSnapshotTiming {
+    pub pty_drain_us: i64,
+    pub terminal_snapshot_us: i64,
+    pub font_load_us: i64,
+    pub damage_us: i64,
+    pub raster_us: i64,
+    pub png_encode_us: i64,
+    pub payload_pack_us: i64,
+    pub total_us: i64,
 }
 
 /// The visible terminal cursor associated with a snapshot.
@@ -720,6 +902,139 @@ mod tests {
     }
 
     #[test]
+    fn terminal_v3_presentation_capabilities_round_trip_through_phon() {
+        let result = TerminalPresentationCapabilitiesResult {
+            session_id: "session-v3".to_string(),
+            default_transport_id: "full-png".to_string(),
+            modes: vec![TerminalPresentationMode {
+                renderer_id: "rust-cpu-fontdue".to_string(),
+                damage_mode_id: "dirty".to_string(),
+                transport_id: "dirty-raw-rgba".to_string(),
+                transport_version: 1,
+                encoding: TerminalFrameEncoding::Rgba8,
+                steady_frame_kind: TerminalRasterFrameKind::DirtyRegions,
+                frame_contract_version: 1,
+                origin: TerminalFrameOrigin::TopLeft,
+                alpha_mode: TerminalAlphaMode::Straight,
+                color_space: TerminalColorSpace::Srgb,
+                max_pixel_width: 4096,
+                max_pixel_height: 4096,
+                max_frame_bytes: 16 * 1024 * 1024,
+                max_regions: 64,
+            }],
+            server_sequence: 7,
+        };
+        let bytes = vox_phon::to_vec(&result).expect("encode V3 capabilities");
+        let decoded: TerminalPresentationCapabilitiesResult =
+            vox_phon::from_slice(&bytes).expect("decode V3 capabilities");
+        assert_eq!(decoded, result);
+    }
+
+    #[test]
+    fn terminal_v3_dirty_raster_event_round_trips_through_phon() {
+        let event = TerminalRasterFrameEvent {
+            session_id: "session-v3".to_string(),
+            connection_epoch: "connection-1".to_string(),
+            session_epoch: "session-epoch-1".to_string(),
+            transport_generation: "panel-2-generation-3".to_string(),
+            terminal_sequence: 19,
+            frame_sequence: 4,
+            base_frame_sequence: 3,
+            full_resync: false,
+            renderer_id: "rust-cpu-fontdue".to_string(),
+            damage_mode_id: "dirty".to_string(),
+            transport_id: "dirty-raw-rgba".to_string(),
+            transport_version: 1,
+            frame_contract_version: 1,
+            max_frame_bytes: 16 * 1024 * 1024,
+            max_regions: 64,
+            correlation_id: "frame-v3-4".to_string(),
+            frame: TerminalRasterFrame {
+                logical_columns: 2,
+                logical_rows: 1,
+                width: 2,
+                height: 1,
+                surface: TerminalSurfaceMetrics {
+                    columns: 2,
+                    rows: 1,
+                    panel_width: 2,
+                    panel_height: 1,
+                    cell_width: 1,
+                    cell_height: 1,
+                    font_pixel_size: 16,
+                },
+                encoding: TerminalFrameEncoding::Rgba8,
+                kind: TerminalRasterFrameKind::DirtyRegions,
+                stride: 0,
+                origin: TerminalFrameOrigin::TopLeft,
+                alpha_mode: TerminalAlphaMode::Straight,
+                color_space: TerminalColorSpace::Srgb,
+                font_id: "CaskaydiaCoveNerdFontMono-Regular".to_string(),
+                font_sha256: "32aa528c1d9be2240ceac90aa05f4e554679cabeb11b93684eb24ec4930bd0ea"
+                    .to_string(),
+                payload: vec![1, 2, 3, 255, 4, 5, 6, 255],
+                regions: vec![
+                    TerminalRasterRegion {
+                        x: 0,
+                        y: 0,
+                        width: 1,
+                        height: 1,
+                        stride: 4,
+                        payload_offset: 0,
+                        payload_length: 4,
+                    },
+                    TerminalRasterRegion {
+                        x: 1,
+                        y: 0,
+                        width: 1,
+                        height: 1,
+                        stride: 4,
+                        payload_offset: 4,
+                        payload_length: 4,
+                    },
+                ],
+                complete: true,
+                cursor: TerminalCursor {
+                    x: 1,
+                    y: 0,
+                    visible: true,
+                },
+                selection_present: false,
+                selection: TerminalSelection {
+                    anchor_x: 0,
+                    anchor_y: 0,
+                    focus_x: 0,
+                    focus_y: 0,
+                },
+                prompt: TerminalPromptMetadata {
+                    prompt_present: false,
+                    prompt: TerminalRange {
+                        start_x: 0,
+                        start_y: 0,
+                        end_x: 0,
+                        end_y: 0,
+                    },
+                    command_present: false,
+                    command: TerminalRange {
+                        start_x: 0,
+                        start_y: 0,
+                        end_x: 0,
+                        end_y: 0,
+                    },
+                    command_status_present: false,
+                    command_status: 0,
+                },
+                timing: TerminalRasterSnapshotTiming::default(),
+            },
+            publication: TerminalPublicationTelemetry::default(),
+        };
+        let bytes = vox_phon::to_vec(&event).expect("encode V3 raster event");
+        let decoded: TerminalRasterFrameEvent =
+            vox_phon::from_slice(&bytes).expect("decode V3 raster event");
+        assert_eq!(decoded, event);
+    }
+
+    #[test]
     fn terminal_mouse_motion_round_trips_through_phon() {
         let input = TerminalMouseInput {
             session_id: "session-01".to_string(),
@@ -751,31 +1066,58 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../../test-fixtures/terminal/terminal-contract-v2.json"
         ));
+        let v3 = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test-fixtures/terminal/terminal-contract-v3.json"
+        ));
         let service = terminal_service_descriptor();
         assert_eq!(service.service_name, "Terminal");
-        assert_eq!(service.methods.len(), 11);
-        for method in service
-            .methods
-            .iter()
-            .filter(|method| method.method_name != "subscribe_frames")
-        {
-            let expected = format!(
-                "\"name\": \"{}\", \"id\": \"{:016x}\"",
-                method.method_name, method.id.0
-            );
-            assert!(
-                v1.contains(&expected),
-                "v1 fixture is missing immutable descriptor entry: {expected}"
-            );
-        }
+        assert_eq!(service.methods.len(), 13);
+        let v1_methods = [
+            "connect",
+            "capabilities",
+            "resize",
+            "send_text",
+            "send_key",
+            "send_mouse",
+            "snapshot",
+            "get_content",
+            "cancel",
+            "disconnect",
+        ];
+        let v2_methods = [
+            "connect",
+            "capabilities",
+            "resize",
+            "send_text",
+            "send_key",
+            "send_mouse",
+            "snapshot",
+            "subscribe_frames",
+            "get_content",
+            "cancel",
+            "disconnect",
+        ];
         for method in service.methods {
             let expected = format!(
                 "\"name\": \"{}\", \"id\": \"{:016x}\"",
                 method.method_name, method.id.0
             );
+            if v1_methods.contains(&method.method_name) {
+                assert!(
+                    v1.contains(&expected),
+                    "v1 fixture is missing immutable descriptor entry: {expected}"
+                );
+            }
+            if v2_methods.contains(&method.method_name) {
+                assert!(
+                    v2.contains(&expected),
+                    "v2 fixture is missing immutable descriptor entry: {expected}"
+                );
+            }
             assert!(
-                v2.contains(&expected),
-                "v2 fixture is missing descriptor entry: {expected}"
+                v3.contains(&expected),
+                "v3 fixture is missing descriptor entry: {expected}"
             );
         }
         assert!(v2.contains("\"role\": \"channel.arg.1.tx.element\""));
@@ -785,5 +1127,11 @@ mod tests {
         assert!(v2.contains("\"max_width\": 512"));
         assert!(v2.contains("\"max_height\": 256"));
         assert!(v2.contains("\"max_frame_bytes\": 16777216"));
+        assert!(v3.contains("\"transport_id\": \"full-png\""));
+        assert!(v3.contains("\"transport_id\": \"full-raw-rgba\""));
+        assert!(v3.contains("\"transport_id\": \"dirty-raw-rgba\""));
+        assert!(v3.contains("\"steady_frame_kind\": \"DirtyRegions\""));
+        assert!(v3.contains("\"generation\": \"client-chosen-opaque\""));
+        assert!(v3.contains("\"dirty_base\": \"exact-currently-composed-frame-sequence\""));
     }
 }

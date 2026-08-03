@@ -45,6 +45,23 @@ public final class TerminalClient {
       return CompletableFuture.failedFuture(error);
     }
   }
+  public CompletableFuture<VoxResult<TerminalPresentationCapabilitiesResult, TerminalError>> presentationCapabilities(TerminalPresentationCapabilitiesRequest request) { return presentationCapabilities(request, CallOptions.defaults()); }
+  public CompletableFuture<VoxResult<TerminalPresentationCapabilitiesResult, TerminalError>> presentationCapabilities(TerminalPresentationCapabilitiesRequest request, CallOptions options) {
+    try {
+      byte[] encoded = PhonCodec.encode(TerminalPresentationCapabilitiesArgs.ADAPTER, new TerminalPresentationCapabilitiesArgs(request), PhonLimits.defaults());
+      return VoxFutures.mapCancellable(lane.call(TerminalServiceDescriptor.PRESENTATION_CAPABILITIES, encoded, options, List.of()), bytes -> {
+        try {
+          VoxResult<TerminalPresentationCapabilitiesResult, TerminalError> result = PhonCodec.decode(TerminalPresentationCapabilitiesResponse.ADAPTER, bytes, PhonLimits.defaults());
+          if (result.isInfrastructureError()) throw remoteFailure(result);
+          return result;
+        } catch (PhonException error) {
+          throw new CompletionException(error);
+        }
+      });
+    } catch (PhonException error) {
+      return CompletableFuture.failedFuture(error);
+    }
+  }
   public CompletableFuture<VoxResult<TerminalResizeResult, TerminalError>> resize(TerminalResizeRequest request) { return resize(request, CallOptions.defaults()); }
   public CompletableFuture<VoxResult<TerminalResizeResult, TerminalError>> resize(TerminalResizeRequest request, CallOptions options) {
     try {
@@ -137,6 +154,23 @@ public final class TerminalClient {
       return VoxFutures.mapCancellable(lane.call(TerminalServiceDescriptor.SUBSCRIBE_FRAMES, encoded, options, List.of(VoxChannelArgument.tx(TerminalServiceDescriptor.SUBSCRIBE_FRAMES.channels().get(0), frames))), bytes -> {
         try {
           VoxResult<TerminalOperationResult, TerminalError> result = PhonCodec.decode(TerminalSubscribeFramesResponse.ADAPTER, bytes, PhonLimits.defaults());
+          if (result.isInfrastructureError()) throw remoteFailure(result);
+          return result;
+        } catch (PhonException error) {
+          throw new CompletionException(error);
+        }
+      });
+    } catch (PhonException error) {
+      return CompletableFuture.failedFuture(error);
+    }
+  }
+  public CompletableFuture<VoxResult<TerminalOperationResult, TerminalError>> subscribeRasterFrames(TerminalRasterSubscribeRequest request, VoxTx<TerminalRasterFrameEvent> frames) { return subscribeRasterFrames(request, frames, CallOptions.defaults()); }
+  public CompletableFuture<VoxResult<TerminalOperationResult, TerminalError>> subscribeRasterFrames(TerminalRasterSubscribeRequest request, VoxTx<TerminalRasterFrameEvent> frames, CallOptions options) {
+    try {
+      byte[] encoded = PhonCodec.encode(TerminalSubscribeRasterFramesArgs.ADAPTER, new TerminalSubscribeRasterFramesArgs(request, frames), PhonLimits.defaults());
+      return VoxFutures.mapCancellable(lane.call(TerminalServiceDescriptor.SUBSCRIBE_RASTER_FRAMES, encoded, options, List.of(VoxChannelArgument.tx(TerminalServiceDescriptor.SUBSCRIBE_RASTER_FRAMES.channels().get(0), frames))), bytes -> {
+        try {
+          VoxResult<TerminalOperationResult, TerminalError> result = PhonCodec.decode(TerminalSubscribeRasterFramesResponse.ADAPTER, bytes, PhonLimits.defaults());
           if (result.isInfrastructureError()) throw remoteFailure(result);
           return result;
         } catch (PhonException error) {

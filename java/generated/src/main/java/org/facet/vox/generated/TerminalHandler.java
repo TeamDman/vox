@@ -8,12 +8,14 @@ import org.facet.vox.*;
 public interface TerminalHandler {
   CompletableFuture<VoxResult<TerminalConnectResult, TerminalError>> connect(CallContext context, TerminalConnectRequest request);
   CompletableFuture<VoxResult<TerminalCapabilitiesResult, TerminalError>> capabilities(CallContext context, TerminalCapabilitiesRequest request);
+  CompletableFuture<VoxResult<TerminalPresentationCapabilitiesResult, TerminalError>> presentationCapabilities(CallContext context, TerminalPresentationCapabilitiesRequest request);
   CompletableFuture<VoxResult<TerminalResizeResult, TerminalError>> resize(CallContext context, TerminalResizeRequest request);
   CompletableFuture<VoxResult<TerminalInputResult, TerminalError>> sendText(CallContext context, TerminalTextInput request);
   CompletableFuture<VoxResult<TerminalInputResult, TerminalError>> sendKey(CallContext context, TerminalKeyInput request);
   CompletableFuture<VoxResult<TerminalInputResult, TerminalError>> sendMouse(CallContext context, TerminalMouseInput request);
   CompletableFuture<VoxResult<TerminalSnapshot, TerminalError>> snapshot(CallContext context, TerminalSnapshotRequest request);
   CompletableFuture<VoxResult<TerminalOperationResult, TerminalError>> subscribeFrames(CallContext context, TerminalSubscribeRequest request, VoxTx<TerminalFrameEvent> frames);
+  CompletableFuture<VoxResult<TerminalOperationResult, TerminalError>> subscribeRasterFrames(CallContext context, TerminalRasterSubscribeRequest request, VoxTx<TerminalRasterFrameEvent> frames);
   CompletableFuture<VoxResult<TerminalContentResult, TerminalError>> getContent(CallContext context, TerminalContentRequest request);
   CompletableFuture<VoxResult<TerminalOperationResult, TerminalError>> cancel(CallContext context, TerminalCancelRequest request);
   CompletableFuture<VoxResult<TerminalOperationResult, TerminalError>> disconnect(CallContext context, TerminalDisconnectRequest request);

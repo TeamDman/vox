@@ -34,6 +34,16 @@ public final class TerminalDispatcher implements ServiceDispatcher {
           }
         });
       }
+      if (call.method().id() == TerminalServiceDescriptor.PRESENTATION_CAPABILITIES.id()) {
+        TerminalPresentationCapabilitiesArgs args = call.decodeArguments(TerminalPresentationCapabilitiesArgs.ADAPTER);
+        return handler.presentationCapabilities(call.context(), args.request()).thenAccept(value -> {
+          try {
+            call.respond(PhonCodec.encode(TerminalPresentationCapabilitiesResponse.ADAPTER, value, PhonLimits.defaults()));
+          } catch (PhonException error) {
+            throw new CompletionException(error);
+          }
+        });
+      }
       if (call.method().id() == TerminalServiceDescriptor.RESIZE.id()) {
         TerminalResizeArgs args = call.decodeArguments(TerminalResizeArgs.ADAPTER);
         return handler.resize(call.context(), args.request()).thenAccept(value -> {
@@ -89,6 +99,16 @@ public final class TerminalDispatcher implements ServiceDispatcher {
         return handler.subscribeFrames(call.context(), args.request(), args.frames()).thenAccept(value -> {
           try {
             call.respond(PhonCodec.encode(TerminalSubscribeFramesResponse.ADAPTER, value, PhonLimits.defaults()));
+          } catch (PhonException error) {
+            throw new CompletionException(error);
+          }
+        });
+      }
+      if (call.method().id() == TerminalServiceDescriptor.SUBSCRIBE_RASTER_FRAMES.id()) {
+        TerminalSubscribeRasterFramesArgs args = call.decodeArguments(TerminalSubscribeRasterFramesArgs.ADAPTER);
+        return handler.subscribeRasterFrames(call.context(), args.request(), args.frames()).thenAccept(value -> {
+          try {
+            call.respond(PhonCodec.encode(TerminalSubscribeRasterFramesResponse.ADAPTER, value, PhonLimits.defaults()));
           } catch (PhonException error) {
             throw new CompletionException(error);
           }

@@ -675,7 +675,7 @@ fn java_runtime_sources(
                 source
                     .file_stem()
                     .and_then(|stem| stem.to_str())
-                    .is_some_and(|stem| stem.starts_with("Terminal"))
+                    .is_some_and(|stem| stem.starts_with("Terminal") || stem == "PrimitiveAdapters")
             }),
     );
     for source in &sources {
@@ -789,6 +789,7 @@ fn package_java(workspace_root: &std::path::Path) -> Result<(), Box<dyn std::err
     for required in [
         "org/facet/vox/generated/HandshakeWireSchemas.class",
         "org/facet/vox/generated/MessageWireSchemas.class",
+        "org/facet/vox/generated/PrimitiveAdapters.class",
         "org/facet/vox/generated/TerminalClient.class",
         "org/facet/vox/generated/TerminalServiceDescriptor.class",
         "org/facet/vox/generated/TerminalSnapshot.class",

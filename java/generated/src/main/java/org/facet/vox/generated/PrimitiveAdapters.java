@@ -2,6 +2,9 @@
 // Regenerate with `cargo xtask codegen --java`.
 package org.facet.vox.generated;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Objects;
 import org.facet.phon.*;
 
 final class PrimitiveAdapters {
@@ -61,6 +64,35 @@ final class PrimitiveAdapters {
     @Override public void encode(PhonEncoder encoder, Void value) throws PhonException {}
     @Override public Void decode(PhonDecoder decoder) throws PhonException { return null; }
   };
+  static <T> void writeList(PhonEncoder encoder, List<T> values, PhonAdapter<T> elementAdapter) throws PhonException {
+    Objects.requireNonNull(values, "values");
+    Objects.requireNonNull(elementAdapter, "elementAdapter");
+    encoder.writeCount(values.size());
+    for (T value : values) encoder.writeAdapted(elementAdapter, Objects.requireNonNull(value, "list element"));
+  }
+  static <T> List<T> readList(PhonDecoder decoder, PhonAdapter<T> elementAdapter) throws PhonException {
+    Objects.requireNonNull(elementAdapter, "elementAdapter");
+    int count = decoder.readCount();
+    ArrayList<T> values = new ArrayList<>(count);
+    for (int index = 0; index < count; index++) values.add(decoder.readAdapted(elementAdapter));
+    return List.copyOf(values);
+  }
+  static <T> PhonAdapter<List<T>> list(PhonAdapter<T> elementAdapter, SchemaClosure schema) {
+    Objects.requireNonNull(elementAdapter, "elementAdapter");
+    Objects.requireNonNull(schema, "schema");
+    return new PhonAdapter<>() {
+      @Override public SchemaClosure schema() { return schema; }
+      @Override public void encode(PhonEncoder encoder, List<T> values) throws PhonException { writeList(encoder, values, elementAdapter); }
+      @Override public List<T> decode(PhonDecoder decoder) throws PhonException { return readList(decoder, elementAdapter); }
+    };
+  }
+  static SchemaClosure schemaClosure(long rootId, byte[][] canonicalSchemas) {
+    try {
+      return SchemaClosure.fromCanonicalBytes(SchemaId.fromLong(rootId), canonicalSchemas, PhonLimits.defaults());
+    } catch (PhonException error) {
+      throw new ExceptionInInitializerError(error);
+    }
+  }
   static <T> PhonAdapter<T> unsupported(String shape) { throw new IllegalArgumentException("unsupported generated adapter " + shape); }
   private PrimitiveAdapters() {}
 }

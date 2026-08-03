@@ -657,9 +657,10 @@ fn emit_record_schema_and_adapter(
         .iter()
         .map(|field| {
             format!(
-                "new Schema.Field(\"{}\", {}, true)",
+                "new Schema.Field(\"{}\", {}, {})",
                 field.name,
-                schema_ref_expr(field.shape())
+                schema_ref_expr(field.shape()),
+                field.default.is_none()
             )
         })
         .collect::<Vec<_>>()
@@ -1521,6 +1522,13 @@ mod tests {
     }
 
     #[derive(Clone, Debug, Facet)]
+    struct DefaultedRequest {
+        required: String,
+        #[facet(default)]
+        optional_count: u32,
+    }
+
+    #[derive(Clone, Debug, Facet)]
     #[repr(u8)]
     enum DivideByZero {
         Zero = 0,
@@ -1584,6 +1592,40 @@ mod tests {
         assert!(all.contains("public final class ReviewDispatcher implements ServiceDispatcher"));
         assert!(all.contains("public final class ReviewClient"));
         assert!(all.contains("0x"));
+    }
+
+    #[test]
+    fn java_generation_preserves_defaulted_field_requiredness() {
+        let inspect = method_descriptor::<(DefaultedRequest,), String>(
+            "ReviewDefaults",
+            "inspect",
+            &["request"],
+            &[None],
+            MethodDescriptorOptions {
+                response_wire_shape: <Result<String, vox_types::VoxError> as Facet>::SHAPE,
+                doc: None,
+            },
+        );
+        let methods = Box::leak(vec![inspect].into_boxed_slice());
+        let service = ServiceDescriptor {
+            service_name: "ReviewDefaults",
+            methods,
+            doc: None,
+        };
+        let file = generate_service(&service)
+            .expect("defaulted service should generate")
+            .into_iter()
+            .find(|file| file.relative_path.ends_with("DefaultedRequest.java"))
+            .expect("defaulted request should be generated");
+
+        let required = super::schema_ref_expr(<String as Facet>::SHAPE);
+        let optional = super::schema_ref_expr(<u32 as Facet>::SHAPE);
+        assert!(file.source.contains(&format!(
+            "new Schema.Field(\"required\", {required}, true)"
+        )));
+        assert!(file.source.contains(&format!(
+            "new Schema.Field(\"optional_count\", {optional}, false)"
+        )));
     }
 
     #[test]

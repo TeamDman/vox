@@ -649,18 +649,16 @@ fn generate_args_type(package: &str, name: &str, method: &MethodDescriptor) -> S
         out,
         "  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x{id:016x}L), List.of(), new Schema.TupleKind(List.of({refs})));"
     );
+    emit_exact_schema_closure(
+        &mut out,
+        method.args_shape,
+        "SCHEMA_CLOSURE",
+        "schemaClosure",
+    );
     let _ = writeln!(
         out,
         "  public static final PhonAdapter<{name}> ADAPTER = new PhonAdapter<>() {{"
     );
-    let reachables = method
-        .args
-        .iter()
-        .filter(|arg| channel_arg_direction(arg).is_none())
-        .filter_map(|arg| named_shape_name(arg.shape))
-        .map(|n| format!("{n}.SCHEMA"))
-        .collect::<Vec<_>>()
-        .join(", ");
     let channel_roots = method
         .args
         .iter()
@@ -679,13 +677,11 @@ fn generate_args_type(package: &str, name: &str, method: &MethodDescriptor) -> S
         })
         .collect::<Vec<_>>()
         .join(", ");
-    let closure = if channel_roots.is_empty() && reachables.is_empty() {
-        "SchemaClosure.uncheckedOf(SCHEMA)".to_string()
-    } else if channel_roots.is_empty() {
-        format!("SchemaClosure.uncheckedOf(SCHEMA, {reachables})")
+    let closure = if channel_roots.is_empty() {
+        "SCHEMA_CLOSURE".to_string()
     } else {
         format!(
-            "SchemaClosure.uncheckedWithAuxiliaryClosures(SCHEMA, List.of({reachables}), Map.ofEntries({channel_roots}))"
+            "SchemaClosure.uncheckedWithAuxiliaryClosures(SCHEMA_CLOSURE, Map.ofEntries({channel_roots}))"
         )
     };
     let _ = writeln!(
@@ -755,24 +751,14 @@ fn emit_record_schema_and_adapter(
         out,
         "  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x{id:016x}L), List.of(), new Schema.RecordKind(\"{name}\", List.of({field_exprs})));"
     );
+    emit_exact_schema_closure(out, shape, "SCHEMA_CLOSURE", "schemaClosure");
     let _ = writeln!(
         out,
         "  public static final PhonAdapter<{name}> ADAPTER = new PhonAdapter<>() {{"
     );
-    let reachables = fields
-        .iter()
-        .filter_map(|field| named_shape_name(field.shape()))
-        .map(|nested| format!("{nested}.SCHEMA"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let closure = if reachables.is_empty() {
-        "SchemaClosure.uncheckedOf(SCHEMA)".to_string()
-    } else {
-        format!("SchemaClosure.uncheckedOf(SCHEMA, {reachables})")
-    };
     let _ = writeln!(
         out,
-        "    @Override public SchemaClosure schema() {{ return {closure}; }}"
+        "    @Override public SchemaClosure schema() {{ return SCHEMA_CLOSURE; }}"
     );
     let _ = writeln!(
         out,
@@ -812,23 +798,56 @@ fn schema_id(shape: &'static Shape) -> u64 {
         .as_u64()
 }
 
+fn emit_exact_schema_closure(
+    out: &mut String,
+    shape: &'static Shape,
+    field_name: &str,
+    factory_name: &str,
+) {
+    let module = phon_codegen::Module::from_shapes(&[shape]).unwrap_or_else(|error| {
+        panic!(
+            "Java schema closure generation failed for `{}`: {error}",
+            shape.type_identifier
+        )
+    });
+    let root = module
+        .roots
+        .first()
+        .expect("one schema closure root")
+        .id
+        .as_u64();
+    let _ = writeln!(
+        out,
+        "  private static final SchemaClosure {field_name} = {factory_name}();"
+    );
+    let _ = writeln!(
+        out,
+        "  private static SchemaClosure {factory_name}() {{\n    try {{\n      return SchemaClosure.fromCanonicalBytes(SchemaId.fromLong(0x{root:016x}L), new byte[][] {{"
+    );
+    for index in 0..module.schemas.len() {
+        let _ = writeln!(out, "        {factory_name}Schema{index}(),");
+    }
+    out.push_str(
+        "      }, PhonLimits.defaults());\n    } catch (PhonException error) {\n      throw new ExceptionInInitializerError(error);\n    }\n  }\n",
+    );
+    for (index, schema) in module.schemas.iter().enumerate() {
+        let bytes = schema_to_bytes(schema)
+            .iter()
+            .map(|byte| format!("(byte)0x{byte:02x}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(
+            out,
+            "  private static byte[] {factory_name}Schema{index}() {{ return new byte[] {{{bytes}}}; }}"
+        );
+    }
+}
+
 fn schema_ref_expr(shape: &'static Shape) -> String {
     format!(
         "Schema.Ref.concrete(SchemaId.fromLong(0x{:016x}L))",
         schema_id(shape)
     )
-}
-
-fn named_shape_name(shape: &'static Shape) -> Option<String> {
-    match classify_shape(shape) {
-        ShapeKind::Struct(StructInfo {
-            name: Some(name), ..
-        })
-        | ShapeKind::Enum(EnumInfo {
-            name: Some(name), ..
-        }) => Some(java_type_name(name)),
-        _ => None,
-    }
 }
 
 fn encode_statement(shape: &'static Shape, value: &str) -> String {
@@ -1917,7 +1936,7 @@ mod tests {
             ),
             (
                 "org/facet/phon/SchemaClosure.java",
-                "package org.facet.phon; import java.util.*; public final class SchemaClosure { public static SchemaClosure uncheckedOf(Schema s,Schema... r){return new SchemaClosure();} public static SchemaClosure uncheckedWithAuxiliaryClosures(Schema s,List<Schema> r,Map<String,SchemaClosure> a){return new SchemaClosure();} public static SchemaClosure fromCanonicalBytes(SchemaId id,byte[][] b,PhonLimits l)throws PhonException{return new SchemaClosure();} }",
+                "package org.facet.phon; import java.util.*; public final class SchemaClosure { public static SchemaClosure uncheckedOf(Schema s,Schema... r){return new SchemaClosure();} public static SchemaClosure uncheckedWithAuxiliaryClosures(Schema s,List<Schema> r,Map<String,SchemaClosure> a){return new SchemaClosure();} public static SchemaClosure uncheckedWithAuxiliaryClosures(SchemaClosure s,Map<String,SchemaClosure> a){return new SchemaClosure();} public static SchemaClosure fromCanonicalBytes(SchemaId id,byte[][] b,PhonLimits l)throws PhonException{return new SchemaClosure();} }",
             ),
             (
                 "org/facet/phon/SchemaId.java",

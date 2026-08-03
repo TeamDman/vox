@@ -1,6 +1,7 @@
 package org.facet.vox;
 
 import java.util.Arrays;
+import org.facet.phon.CompatibilityPlan;
 import org.facet.phon.PhonCodec;
 import org.facet.phon.PhonLimits;
 import org.facet.phon.SchemaClosure;
@@ -13,6 +14,8 @@ import org.facet.vox.generated.TerminalConnectArgs;
 import org.facet.vox.generated.TerminalConnectRequest;
 import org.facet.vox.generated.TerminalError;
 import org.facet.vox.generated.TerminalErrorCode;
+import org.facet.vox.generated.TerminalFrameEncoding;
+import org.facet.vox.generated.TerminalFrameEvent;
 import org.facet.vox.generated.TerminalGetContentResponse;
 import org.facet.vox.generated.TerminalSnapshot;
 import org.facet.vox.generated.TerminalSnapshotResponse;
@@ -57,6 +60,7 @@ public final class GeneratedResponseIntegrationTest {
         terminalRustPayloadTranscodesThroughGeneratedResponseSchema();
         terminalRustApplicationErrorTranscodesThroughGeneratedResponseSchema();
         terminalRustSnapshotPayloadTranscodesThroughGeneratedResponseSchema();
+        terminalFrameChannelElementSchemaIsTransitivelySelfContained();
         System.out.println("GeneratedResponseIntegrationTest: PASS");
     }
 
@@ -149,6 +153,23 @@ public final class GeneratedResponseIntegrationTest {
                         && snapshot.timing().pngEncodeUs() == 5
                         && snapshot.timing().totalUs() == 15,
                 "Rust snapshot success payload fields");
+    }
+
+    private static void terminalFrameChannelElementSchemaIsTransitivelySelfContained()
+            throws Exception {
+        SchemaClosure reader = TerminalFrameEvent.ADAPTER.schema();
+        check(reader.schemas().stream().anyMatch(schema ->
+                        schema.id().equals(TerminalFrameEncoding.SCHEMA.id())),
+                "terminal frame closure carries nested frame encoding schema");
+        check(reader.schemas().stream().anyMatch(schema ->
+                        schema.id().asLong() == 0xaa0667df4299d151L),
+                "terminal frame reader closure carries nested byte payload schema");
+        SchemaClosure writer = SchemaClosure.fromBundleBytes(
+                reader.bundleBytes(), PhonLimits.defaults());
+        check(writer.schemas().stream().anyMatch(schema ->
+                        schema.id().asLong() == 0xaa0667df4299d151L),
+                "terminal frame serialized closure carries nested byte payload schema");
+        CompatibilityPlan.plan(writer, reader, PhonLimits.defaults());
     }
 
     private static byte[] hexBytes(String hex) {

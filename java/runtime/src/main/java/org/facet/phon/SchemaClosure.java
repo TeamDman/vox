@@ -105,6 +105,29 @@ public final class SchemaClosure {
         try {
             LinkedHashMap<SchemaId, Schema> all = new LinkedHashMap<>();
             for (Schema schema : reachable) mergeSchema(all, schema);
+            return withMergedClosures(root, all, auxiliaryClosures);
+        } catch (PhonException failure) {
+            throw new ExceptionInInitializerError(failure);
+        }
+    }
+    /** Add role-keyed channel roots to an already complete primary closure. */
+    public static SchemaClosure uncheckedWithAuxiliaryClosures(
+            SchemaClosure primary,
+            Map<String, SchemaClosure> auxiliaryClosures) {
+        try {
+            LinkedHashMap<SchemaId, Schema> all = new LinkedHashMap<>();
+            for (Schema schema : Objects.requireNonNull(primary).schemas()) {
+                mergeSchema(all, schema);
+            }
+            return withMergedClosures(primary.root(), all, auxiliaryClosures);
+        } catch (PhonException failure) {
+            throw new ExceptionInInitializerError(failure);
+        }
+    }
+    private static SchemaClosure withMergedClosures(
+            Schema root,
+            LinkedHashMap<SchemaId, Schema> all,
+            Map<String, SchemaClosure> auxiliaryClosures) throws PhonException {
             LinkedHashMap<String, SchemaId> roots = new LinkedHashMap<>();
             for (Map.Entry<String, SchemaClosure> entry : auxiliaryClosures.entrySet()) {
                 SchemaClosure closure = Objects.requireNonNull(entry.getValue());
@@ -115,9 +138,6 @@ public final class SchemaClosure {
             ArrayList<Schema> ordered = new ArrayList<>(all.values());
             ordered.sort(java.util.Comparator.comparing(schema -> schema.id().toString()));
             return new SchemaClosure(root, ordered, roots, PhonLimits.DEFAULT);
-        } catch (PhonException failure) {
-            throw new ExceptionInInitializerError(failure);
-        }
     }
     public static SchemaClosure fromCanonicalBytes(
             SchemaId rootId, byte[][] canonicalSchemas, PhonLimits limits)

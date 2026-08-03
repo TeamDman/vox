@@ -144,7 +144,8 @@ public final class VoxRuntimeTest {
                     40,
                     stream.tx(),
                     CallOptions.withIdleTimeout(Duration.ofMillis(150)));
-            Thread.sleep(75);
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (sent.get() < 3 && System.nanoTime() < deadline) Thread.sleep(5);
             check(sent.get() == 3,
                     "sender stops at receiver-advertised initial credit; sent=" + sent.get());
             for (int index = 0; index < 40; index++) {
@@ -158,13 +159,30 @@ public final class VoxRuntimeTest {
                     "generated channel response");
 
             sent.set(0);
+            VoxChannels.Pair<String> resetStream = VoxChannels.channel(ADAPTER);
+            CompletableFuture<String> resetCall = fixture.generate(
+                    10_000,
+                    resetStream.tx(),
+                    CallOptions.withIdleTimeout(Duration.ofSeconds(2)));
+            deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (sent.get() < 3 && System.nanoTime() < deadline) Thread.sleep(5);
+            resetStream.rx().close();
+            check("stopped".equals(resetCall.get(2, TimeUnit.SECONDS)),
+                    "receiver reset stops only its request-scoped producer");
+            check(lane.state() == LaneState.OPEN,
+                    "late in-flight items after receiver reset preserve the lane");
+            check("after-reset".equals(
+                            fixture.echo("after-reset").get(2, TimeUnit.SECONDS)),
+                    "unrelated calls continue after receiver reset");
+
+            sent.set(0);
             cancelled.set(false);
             VoxChannels.Pair<String> cancelledStream = VoxChannels.channel(ADAPTER);
             CompletableFuture<String> cancelledCall = fixture.generate(
                     10_000,
                     cancelledStream.tx(),
                     CallOptions.withIdleTimeout(Duration.ofSeconds(2)));
-            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
             while (sent.get() < 3 && System.nanoTime() < deadline) Thread.sleep(5);
             check(cancelledCall.cancel(false), "request cancellation accepted");
             deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);

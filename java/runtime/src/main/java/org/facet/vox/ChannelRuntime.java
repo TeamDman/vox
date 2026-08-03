@@ -176,7 +176,14 @@ final class ChannelRuntime {
         }
 
         synchronized void item(byte[] payload, SchemaClosure writer) throws VoxException {
-            if (gracefulClose || failure != null || reset) {
+            // Reset and data travel in opposite TCP directions. The peer can
+            // therefore have already written an item when our local reset is
+            // sent, even though that item is observed afterwards. It belongs
+            // to the retired request-scoped channel and must be discarded;
+            // treating it as a connection protocol error tears down unrelated
+            // lanes and requests.
+            if (reset) return;
+            if (gracefulClose || failure != null) {
                 throw new VoxException("item received for terminal channel");
             }
             if (queue.size() >= capacity) {

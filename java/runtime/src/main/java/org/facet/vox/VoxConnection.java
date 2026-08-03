@@ -515,11 +515,18 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
                     close.laneId, codec.channelClose(close.channelId)));
             activeChannels.remove(channelKey(close.laneId, close.channelId));
         } else if (command instanceof ChannelResetCommand reset) {
-            requireActiveChannel(reset.laneId, reset.channelId).progress();
+            ActiveChannel active = activeChannels.get(channelKey(reset.laneId, reset.channelId));
+            // A peer Close or request Response can retire the channel while a
+            // locally requested reset is still queued. That is a successful
+            // terminal race, not an unknown-channel protocol violation.
+            if (active == null) return;
+            active.progress();
             framing.writeFrame(codec.encodeMessage(
                     reset.laneId, codec.channelReset(reset.channelId)));
-            ActiveChannel removed = activeChannels.remove(channelKey(reset.laneId, reset.channelId));
-            if (removed != null) removed.terminate(new VoxException("local receiver reset channel"));
+            // Keep the reset receiver as a bounded tombstone until the peer
+            // closes the channel or completes/cancels its owning request. Any
+            // item already in flight is then discarded by Receiver.item while
+            // genuinely unknown channel ids continue to fail closed.
         } else if (command instanceof ChannelGrantCommand grant) {
             ActiveChannel active = activeChannels.get(channelKey(grant.laneId, grant.channelId));
             // A receive can queue replenishment just before an already-in-flight

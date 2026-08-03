@@ -494,6 +494,7 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
                             call.call.options.metadata())));
         } else if (command instanceof CloseLaneCommand close) {
             framing.writeFrame(codec.encodeMessage(close.laneId, codec.laneClose()));
+            retireOutboundLane(close.laneId);
         } else if (command instanceof CancelCommand cancel) {
             framing.writeFrame(codec.encodeMessage(
                     cancel.laneId, codec.requestCancel(cancel.requestId)));
@@ -504,13 +505,18 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
             processReply(reply, framing, codec);
         } else if (command instanceof ChannelItemCommand item) {
             queuedBytes.addAndGet(-item.payload.length);
-            ActiveChannel channel = requireActiveChannel(item.laneId, item.channelId);
+            ActiveChannel channel = activeChannels.get(channelKey(item.laneId, item.channelId));
+            // Peer reset/lane close can retire a sender after it queued an
+            // item but before the connection driver writes that item.
+            if (channel == null) return;
             channel.progress();
             ensureArgsSchema(channel.method, item.laneId, framing, codec);
             framing.writeFrame(codec.encodeMessage(
                     item.laneId, codec.channelItem(item.channelId, item.payload)));
         } else if (command instanceof ChannelCloseCommand close) {
-            requireActiveChannel(close.laneId, close.channelId).progress();
+            ActiveChannel active = activeChannels.get(channelKey(close.laneId, close.channelId));
+            if (active == null) return;
+            active.progress();
             framing.writeFrame(codec.encodeMessage(
                     close.laneId, codec.channelClose(close.channelId)));
             activeChannels.remove(channelKey(close.laneId, close.channelId));
@@ -1070,6 +1076,21 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
             if (!entry.getKey().startsWith(prefix)) continue;
             ActiveChannel removed = activeChannels.remove(entry.getKey());
             if (removed != null) removed.terminate(reason);
+        }
+    }
+
+    private void retireOutboundLane(long laneId) {
+        VoxException reason = new VoxException("local service lane closed");
+        String prefix = Long.toUnsignedString(laneId) + ":";
+        for (Map.Entry<String, ServiceLane.OutboundCall> entry :
+                new ArrayList<>(inFlight.entrySet())) {
+            if (!entry.getKey().startsWith(prefix)) continue;
+            ServiceLane.OutboundCall removed = inFlight.remove(entry.getKey());
+            if (removed != null) removed.fail(reason);
+        }
+        terminateLaneChannels(laneId, reason);
+        synchronized (lanes) {
+            lanes.removeIf(lane -> lane.id() == laneId);
         }
     }
 

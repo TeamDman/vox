@@ -176,6 +176,42 @@ public final class VoxRuntimeTest {
                     "unrelated calls continue after receiver reset");
 
             sent.set(0);
+            ServiceLane streamingLane = client.openLane(
+                    JavaFixtureServiceDescriptor.INSTANCE,
+                    LaneOptions.defaults());
+            streamingLane.opened().get(2, TimeUnit.SECONDS);
+            JavaFixtureClient streamingFixture = new JavaFixtureClient(streamingLane);
+            VoxChannels.Pair<String> laneCloseStream = VoxChannels.channel(ADAPTER);
+            streamingFixture.generate(
+                    10_000,
+                    laneCloseStream.tx(),
+                    CallOptions.withIdleTimeout(Duration.ofSeconds(2)));
+            deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (sent.get() < 3 && System.nanoTime() < deadline) Thread.sleep(5);
+            streamingLane.close();
+            boolean laneReceiverTerminated = false;
+            for (int attempt = 0; attempt < 5 && !laneReceiverTerminated; attempt++) {
+                try {
+                    laneCloseStream.rx().receive(Duration.ofSeconds(1));
+                } catch (VoxException failure) {
+                    laneReceiverTerminated = true;
+                }
+            }
+            check(laneReceiverTerminated,
+                    "closing a presentation lane terminates its local receiver");
+            check("after-lane-close".equals(
+                            fixture.echo("after-lane-close").get(2, TimeUnit.SECONDS)),
+                    "closing a presentation lane preserves an independent control lane");
+            ServiceLane replacementLane = client.openLane(
+                    JavaFixtureServiceDescriptor.INSTANCE,
+                    LaneOptions.defaults());
+            replacementLane.opened().get(2, TimeUnit.SECONDS);
+            check("replacement-lane".equals(new JavaFixtureClient(replacementLane)
+                            .echo("replacement-lane").get(2, TimeUnit.SECONDS)),
+                    "a closed presentation lane can be replaced on the same connection");
+            replacementLane.close();
+
+            sent.set(0);
             cancelled.set(false);
             VoxChannels.Pair<String> cancelledStream = VoxChannels.channel(ADAPTER);
             CompletableFuture<String> cancelledCall = fixture.generate(

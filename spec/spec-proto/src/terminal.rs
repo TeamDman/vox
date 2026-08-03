@@ -75,6 +75,20 @@ pub trait Terminal {
     ) -> Result<TerminalOperationResult, TerminalError>;
 }
 
+/// Logical and physical dimensions for one terminal presentation surface.
+/// Logical dimensions control PTY/VT state; physical dimensions describe the
+/// target panel and the renderer's native cell metrics.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Facet)]
+pub struct TerminalSurfaceMetrics {
+    pub columns: u16,
+    pub rows: u16,
+    pub panel_width: u16,
+    pub panel_height: u16,
+    pub cell_width: u16,
+    pub cell_height: u16,
+    pub font_pixel_size: u16,
+}
+
 /// Negotiated feature and resource limits.  A peer must treat the maxima as
 /// hard bounds; it may advertise smaller values in its response.
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
@@ -90,6 +104,10 @@ pub struct TerminalCapabilities {
     pub max_width: u16,
     pub max_height: u16,
     pub max_frame_bytes: u32,
+    #[facet(default)]
+    pub backend_id: String,
+    #[facet(default)]
+    pub transport_id: String,
 }
 
 /// Creates a session and requests capabilities.
@@ -98,8 +116,12 @@ pub struct TerminalConnectRequest {
     pub endpoint: String,
     pub requested_width: u16,
     pub requested_height: u16,
+    #[facet(default)]
+    pub surface: TerminalSurfaceMetrics,
     pub capabilities: TerminalCapabilities,
     pub client_sequence: i64,
+    #[facet(default)]
+    pub correlation_id: String,
 }
 
 /// Successful session creation response.
@@ -107,10 +129,12 @@ pub struct TerminalConnectRequest {
 pub struct TerminalConnectResult {
     pub session_id: String,
     pub capabilities: TerminalCapabilities,
-    pub width: u16,
-    pub height: u16,
+    #[facet(default)]
+    pub surface: TerminalSurfaceMetrics,
     pub server_sequence: i64,
     pub state: TerminalState,
+    #[facet(default)]
+    pub correlation_id: String,
 }
 
 /// Queries the negotiated capabilities for a session.
@@ -134,7 +158,11 @@ pub struct TerminalResizeRequest {
     pub session_id: String,
     pub width: u16,
     pub height: u16,
+    #[facet(default)]
+    pub surface: TerminalSurfaceMetrics,
     pub client_sequence: i64,
+    #[facet(default)]
+    pub correlation_id: String,
 }
 
 /// Accepted logical dimensions and resulting sequence.
@@ -143,7 +171,11 @@ pub struct TerminalResizeResult {
     pub session_id: String,
     pub width: u16,
     pub height: u16,
+    #[facet(default)]
+    pub surface: TerminalSurfaceMetrics,
     pub server_sequence: i64,
+    #[facet(default)]
+    pub correlation_id: String,
 }
 
 /// Printable text input.  The server rejects a payload longer than the
@@ -153,6 +185,8 @@ pub struct TerminalTextInput {
     pub session_id: String,
     pub text: String,
     pub client_sequence: i64,
+    #[facet(default)]
+    pub correlation_id: String,
 }
 
 /// Key input, with a stable numeric key code and modifier bitset.
@@ -164,6 +198,8 @@ pub struct TerminalKeyInput {
     pub pressed: bool,
     pub repeat: bool,
     pub client_sequence: i64,
+    #[facet(default)]
+    pub correlation_id: String,
 }
 
 /// Mouse input in logical terminal coordinates.
@@ -181,6 +217,8 @@ pub struct TerminalMouseInput {
     pub wheel_x: i32,
     pub wheel_y: i32,
     pub client_sequence: i64,
+    #[facet(default)]
+    pub correlation_id: String,
 }
 
 /// Acknowledges text, key, or mouse input.
@@ -189,6 +227,8 @@ pub struct TerminalInputResult {
     pub session_id: String,
     pub server_sequence: i64,
     pub frame_sequence: i64,
+    #[facet(default)]
+    pub correlation_id: String,
 }
 
 /// Requests a frame no larger than `max_frame_bytes`.
@@ -198,6 +238,8 @@ pub struct TerminalSnapshotRequest {
     pub after_sequence: i64,
     pub max_frame_bytes: u32,
     pub client_sequence: i64,
+    #[facet(default)]
+    pub correlation_id: String,
 }
 
 /// Requests bounded visible-grid text, optionally after a known sequence.
@@ -227,8 +269,26 @@ pub struct TerminalContentResult {
 pub struct TerminalSnapshot {
     pub session_id: String,
     pub sequence: i64,
+    /// The client sequence from the request that produced this response.
+    pub request_sequence: i64,
+    #[facet(default)]
+    pub logical_columns: u16,
+    #[facet(default)]
+    pub logical_rows: u16,
     pub width: u16,
     pub height: u16,
+    #[facet(default)]
+    pub panel_width: u16,
+    #[facet(default)]
+    pub panel_height: u16,
+    #[facet(default)]
+    pub cell_width: u16,
+    #[facet(default)]
+    pub cell_height: u16,
+    #[facet(default)]
+    pub font_pixel_size: u16,
+    #[facet(default)]
+    pub correlation_id: String,
     pub encoding: TerminalFrameEncoding,
     pub kind: TerminalFrameKind,
     pub stride: u32,
@@ -308,6 +368,8 @@ pub struct TerminalCancelRequest {
     pub request_sequence: i64,
     pub reason: String,
     pub client_sequence: i64,
+    #[facet(default)]
+    pub correlation_id: String,
 }
 
 /// Closes the session or records a peer disconnect.
@@ -368,8 +430,17 @@ mod tests {
         let snapshot = TerminalSnapshot {
             session_id: "session-01".to_string(),
             sequence: 42,
+            request_sequence: 41,
+            logical_columns: 80,
+            logical_rows: 24,
             width: 80,
             height: 24,
+            panel_width: 640,
+            panel_height: 384,
+            cell_width: 8,
+            cell_height: 16,
+            font_pixel_size: 16,
+            correlation_id: "snapshot-01".to_string(),
             encoding: TerminalFrameEncoding::Rgba8,
             kind: TerminalFrameKind::Full,
             stride: 320,
@@ -462,6 +533,7 @@ mod tests {
             wheel_x: 0,
             wheel_y: 0,
             client_sequence: 7,
+            correlation_id: "mouse-01".to_string(),
         };
         let bytes = vox_phon::to_vec(&input).expect("encode terminal mouse motion");
         let decoded: TerminalMouseInput =
@@ -492,6 +564,6 @@ mod tests {
         assert!(fixture.contains("\"max_width\": 512"));
         assert!(fixture.contains("\"max_height\": 256"));
         assert!(fixture.contains("\"max_frame_bytes\": 16777216"));
-        assert!(fixture.contains("\"frame_fields\": [\"sequence\", \"stride\", \"kind\", \"tile_bounds\", \"cursor\", \"selection\", \"prompt\", \"command_range\"]"));
+        assert!(fixture.contains("\"frame_fields\": [\"sequence\", \"request_sequence\", \"logical_dimensions\", \"pixel_dimensions\", \"surface_metrics\", \"correlation_id\", \"stride\", \"kind\", \"tile_bounds\", \"cursor\", \"selection\", \"prompt\", \"command_range\"]"));
     }
 }

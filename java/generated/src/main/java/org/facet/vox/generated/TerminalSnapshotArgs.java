@@ -12,7 +12,7 @@ public final class TerminalSnapshotArgs {
     this.request = Objects.requireNonNull(request, "request");
   }
   public TerminalSnapshotRequest request() { return request; }
-  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0xaf115c6bdb78f60bL), List.of(), new Schema.TupleKind(List.of(Schema.Ref.concrete(SchemaId.fromLong(0x32d0112644aefceeL)))));
+  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0xc2a21fd4d7a343f2L), List.of(), new Schema.TupleKind(List.of(Schema.Ref.concrete(SchemaId.fromLong(0x735b3e39290fb04dL)))));
   public static final PhonAdapter<TerminalSnapshotArgs> ADAPTER = new PhonAdapter<>() {
     @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA, TerminalSnapshotRequest.SCHEMA); }
     @Override public void encode(PhonEncoder encoder, TerminalSnapshotArgs value) throws PhonException {

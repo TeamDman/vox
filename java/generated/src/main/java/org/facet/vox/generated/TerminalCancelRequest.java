@@ -11,20 +11,27 @@ public final class TerminalCancelRequest {
   private final long requestSequence;
   private final String reason;
   private final long clientSequence;
+  private final String correlationId;
 
-  public TerminalCancelRequest(String sessionId, long requestSequence, String reason, long clientSequence) {
+  public TerminalCancelRequest(String sessionId, long requestSequence, String reason, long clientSequence, String correlationId) {
     this.sessionId = Objects.requireNonNull(sessionId, "sessionId");
     this.requestSequence = requestSequence;
     this.reason = Objects.requireNonNull(reason, "reason");
     this.clientSequence = clientSequence;
+    this.correlationId = Objects.requireNonNull(correlationId, "correlationId");
   }
+
+  /** Compatibility constructor omitting fields with a Rust default. */
+  public TerminalCancelRequest(String sessionId, long requestSequence, String reason, long clientSequence) { this(sessionId, requestSequence, reason, clientSequence, ""); }
+
 
   public String sessionId() { return sessionId; }
   public long requestSequence() { return requestSequence; }
   public String reason() { return reason; }
   public long clientSequence() { return clientSequence; }
+  public String correlationId() { return correlationId; }
 
-  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0xc2b39223a320c974L), List.of(), new Schema.RecordKind("TerminalCancelRequest", List.of(new Schema.Field("session_id", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true), new Schema.Field("request_sequence", Schema.Ref.concrete(SchemaId.fromLong(0xc6eb8c46f1e17fbaL)), true), new Schema.Field("reason", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true), new Schema.Field("client_sequence", Schema.Ref.concrete(SchemaId.fromLong(0xc6eb8c46f1e17fbaL)), true))));
+  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x6718f97ff242c8e0L), List.of(), new Schema.RecordKind("TerminalCancelRequest", List.of(new Schema.Field("session_id", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true), new Schema.Field("request_sequence", Schema.Ref.concrete(SchemaId.fromLong(0xc6eb8c46f1e17fbaL)), true), new Schema.Field("reason", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true), new Schema.Field("client_sequence", Schema.Ref.concrete(SchemaId.fromLong(0xc6eb8c46f1e17fbaL)), true), new Schema.Field("correlation_id", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true))));
   public static final PhonAdapter<TerminalCancelRequest> ADAPTER = new PhonAdapter<>() {
     @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA); }
     @Override public void encode(PhonEncoder encoder, TerminalCancelRequest value) throws PhonException {
@@ -32,14 +39,15 @@ public final class TerminalCancelRequest {
       encoder.writeI64(value.requestSequence());
       encoder.writeString(value.reason());
       encoder.writeI64(value.clientSequence());
+      encoder.writeString(value.correlationId());
     }
-    @Override public TerminalCancelRequest decode(PhonDecoder decoder) throws PhonException { return new TerminalCancelRequest(decoder.readString(), decoder.readI64(), decoder.readString(), decoder.readI64()); }
+    @Override public TerminalCancelRequest decode(PhonDecoder decoder) throws PhonException { return new TerminalCancelRequest(decoder.readString(), decoder.readI64(), decoder.readString(), decoder.readI64(), decoder.readString()); }
   };
 
   @Override public boolean equals(Object other) {
     if (!(other instanceof TerminalCancelRequest that)) return false;
-    return Objects.deepEquals(sessionId, that.sessionId) && Objects.deepEquals(requestSequence, that.requestSequence) && Objects.deepEquals(reason, that.reason) && Objects.deepEquals(clientSequence, that.clientSequence);
+    return Objects.deepEquals(sessionId, that.sessionId) && Objects.deepEquals(requestSequence, that.requestSequence) && Objects.deepEquals(reason, that.reason) && Objects.deepEquals(clientSequence, that.clientSequence) && Objects.deepEquals(correlationId, that.correlationId);
   }
-  @Override public int hashCode() { return Objects.hash(sessionId, requestSequence, reason, clientSequence); }
-  @Override public String toString() { return "TerminalCancelRequest" + java.util.List.of(sessionId, requestSequence, reason, clientSequence); }
+  @Override public int hashCode() { return Objects.hash(sessionId, requestSequence, reason, clientSequence, correlationId); }
+  @Override public String toString() { return "TerminalCancelRequest" + java.util.List.of(sessionId, requestSequence, reason, clientSequence, correlationId); }
 }

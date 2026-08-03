@@ -11,20 +11,27 @@ public final class TerminalSnapshotRequest {
   private final long afterSequence;
   private final long maxFrameBytes;
   private final long clientSequence;
+  private final String correlationId;
 
-  public TerminalSnapshotRequest(String sessionId, long afterSequence, long maxFrameBytes, long clientSequence) {
+  public TerminalSnapshotRequest(String sessionId, long afterSequence, long maxFrameBytes, long clientSequence, String correlationId) {
     this.sessionId = Objects.requireNonNull(sessionId, "sessionId");
     this.afterSequence = afterSequence;
     this.maxFrameBytes = maxFrameBytes;
     this.clientSequence = clientSequence;
+    this.correlationId = Objects.requireNonNull(correlationId, "correlationId");
   }
+
+  /** Compatibility constructor omitting fields with a Rust default. */
+  public TerminalSnapshotRequest(String sessionId, long afterSequence, long maxFrameBytes, long clientSequence) { this(sessionId, afterSequence, maxFrameBytes, clientSequence, ""); }
+
 
   public String sessionId() { return sessionId; }
   public long afterSequence() { return afterSequence; }
   public long maxFrameBytes() { return maxFrameBytes; }
   public long clientSequence() { return clientSequence; }
+  public String correlationId() { return correlationId; }
 
-  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x32d0112644aefceeL), List.of(), new Schema.RecordKind("TerminalSnapshotRequest", List.of(new Schema.Field("session_id", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true), new Schema.Field("after_sequence", Schema.Ref.concrete(SchemaId.fromLong(0xc6eb8c46f1e17fbaL)), true), new Schema.Field("max_frame_bytes", Schema.Ref.concrete(SchemaId.fromLong(0x281c5be4f2ee63b4L)), true), new Schema.Field("client_sequence", Schema.Ref.concrete(SchemaId.fromLong(0xc6eb8c46f1e17fbaL)), true))));
+  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x735b3e39290fb04dL), List.of(), new Schema.RecordKind("TerminalSnapshotRequest", List.of(new Schema.Field("session_id", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true), new Schema.Field("after_sequence", Schema.Ref.concrete(SchemaId.fromLong(0xc6eb8c46f1e17fbaL)), true), new Schema.Field("max_frame_bytes", Schema.Ref.concrete(SchemaId.fromLong(0x281c5be4f2ee63b4L)), true), new Schema.Field("client_sequence", Schema.Ref.concrete(SchemaId.fromLong(0xc6eb8c46f1e17fbaL)), true), new Schema.Field("correlation_id", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true))));
   public static final PhonAdapter<TerminalSnapshotRequest> ADAPTER = new PhonAdapter<>() {
     @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA); }
     @Override public void encode(PhonEncoder encoder, TerminalSnapshotRequest value) throws PhonException {
@@ -32,14 +39,15 @@ public final class TerminalSnapshotRequest {
       encoder.writeI64(value.afterSequence());
       encoder.writeU32(value.maxFrameBytes());
       encoder.writeI64(value.clientSequence());
+      encoder.writeString(value.correlationId());
     }
-    @Override public TerminalSnapshotRequest decode(PhonDecoder decoder) throws PhonException { return new TerminalSnapshotRequest(decoder.readString(), decoder.readI64(), decoder.readU32(), decoder.readI64()); }
+    @Override public TerminalSnapshotRequest decode(PhonDecoder decoder) throws PhonException { return new TerminalSnapshotRequest(decoder.readString(), decoder.readI64(), decoder.readU32(), decoder.readI64(), decoder.readString()); }
   };
 
   @Override public boolean equals(Object other) {
     if (!(other instanceof TerminalSnapshotRequest that)) return false;
-    return Objects.deepEquals(sessionId, that.sessionId) && Objects.deepEquals(afterSequence, that.afterSequence) && Objects.deepEquals(maxFrameBytes, that.maxFrameBytes) && Objects.deepEquals(clientSequence, that.clientSequence);
+    return Objects.deepEquals(sessionId, that.sessionId) && Objects.deepEquals(afterSequence, that.afterSequence) && Objects.deepEquals(maxFrameBytes, that.maxFrameBytes) && Objects.deepEquals(clientSequence, that.clientSequence) && Objects.deepEquals(correlationId, that.correlationId);
   }
-  @Override public int hashCode() { return Objects.hash(sessionId, afterSequence, maxFrameBytes, clientSequence); }
-  @Override public String toString() { return "TerminalSnapshotRequest" + java.util.List.of(sessionId, afterSequence, maxFrameBytes, clientSequence); }
+  @Override public int hashCode() { return Objects.hash(sessionId, afterSequence, maxFrameBytes, clientSequence, correlationId); }
+  @Override public String toString() { return "TerminalSnapshotRequest" + java.util.List.of(sessionId, afterSequence, maxFrameBytes, clientSequence, correlationId); }
 }

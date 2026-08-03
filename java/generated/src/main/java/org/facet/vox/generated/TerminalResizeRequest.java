@@ -10,36 +10,48 @@ public final class TerminalResizeRequest {
   private final String sessionId;
   private final int width;
   private final int height;
+  private final TerminalSurfaceMetrics surface;
   private final long clientSequence;
+  private final String correlationId;
 
-  public TerminalResizeRequest(String sessionId, int width, int height, long clientSequence) {
+  public TerminalResizeRequest(String sessionId, int width, int height, TerminalSurfaceMetrics surface, long clientSequence, String correlationId) {
     this.sessionId = Objects.requireNonNull(sessionId, "sessionId");
     this.width = width;
     this.height = height;
+    this.surface = Objects.requireNonNull(surface, "surface");
     this.clientSequence = clientSequence;
+    this.correlationId = Objects.requireNonNull(correlationId, "correlationId");
   }
+
+  /** Compatibility constructor omitting fields with a Rust default. */
+  public TerminalResizeRequest(String sessionId, int width, int height, long clientSequence) { this(sessionId, width, height, new TerminalSurfaceMetrics(0, 0, 0, 0, 0, 0, 0), clientSequence, ""); }
+
 
   public String sessionId() { return sessionId; }
   public int width() { return width; }
   public int height() { return height; }
+  public TerminalSurfaceMetrics surface() { return surface; }
   public long clientSequence() { return clientSequence; }
+  public String correlationId() { return correlationId; }
 
-  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x4b3147fcf2a099edL), List.of(), new Schema.RecordKind("TerminalResizeRequest", List.of(new Schema.Field("session_id", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true), new Schema.Field("width", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("height", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("client_sequence", Schema.Ref.concrete(SchemaId.fromLong(0xc6eb8c46f1e17fbaL)), true))));
+  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x8c196acabd5bb840L), List.of(), new Schema.RecordKind("TerminalResizeRequest", List.of(new Schema.Field("session_id", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true), new Schema.Field("width", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("height", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("surface", Schema.Ref.concrete(SchemaId.fromLong(0xadcba54aa908fdc7L)), true), new Schema.Field("client_sequence", Schema.Ref.concrete(SchemaId.fromLong(0xc6eb8c46f1e17fbaL)), true), new Schema.Field("correlation_id", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true))));
   public static final PhonAdapter<TerminalResizeRequest> ADAPTER = new PhonAdapter<>() {
-    @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA); }
+    @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA, TerminalSurfaceMetrics.SCHEMA); }
     @Override public void encode(PhonEncoder encoder, TerminalResizeRequest value) throws PhonException {
       encoder.writeString(value.sessionId());
       encoder.writeU16(value.width());
       encoder.writeU16(value.height());
+      encoder.writeAdapted(TerminalSurfaceMetrics.ADAPTER, value.surface());
       encoder.writeI64(value.clientSequence());
+      encoder.writeString(value.correlationId());
     }
-    @Override public TerminalResizeRequest decode(PhonDecoder decoder) throws PhonException { return new TerminalResizeRequest(decoder.readString(), decoder.readU16(), decoder.readU16(), decoder.readI64()); }
+    @Override public TerminalResizeRequest decode(PhonDecoder decoder) throws PhonException { return new TerminalResizeRequest(decoder.readString(), decoder.readU16(), decoder.readU16(), decoder.readAdapted(TerminalSurfaceMetrics.ADAPTER), decoder.readI64(), decoder.readString()); }
   };
 
   @Override public boolean equals(Object other) {
     if (!(other instanceof TerminalResizeRequest that)) return false;
-    return Objects.deepEquals(sessionId, that.sessionId) && Objects.deepEquals(width, that.width) && Objects.deepEquals(height, that.height) && Objects.deepEquals(clientSequence, that.clientSequence);
+    return Objects.deepEquals(sessionId, that.sessionId) && Objects.deepEquals(width, that.width) && Objects.deepEquals(height, that.height) && Objects.deepEquals(surface, that.surface) && Objects.deepEquals(clientSequence, that.clientSequence) && Objects.deepEquals(correlationId, that.correlationId);
   }
-  @Override public int hashCode() { return Objects.hash(sessionId, width, height, clientSequence); }
-  @Override public String toString() { return "TerminalResizeRequest" + java.util.List.of(sessionId, width, height, clientSequence); }
+  @Override public int hashCode() { return Objects.hash(sessionId, width, height, surface, clientSequence, correlationId); }
+  @Override public String toString() { return "TerminalResizeRequest" + java.util.List.of(sessionId, width, height, surface, clientSequence, correlationId); }
 }

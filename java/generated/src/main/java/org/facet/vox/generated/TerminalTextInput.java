@@ -10,32 +10,40 @@ public final class TerminalTextInput {
   private final String sessionId;
   private final String text;
   private final long clientSequence;
+  private final String correlationId;
 
-  public TerminalTextInput(String sessionId, String text, long clientSequence) {
+  public TerminalTextInput(String sessionId, String text, long clientSequence, String correlationId) {
     this.sessionId = Objects.requireNonNull(sessionId, "sessionId");
     this.text = Objects.requireNonNull(text, "text");
     this.clientSequence = clientSequence;
+    this.correlationId = Objects.requireNonNull(correlationId, "correlationId");
   }
+
+  /** Compatibility constructor omitting fields with a Rust default. */
+  public TerminalTextInput(String sessionId, String text, long clientSequence) { this(sessionId, text, clientSequence, ""); }
+
 
   public String sessionId() { return sessionId; }
   public String text() { return text; }
   public long clientSequence() { return clientSequence; }
+  public String correlationId() { return correlationId; }
 
-  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0xa5dbc4ef1410f4b1L), List.of(), new Schema.RecordKind("TerminalTextInput", List.of(new Schema.Field("session_id", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true), new Schema.Field("text", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true), new Schema.Field("client_sequence", Schema.Ref.concrete(SchemaId.fromLong(0xc6eb8c46f1e17fbaL)), true))));
+  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x37cbd837c513fa8eL), List.of(), new Schema.RecordKind("TerminalTextInput", List.of(new Schema.Field("session_id", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true), new Schema.Field("text", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true), new Schema.Field("client_sequence", Schema.Ref.concrete(SchemaId.fromLong(0xc6eb8c46f1e17fbaL)), true), new Schema.Field("correlation_id", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true))));
   public static final PhonAdapter<TerminalTextInput> ADAPTER = new PhonAdapter<>() {
     @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA); }
     @Override public void encode(PhonEncoder encoder, TerminalTextInput value) throws PhonException {
       encoder.writeString(value.sessionId());
       encoder.writeString(value.text());
       encoder.writeI64(value.clientSequence());
+      encoder.writeString(value.correlationId());
     }
-    @Override public TerminalTextInput decode(PhonDecoder decoder) throws PhonException { return new TerminalTextInput(decoder.readString(), decoder.readString(), decoder.readI64()); }
+    @Override public TerminalTextInput decode(PhonDecoder decoder) throws PhonException { return new TerminalTextInput(decoder.readString(), decoder.readString(), decoder.readI64(), decoder.readString()); }
   };
 
   @Override public boolean equals(Object other) {
     if (!(other instanceof TerminalTextInput that)) return false;
-    return Objects.deepEquals(sessionId, that.sessionId) && Objects.deepEquals(text, that.text) && Objects.deepEquals(clientSequence, that.clientSequence);
+    return Objects.deepEquals(sessionId, that.sessionId) && Objects.deepEquals(text, that.text) && Objects.deepEquals(clientSequence, that.clientSequence) && Objects.deepEquals(correlationId, that.correlationId);
   }
-  @Override public int hashCode() { return Objects.hash(sessionId, text, clientSequence); }
-  @Override public String toString() { return "TerminalTextInput" + java.util.List.of(sessionId, text, clientSequence); }
+  @Override public int hashCode() { return Objects.hash(sessionId, text, clientSequence, correlationId); }
+  @Override public String toString() { return "TerminalTextInput" + java.util.List.of(sessionId, text, clientSequence, correlationId); }
 }

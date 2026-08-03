@@ -9,8 +9,17 @@ import org.facet.phon.*;
 public final class TerminalSnapshot {
   private final String sessionId;
   private final long sequence;
+  private final long requestSequence;
+  private final int logicalColumns;
+  private final int logicalRows;
   private final int width;
   private final int height;
+  private final int panelWidth;
+  private final int panelHeight;
+  private final int cellWidth;
+  private final int cellHeight;
+  private final int fontPixelSize;
+  private final String correlationId;
   private final TerminalFrameEncoding encoding;
   private final TerminalFrameKind kind;
   private final long stride;
@@ -25,11 +34,20 @@ public final class TerminalSnapshot {
   private final TerminalSelection selection;
   private final TerminalPromptMetadata prompt;
 
-  public TerminalSnapshot(String sessionId, long sequence, int width, int height, TerminalFrameEncoding encoding, TerminalFrameKind kind, long stride, int tileX, int tileY, int tileWidth, int tileHeight, byte[] payload, boolean complete, TerminalCursor cursor, boolean selectionPresent, TerminalSelection selection, TerminalPromptMetadata prompt) {
+  public TerminalSnapshot(String sessionId, long sequence, long requestSequence, int logicalColumns, int logicalRows, int width, int height, int panelWidth, int panelHeight, int cellWidth, int cellHeight, int fontPixelSize, String correlationId, TerminalFrameEncoding encoding, TerminalFrameKind kind, long stride, int tileX, int tileY, int tileWidth, int tileHeight, byte[] payload, boolean complete, TerminalCursor cursor, boolean selectionPresent, TerminalSelection selection, TerminalPromptMetadata prompt) {
     this.sessionId = Objects.requireNonNull(sessionId, "sessionId");
     this.sequence = sequence;
+    this.requestSequence = requestSequence;
+    this.logicalColumns = logicalColumns;
+    this.logicalRows = logicalRows;
     this.width = width;
     this.height = height;
+    this.panelWidth = panelWidth;
+    this.panelHeight = panelHeight;
+    this.cellWidth = cellWidth;
+    this.cellHeight = cellHeight;
+    this.fontPixelSize = fontPixelSize;
+    this.correlationId = Objects.requireNonNull(correlationId, "correlationId");
     this.encoding = Objects.requireNonNull(encoding, "encoding");
     this.kind = Objects.requireNonNull(kind, "kind");
     this.stride = stride;
@@ -45,10 +63,23 @@ public final class TerminalSnapshot {
     this.prompt = Objects.requireNonNull(prompt, "prompt");
   }
 
+  /** Compatibility constructor omitting fields with a Rust default. */
+  public TerminalSnapshot(String sessionId, long sequence, long requestSequence, int width, int height, TerminalFrameEncoding encoding, TerminalFrameKind kind, long stride, int tileX, int tileY, int tileWidth, int tileHeight, byte[] payload, boolean complete, TerminalCursor cursor, boolean selectionPresent, TerminalSelection selection, TerminalPromptMetadata prompt) { this(sessionId, sequence, requestSequence, 0, 0, width, height, 0, 0, 0, 0, 0, "", encoding, kind, stride, tileX, tileY, tileWidth, tileHeight, payload, complete, cursor, selectionPresent, selection, prompt); }
+
+
   public String sessionId() { return sessionId; }
   public long sequence() { return sequence; }
+  public long requestSequence() { return requestSequence; }
+  public int logicalColumns() { return logicalColumns; }
+  public int logicalRows() { return logicalRows; }
   public int width() { return width; }
   public int height() { return height; }
+  public int panelWidth() { return panelWidth; }
+  public int panelHeight() { return panelHeight; }
+  public int cellWidth() { return cellWidth; }
+  public int cellHeight() { return cellHeight; }
+  public int fontPixelSize() { return fontPixelSize; }
+  public String correlationId() { return correlationId; }
   public TerminalFrameEncoding encoding() { return encoding; }
   public TerminalFrameKind kind() { return kind; }
   public long stride() { return stride; }
@@ -63,14 +94,23 @@ public final class TerminalSnapshot {
   public TerminalSelection selection() { return selection; }
   public TerminalPromptMetadata prompt() { return prompt; }
 
-  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x40e765abcd102975L), List.of(), new Schema.RecordKind("TerminalSnapshot", List.of(new Schema.Field("session_id", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true), new Schema.Field("sequence", Schema.Ref.concrete(SchemaId.fromLong(0xc6eb8c46f1e17fbaL)), true), new Schema.Field("width", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("height", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("encoding", Schema.Ref.concrete(SchemaId.fromLong(0x17c306211a803210L)), true), new Schema.Field("kind", Schema.Ref.concrete(SchemaId.fromLong(0xe9d0786e5baa1c44L)), true), new Schema.Field("stride", Schema.Ref.concrete(SchemaId.fromLong(0x281c5be4f2ee63b4L)), true), new Schema.Field("tile_x", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("tile_y", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("tile_width", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("tile_height", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("payload", Schema.Ref.concrete(SchemaId.fromLong(0xaa0667df4299d151L)), true), new Schema.Field("complete", Schema.Ref.concrete(SchemaId.fromLong(0x178367a87f66fb46L)), true), new Schema.Field("cursor", Schema.Ref.concrete(SchemaId.fromLong(0xcf76466f31030e6fL)), true), new Schema.Field("selection_present", Schema.Ref.concrete(SchemaId.fromLong(0x178367a87f66fb46L)), true), new Schema.Field("selection", Schema.Ref.concrete(SchemaId.fromLong(0x382a4bcbb5faecffL)), true), new Schema.Field("prompt", Schema.Ref.concrete(SchemaId.fromLong(0x283ef791f476f504L)), true))));
+  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x0ed86f54bdb1d272L), List.of(), new Schema.RecordKind("TerminalSnapshot", List.of(new Schema.Field("session_id", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true), new Schema.Field("sequence", Schema.Ref.concrete(SchemaId.fromLong(0xc6eb8c46f1e17fbaL)), true), new Schema.Field("request_sequence", Schema.Ref.concrete(SchemaId.fromLong(0xc6eb8c46f1e17fbaL)), true), new Schema.Field("logical_columns", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("logical_rows", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("width", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("height", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("panel_width", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("panel_height", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("cell_width", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("cell_height", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("font_pixel_size", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("correlation_id", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true), new Schema.Field("encoding", Schema.Ref.concrete(SchemaId.fromLong(0x17c306211a803210L)), true), new Schema.Field("kind", Schema.Ref.concrete(SchemaId.fromLong(0xe9d0786e5baa1c44L)), true), new Schema.Field("stride", Schema.Ref.concrete(SchemaId.fromLong(0x281c5be4f2ee63b4L)), true), new Schema.Field("tile_x", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("tile_y", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("tile_width", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("tile_height", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("payload", Schema.Ref.concrete(SchemaId.fromLong(0xaa0667df4299d151L)), true), new Schema.Field("complete", Schema.Ref.concrete(SchemaId.fromLong(0x178367a87f66fb46L)), true), new Schema.Field("cursor", Schema.Ref.concrete(SchemaId.fromLong(0xcf76466f31030e6fL)), true), new Schema.Field("selection_present", Schema.Ref.concrete(SchemaId.fromLong(0x178367a87f66fb46L)), true), new Schema.Field("selection", Schema.Ref.concrete(SchemaId.fromLong(0x382a4bcbb5faecffL)), true), new Schema.Field("prompt", Schema.Ref.concrete(SchemaId.fromLong(0x283ef791f476f504L)), true))));
   public static final PhonAdapter<TerminalSnapshot> ADAPTER = new PhonAdapter<>() {
     @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA, TerminalFrameEncoding.SCHEMA, TerminalFrameKind.SCHEMA, TerminalCursor.SCHEMA, TerminalSelection.SCHEMA, TerminalPromptMetadata.SCHEMA); }
     @Override public void encode(PhonEncoder encoder, TerminalSnapshot value) throws PhonException {
       encoder.writeString(value.sessionId());
       encoder.writeI64(value.sequence());
+      encoder.writeI64(value.requestSequence());
+      encoder.writeU16(value.logicalColumns());
+      encoder.writeU16(value.logicalRows());
       encoder.writeU16(value.width());
       encoder.writeU16(value.height());
+      encoder.writeU16(value.panelWidth());
+      encoder.writeU16(value.panelHeight());
+      encoder.writeU16(value.cellWidth());
+      encoder.writeU16(value.cellHeight());
+      encoder.writeU16(value.fontPixelSize());
+      encoder.writeString(value.correlationId());
       encoder.writeAdapted(TerminalFrameEncoding.ADAPTER, value.encoding());
       encoder.writeAdapted(TerminalFrameKind.ADAPTER, value.kind());
       encoder.writeU32(value.stride());
@@ -85,13 +125,13 @@ public final class TerminalSnapshot {
       encoder.writeAdapted(TerminalSelection.ADAPTER, value.selection());
       encoder.writeAdapted(TerminalPromptMetadata.ADAPTER, value.prompt());
     }
-    @Override public TerminalSnapshot decode(PhonDecoder decoder) throws PhonException { return new TerminalSnapshot(decoder.readString(), decoder.readI64(), decoder.readU16(), decoder.readU16(), decoder.readAdapted(TerminalFrameEncoding.ADAPTER), decoder.readAdapted(TerminalFrameKind.ADAPTER), decoder.readU32(), decoder.readU16(), decoder.readU16(), decoder.readU16(), decoder.readU16(), decoder.readBytes(), decoder.readBool(), decoder.readAdapted(TerminalCursor.ADAPTER), decoder.readBool(), decoder.readAdapted(TerminalSelection.ADAPTER), decoder.readAdapted(TerminalPromptMetadata.ADAPTER)); }
+    @Override public TerminalSnapshot decode(PhonDecoder decoder) throws PhonException { return new TerminalSnapshot(decoder.readString(), decoder.readI64(), decoder.readI64(), decoder.readU16(), decoder.readU16(), decoder.readU16(), decoder.readU16(), decoder.readU16(), decoder.readU16(), decoder.readU16(), decoder.readU16(), decoder.readU16(), decoder.readString(), decoder.readAdapted(TerminalFrameEncoding.ADAPTER), decoder.readAdapted(TerminalFrameKind.ADAPTER), decoder.readU32(), decoder.readU16(), decoder.readU16(), decoder.readU16(), decoder.readU16(), decoder.readBytes(), decoder.readBool(), decoder.readAdapted(TerminalCursor.ADAPTER), decoder.readBool(), decoder.readAdapted(TerminalSelection.ADAPTER), decoder.readAdapted(TerminalPromptMetadata.ADAPTER)); }
   };
 
   @Override public boolean equals(Object other) {
     if (!(other instanceof TerminalSnapshot that)) return false;
-    return Objects.deepEquals(sessionId, that.sessionId) && Objects.deepEquals(sequence, that.sequence) && Objects.deepEquals(width, that.width) && Objects.deepEquals(height, that.height) && Objects.deepEquals(encoding, that.encoding) && Objects.deepEquals(kind, that.kind) && Objects.deepEquals(stride, that.stride) && Objects.deepEquals(tileX, that.tileX) && Objects.deepEquals(tileY, that.tileY) && Objects.deepEquals(tileWidth, that.tileWidth) && Objects.deepEquals(tileHeight, that.tileHeight) && Objects.deepEquals(payload, that.payload) && Objects.deepEquals(complete, that.complete) && Objects.deepEquals(cursor, that.cursor) && Objects.deepEquals(selectionPresent, that.selectionPresent) && Objects.deepEquals(selection, that.selection) && Objects.deepEquals(prompt, that.prompt);
+    return Objects.deepEquals(sessionId, that.sessionId) && Objects.deepEquals(sequence, that.sequence) && Objects.deepEquals(requestSequence, that.requestSequence) && Objects.deepEquals(logicalColumns, that.logicalColumns) && Objects.deepEquals(logicalRows, that.logicalRows) && Objects.deepEquals(width, that.width) && Objects.deepEquals(height, that.height) && Objects.deepEquals(panelWidth, that.panelWidth) && Objects.deepEquals(panelHeight, that.panelHeight) && Objects.deepEquals(cellWidth, that.cellWidth) && Objects.deepEquals(cellHeight, that.cellHeight) && Objects.deepEquals(fontPixelSize, that.fontPixelSize) && Objects.deepEquals(correlationId, that.correlationId) && Objects.deepEquals(encoding, that.encoding) && Objects.deepEquals(kind, that.kind) && Objects.deepEquals(stride, that.stride) && Objects.deepEquals(tileX, that.tileX) && Objects.deepEquals(tileY, that.tileY) && Objects.deepEquals(tileWidth, that.tileWidth) && Objects.deepEquals(tileHeight, that.tileHeight) && Objects.deepEquals(payload, that.payload) && Objects.deepEquals(complete, that.complete) && Objects.deepEquals(cursor, that.cursor) && Objects.deepEquals(selectionPresent, that.selectionPresent) && Objects.deepEquals(selection, that.selection) && Objects.deepEquals(prompt, that.prompt);
   }
-  @Override public int hashCode() { return Objects.hash(sessionId, sequence, width, height, encoding, kind, stride, tileX, tileY, tileWidth, tileHeight, payload, complete, cursor, selectionPresent, selection, prompt); }
-  @Override public String toString() { return "TerminalSnapshot" + java.util.List.of(sessionId, sequence, width, height, encoding, kind, stride, tileX, tileY, tileWidth, tileHeight, payload, complete, cursor, selectionPresent, selection, prompt); }
+  @Override public int hashCode() { return Objects.hash(sessionId, sequence, requestSequence, logicalColumns, logicalRows, width, height, panelWidth, panelHeight, cellWidth, cellHeight, fontPixelSize, correlationId, encoding, kind, stride, tileX, tileY, tileWidth, tileHeight, payload, complete, cursor, selectionPresent, selection, prompt); }
+  @Override public String toString() { return "TerminalSnapshot" + java.util.List.of(sessionId, sequence, requestSequence, logicalColumns, logicalRows, width, height, panelWidth, panelHeight, cellWidth, cellHeight, fontPixelSize, correlationId, encoding, kind, stride, tileX, tileY, tileWidth, tileHeight, payload, complete, cursor, selectionPresent, selection, prompt); }
 }

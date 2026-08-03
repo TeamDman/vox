@@ -10,32 +10,40 @@ public final class TerminalInputResult {
   private final String sessionId;
   private final long serverSequence;
   private final long frameSequence;
+  private final String correlationId;
 
-  public TerminalInputResult(String sessionId, long serverSequence, long frameSequence) {
+  public TerminalInputResult(String sessionId, long serverSequence, long frameSequence, String correlationId) {
     this.sessionId = Objects.requireNonNull(sessionId, "sessionId");
     this.serverSequence = serverSequence;
     this.frameSequence = frameSequence;
+    this.correlationId = Objects.requireNonNull(correlationId, "correlationId");
   }
+
+  /** Compatibility constructor omitting fields with a Rust default. */
+  public TerminalInputResult(String sessionId, long serverSequence, long frameSequence) { this(sessionId, serverSequence, frameSequence, ""); }
+
 
   public String sessionId() { return sessionId; }
   public long serverSequence() { return serverSequence; }
   public long frameSequence() { return frameSequence; }
+  public String correlationId() { return correlationId; }
 
-  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0xf7f46455949e1bc6L), List.of(), new Schema.RecordKind("TerminalInputResult", List.of(new Schema.Field("session_id", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true), new Schema.Field("server_sequence", Schema.Ref.concrete(SchemaId.fromLong(0xc6eb8c46f1e17fbaL)), true), new Schema.Field("frame_sequence", Schema.Ref.concrete(SchemaId.fromLong(0xc6eb8c46f1e17fbaL)), true))));
+  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0xfd53e47c78cd424bL), List.of(), new Schema.RecordKind("TerminalInputResult", List.of(new Schema.Field("session_id", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true), new Schema.Field("server_sequence", Schema.Ref.concrete(SchemaId.fromLong(0xc6eb8c46f1e17fbaL)), true), new Schema.Field("frame_sequence", Schema.Ref.concrete(SchemaId.fromLong(0xc6eb8c46f1e17fbaL)), true), new Schema.Field("correlation_id", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true))));
   public static final PhonAdapter<TerminalInputResult> ADAPTER = new PhonAdapter<>() {
     @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA); }
     @Override public void encode(PhonEncoder encoder, TerminalInputResult value) throws PhonException {
       encoder.writeString(value.sessionId());
       encoder.writeI64(value.serverSequence());
       encoder.writeI64(value.frameSequence());
+      encoder.writeString(value.correlationId());
     }
-    @Override public TerminalInputResult decode(PhonDecoder decoder) throws PhonException { return new TerminalInputResult(decoder.readString(), decoder.readI64(), decoder.readI64()); }
+    @Override public TerminalInputResult decode(PhonDecoder decoder) throws PhonException { return new TerminalInputResult(decoder.readString(), decoder.readI64(), decoder.readI64(), decoder.readString()); }
   };
 
   @Override public boolean equals(Object other) {
     if (!(other instanceof TerminalInputResult that)) return false;
-    return Objects.deepEquals(sessionId, that.sessionId) && Objects.deepEquals(serverSequence, that.serverSequence) && Objects.deepEquals(frameSequence, that.frameSequence);
+    return Objects.deepEquals(sessionId, that.sessionId) && Objects.deepEquals(serverSequence, that.serverSequence) && Objects.deepEquals(frameSequence, that.frameSequence) && Objects.deepEquals(correlationId, that.correlationId);
   }
-  @Override public int hashCode() { return Objects.hash(sessionId, serverSequence, frameSequence); }
-  @Override public String toString() { return "TerminalInputResult" + java.util.List.of(sessionId, serverSequence, frameSequence); }
+  @Override public int hashCode() { return Objects.hash(sessionId, serverSequence, frameSequence, correlationId); }
+  @Override public String toString() { return "TerminalInputResult" + java.util.List.of(sessionId, serverSequence, frameSequence, correlationId); }
 }

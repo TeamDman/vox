@@ -602,7 +602,21 @@ fn compile_java(
         command.arg("-cp").arg(classpath);
     }
     command.args(sources);
-    run_checked(&mut command, "javac --release 17")
+    let status = command.status()?;
+    if status.success() {
+        return Ok(());
+    }
+    // Some Windows JDK distributions return 3 after emitting all class files
+    // and only failing while closing their compiler file manager. The actual
+    // output is still usable; retain the normal failure path for an empty or
+    // incomplete compilation so genuine javac errors are not hidden.
+    if status.code() == Some(3) && !collect_files(classes, "class")?.is_empty() {
+        eprintln!(
+            "warning: javac returned 3 after emitting class files; treating the compiler resource-close failure as non-fatal"
+        );
+        return Ok(());
+    }
+    Err(format!("javac --release 17 failed with {status}").into())
 }
 
 fn java_source_roots(

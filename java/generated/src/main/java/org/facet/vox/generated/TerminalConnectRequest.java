@@ -10,40 +10,52 @@ public final class TerminalConnectRequest {
   private final String endpoint;
   private final int requestedWidth;
   private final int requestedHeight;
+  private final TerminalSurfaceMetrics surface;
   private final TerminalCapabilities capabilities;
   private final long clientSequence;
+  private final String correlationId;
 
-  public TerminalConnectRequest(String endpoint, int requestedWidth, int requestedHeight, TerminalCapabilities capabilities, long clientSequence) {
+  public TerminalConnectRequest(String endpoint, int requestedWidth, int requestedHeight, TerminalSurfaceMetrics surface, TerminalCapabilities capabilities, long clientSequence, String correlationId) {
     this.endpoint = Objects.requireNonNull(endpoint, "endpoint");
     this.requestedWidth = requestedWidth;
     this.requestedHeight = requestedHeight;
+    this.surface = Objects.requireNonNull(surface, "surface");
     this.capabilities = Objects.requireNonNull(capabilities, "capabilities");
     this.clientSequence = clientSequence;
+    this.correlationId = Objects.requireNonNull(correlationId, "correlationId");
   }
+
+  /** Compatibility constructor omitting fields with a Rust default. */
+  public TerminalConnectRequest(String endpoint, int requestedWidth, int requestedHeight, TerminalCapabilities capabilities, long clientSequence) { this(endpoint, requestedWidth, requestedHeight, new TerminalSurfaceMetrics(0, 0, 0, 0, 0, 0, 0), capabilities, clientSequence, ""); }
+
 
   public String endpoint() { return endpoint; }
   public int requestedWidth() { return requestedWidth; }
   public int requestedHeight() { return requestedHeight; }
+  public TerminalSurfaceMetrics surface() { return surface; }
   public TerminalCapabilities capabilities() { return capabilities; }
   public long clientSequence() { return clientSequence; }
+  public String correlationId() { return correlationId; }
 
-  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x32f6957130573627L), List.of(), new Schema.RecordKind("TerminalConnectRequest", List.of(new Schema.Field("endpoint", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true), new Schema.Field("requested_width", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("requested_height", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("capabilities", Schema.Ref.concrete(SchemaId.fromLong(0x19d5c76a5d82ca17L)), true), new Schema.Field("client_sequence", Schema.Ref.concrete(SchemaId.fromLong(0xc6eb8c46f1e17fbaL)), true))));
+  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x18b25d2572b3420eL), List.of(), new Schema.RecordKind("TerminalConnectRequest", List.of(new Schema.Field("endpoint", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true), new Schema.Field("requested_width", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("requested_height", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("surface", Schema.Ref.concrete(SchemaId.fromLong(0xadcba54aa908fdc7L)), true), new Schema.Field("capabilities", Schema.Ref.concrete(SchemaId.fromLong(0x31ad4cd4eb8fd26cL)), true), new Schema.Field("client_sequence", Schema.Ref.concrete(SchemaId.fromLong(0xc6eb8c46f1e17fbaL)), true), new Schema.Field("correlation_id", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true))));
   public static final PhonAdapter<TerminalConnectRequest> ADAPTER = new PhonAdapter<>() {
-    @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA, TerminalCapabilities.SCHEMA); }
+    @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA, TerminalSurfaceMetrics.SCHEMA, TerminalCapabilities.SCHEMA); }
     @Override public void encode(PhonEncoder encoder, TerminalConnectRequest value) throws PhonException {
       encoder.writeString(value.endpoint());
       encoder.writeU16(value.requestedWidth());
       encoder.writeU16(value.requestedHeight());
+      encoder.writeAdapted(TerminalSurfaceMetrics.ADAPTER, value.surface());
       encoder.writeAdapted(TerminalCapabilities.ADAPTER, value.capabilities());
       encoder.writeI64(value.clientSequence());
+      encoder.writeString(value.correlationId());
     }
-    @Override public TerminalConnectRequest decode(PhonDecoder decoder) throws PhonException { return new TerminalConnectRequest(decoder.readString(), decoder.readU16(), decoder.readU16(), decoder.readAdapted(TerminalCapabilities.ADAPTER), decoder.readI64()); }
+    @Override public TerminalConnectRequest decode(PhonDecoder decoder) throws PhonException { return new TerminalConnectRequest(decoder.readString(), decoder.readU16(), decoder.readU16(), decoder.readAdapted(TerminalSurfaceMetrics.ADAPTER), decoder.readAdapted(TerminalCapabilities.ADAPTER), decoder.readI64(), decoder.readString()); }
   };
 
   @Override public boolean equals(Object other) {
     if (!(other instanceof TerminalConnectRequest that)) return false;
-    return Objects.deepEquals(endpoint, that.endpoint) && Objects.deepEquals(requestedWidth, that.requestedWidth) && Objects.deepEquals(requestedHeight, that.requestedHeight) && Objects.deepEquals(capabilities, that.capabilities) && Objects.deepEquals(clientSequence, that.clientSequence);
+    return Objects.deepEquals(endpoint, that.endpoint) && Objects.deepEquals(requestedWidth, that.requestedWidth) && Objects.deepEquals(requestedHeight, that.requestedHeight) && Objects.deepEquals(surface, that.surface) && Objects.deepEquals(capabilities, that.capabilities) && Objects.deepEquals(clientSequence, that.clientSequence) && Objects.deepEquals(correlationId, that.correlationId);
   }
-  @Override public int hashCode() { return Objects.hash(endpoint, requestedWidth, requestedHeight, capabilities, clientSequence); }
-  @Override public String toString() { return "TerminalConnectRequest" + java.util.List.of(endpoint, requestedWidth, requestedHeight, capabilities, clientSequence); }
+  @Override public int hashCode() { return Objects.hash(endpoint, requestedWidth, requestedHeight, surface, capabilities, clientSequence, correlationId); }
+  @Override public String toString() { return "TerminalConnectRequest" + java.util.List.of(endpoint, requestedWidth, requestedHeight, surface, capabilities, clientSequence, correlationId); }
 }

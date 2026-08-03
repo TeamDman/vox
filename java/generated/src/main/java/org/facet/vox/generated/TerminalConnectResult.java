@@ -9,45 +9,49 @@ import org.facet.phon.*;
 public final class TerminalConnectResult {
   private final String sessionId;
   private final TerminalCapabilities capabilities;
-  private final int width;
-  private final int height;
+  private final TerminalSurfaceMetrics surface;
   private final long serverSequence;
   private final TerminalState state;
+  private final String correlationId;
 
-  public TerminalConnectResult(String sessionId, TerminalCapabilities capabilities, int width, int height, long serverSequence, TerminalState state) {
+  public TerminalConnectResult(String sessionId, TerminalCapabilities capabilities, TerminalSurfaceMetrics surface, long serverSequence, TerminalState state, String correlationId) {
     this.sessionId = Objects.requireNonNull(sessionId, "sessionId");
     this.capabilities = Objects.requireNonNull(capabilities, "capabilities");
-    this.width = width;
-    this.height = height;
+    this.surface = Objects.requireNonNull(surface, "surface");
     this.serverSequence = serverSequence;
     this.state = Objects.requireNonNull(state, "state");
+    this.correlationId = Objects.requireNonNull(correlationId, "correlationId");
   }
+
+  /** Compatibility constructor omitting fields with a Rust default. */
+  public TerminalConnectResult(String sessionId, TerminalCapabilities capabilities, long serverSequence, TerminalState state) { this(sessionId, capabilities, new TerminalSurfaceMetrics(0, 0, 0, 0, 0, 0, 0), serverSequence, state, ""); }
+
 
   public String sessionId() { return sessionId; }
   public TerminalCapabilities capabilities() { return capabilities; }
-  public int width() { return width; }
-  public int height() { return height; }
+  public TerminalSurfaceMetrics surface() { return surface; }
   public long serverSequence() { return serverSequence; }
   public TerminalState state() { return state; }
+  public String correlationId() { return correlationId; }
 
-  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x3c073f94df8ffe0eL), List.of(), new Schema.RecordKind("TerminalConnectResult", List.of(new Schema.Field("session_id", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true), new Schema.Field("capabilities", Schema.Ref.concrete(SchemaId.fromLong(0x19d5c76a5d82ca17L)), true), new Schema.Field("width", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("height", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("server_sequence", Schema.Ref.concrete(SchemaId.fromLong(0xc6eb8c46f1e17fbaL)), true), new Schema.Field("state", Schema.Ref.concrete(SchemaId.fromLong(0x2f10255352459c16L)), true))));
+  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x8b3c7004f9811b6eL), List.of(), new Schema.RecordKind("TerminalConnectResult", List.of(new Schema.Field("session_id", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true), new Schema.Field("capabilities", Schema.Ref.concrete(SchemaId.fromLong(0x31ad4cd4eb8fd26cL)), true), new Schema.Field("surface", Schema.Ref.concrete(SchemaId.fromLong(0xadcba54aa908fdc7L)), true), new Schema.Field("server_sequence", Schema.Ref.concrete(SchemaId.fromLong(0xc6eb8c46f1e17fbaL)), true), new Schema.Field("state", Schema.Ref.concrete(SchemaId.fromLong(0x2f10255352459c16L)), true), new Schema.Field("correlation_id", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true))));
   public static final PhonAdapter<TerminalConnectResult> ADAPTER = new PhonAdapter<>() {
-    @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA, TerminalCapabilities.SCHEMA, TerminalState.SCHEMA); }
+    @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA, TerminalCapabilities.SCHEMA, TerminalSurfaceMetrics.SCHEMA, TerminalState.SCHEMA); }
     @Override public void encode(PhonEncoder encoder, TerminalConnectResult value) throws PhonException {
       encoder.writeString(value.sessionId());
       encoder.writeAdapted(TerminalCapabilities.ADAPTER, value.capabilities());
-      encoder.writeU16(value.width());
-      encoder.writeU16(value.height());
+      encoder.writeAdapted(TerminalSurfaceMetrics.ADAPTER, value.surface());
       encoder.writeI64(value.serverSequence());
       encoder.writeAdapted(TerminalState.ADAPTER, value.state());
+      encoder.writeString(value.correlationId());
     }
-    @Override public TerminalConnectResult decode(PhonDecoder decoder) throws PhonException { return new TerminalConnectResult(decoder.readString(), decoder.readAdapted(TerminalCapabilities.ADAPTER), decoder.readU16(), decoder.readU16(), decoder.readI64(), decoder.readAdapted(TerminalState.ADAPTER)); }
+    @Override public TerminalConnectResult decode(PhonDecoder decoder) throws PhonException { return new TerminalConnectResult(decoder.readString(), decoder.readAdapted(TerminalCapabilities.ADAPTER), decoder.readAdapted(TerminalSurfaceMetrics.ADAPTER), decoder.readI64(), decoder.readAdapted(TerminalState.ADAPTER), decoder.readString()); }
   };
 
   @Override public boolean equals(Object other) {
     if (!(other instanceof TerminalConnectResult that)) return false;
-    return Objects.deepEquals(sessionId, that.sessionId) && Objects.deepEquals(capabilities, that.capabilities) && Objects.deepEquals(width, that.width) && Objects.deepEquals(height, that.height) && Objects.deepEquals(serverSequence, that.serverSequence) && Objects.deepEquals(state, that.state);
+    return Objects.deepEquals(sessionId, that.sessionId) && Objects.deepEquals(capabilities, that.capabilities) && Objects.deepEquals(surface, that.surface) && Objects.deepEquals(serverSequence, that.serverSequence) && Objects.deepEquals(state, that.state) && Objects.deepEquals(correlationId, that.correlationId);
   }
-  @Override public int hashCode() { return Objects.hash(sessionId, capabilities, width, height, serverSequence, state); }
-  @Override public String toString() { return "TerminalConnectResult" + java.util.List.of(sessionId, capabilities, width, height, serverSequence, state); }
+  @Override public int hashCode() { return Objects.hash(sessionId, capabilities, surface, serverSequence, state, correlationId); }
+  @Override public String toString() { return "TerminalConnectResult" + java.util.List.of(sessionId, capabilities, surface, serverSequence, state, correlationId); }
 }

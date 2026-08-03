@@ -12,7 +12,7 @@ public final class TerminalCancelArgs {
     this.request = Objects.requireNonNull(request, "request");
   }
   public TerminalCancelRequest request() { return request; }
-  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x9b0a2f5c6110a738L), List.of(), new Schema.TupleKind(List.of(Schema.Ref.concrete(SchemaId.fromLong(0xc2b39223a320c974L)))));
+  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x8f80997c7e8088a8L), List.of(), new Schema.TupleKind(List.of(Schema.Ref.concrete(SchemaId.fromLong(0x6718f97ff242c8e0L)))));
   public static final PhonAdapter<TerminalCancelArgs> ADAPTER = new PhonAdapter<>() {
     @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA, TerminalCancelRequest.SCHEMA); }
     @Override public void encode(PhonEncoder encoder, TerminalCancelArgs value) throws PhonException {

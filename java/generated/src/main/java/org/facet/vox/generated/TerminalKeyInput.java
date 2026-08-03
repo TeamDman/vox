@@ -13,15 +13,21 @@ public final class TerminalKeyInput {
   private final boolean pressed;
   private final boolean repeat;
   private final long clientSequence;
+  private final String correlationId;
 
-  public TerminalKeyInput(String sessionId, long keyCode, long modifiers, boolean pressed, boolean repeat, long clientSequence) {
+  public TerminalKeyInput(String sessionId, long keyCode, long modifiers, boolean pressed, boolean repeat, long clientSequence, String correlationId) {
     this.sessionId = Objects.requireNonNull(sessionId, "sessionId");
     this.keyCode = keyCode;
     this.modifiers = modifiers;
     this.pressed = pressed;
     this.repeat = repeat;
     this.clientSequence = clientSequence;
+    this.correlationId = Objects.requireNonNull(correlationId, "correlationId");
   }
+
+  /** Compatibility constructor omitting fields with a Rust default. */
+  public TerminalKeyInput(String sessionId, long keyCode, long modifiers, boolean pressed, boolean repeat, long clientSequence) { this(sessionId, keyCode, modifiers, pressed, repeat, clientSequence, ""); }
+
 
   public String sessionId() { return sessionId; }
   public long keyCode() { return keyCode; }
@@ -29,8 +35,9 @@ public final class TerminalKeyInput {
   public boolean pressed() { return pressed; }
   public boolean repeat() { return repeat; }
   public long clientSequence() { return clientSequence; }
+  public String correlationId() { return correlationId; }
 
-  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x0152d0455809e043L), List.of(), new Schema.RecordKind("TerminalKeyInput", List.of(new Schema.Field("session_id", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true), new Schema.Field("key_code", Schema.Ref.concrete(SchemaId.fromLong(0x281c5be4f2ee63b4L)), true), new Schema.Field("modifiers", Schema.Ref.concrete(SchemaId.fromLong(0x281c5be4f2ee63b4L)), true), new Schema.Field("pressed", Schema.Ref.concrete(SchemaId.fromLong(0x178367a87f66fb46L)), true), new Schema.Field("repeat", Schema.Ref.concrete(SchemaId.fromLong(0x178367a87f66fb46L)), true), new Schema.Field("client_sequence", Schema.Ref.concrete(SchemaId.fromLong(0xc6eb8c46f1e17fbaL)), true))));
+  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x18494820e98c1f5eL), List.of(), new Schema.RecordKind("TerminalKeyInput", List.of(new Schema.Field("session_id", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true), new Schema.Field("key_code", Schema.Ref.concrete(SchemaId.fromLong(0x281c5be4f2ee63b4L)), true), new Schema.Field("modifiers", Schema.Ref.concrete(SchemaId.fromLong(0x281c5be4f2ee63b4L)), true), new Schema.Field("pressed", Schema.Ref.concrete(SchemaId.fromLong(0x178367a87f66fb46L)), true), new Schema.Field("repeat", Schema.Ref.concrete(SchemaId.fromLong(0x178367a87f66fb46L)), true), new Schema.Field("client_sequence", Schema.Ref.concrete(SchemaId.fromLong(0xc6eb8c46f1e17fbaL)), true), new Schema.Field("correlation_id", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true))));
   public static final PhonAdapter<TerminalKeyInput> ADAPTER = new PhonAdapter<>() {
     @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA); }
     @Override public void encode(PhonEncoder encoder, TerminalKeyInput value) throws PhonException {
@@ -40,14 +47,15 @@ public final class TerminalKeyInput {
       encoder.writeBool(value.pressed());
       encoder.writeBool(value.repeat());
       encoder.writeI64(value.clientSequence());
+      encoder.writeString(value.correlationId());
     }
-    @Override public TerminalKeyInput decode(PhonDecoder decoder) throws PhonException { return new TerminalKeyInput(decoder.readString(), decoder.readU32(), decoder.readU32(), decoder.readBool(), decoder.readBool(), decoder.readI64()); }
+    @Override public TerminalKeyInput decode(PhonDecoder decoder) throws PhonException { return new TerminalKeyInput(decoder.readString(), decoder.readU32(), decoder.readU32(), decoder.readBool(), decoder.readBool(), decoder.readI64(), decoder.readString()); }
   };
 
   @Override public boolean equals(Object other) {
     if (!(other instanceof TerminalKeyInput that)) return false;
-    return Objects.deepEquals(sessionId, that.sessionId) && Objects.deepEquals(keyCode, that.keyCode) && Objects.deepEquals(modifiers, that.modifiers) && Objects.deepEquals(pressed, that.pressed) && Objects.deepEquals(repeat, that.repeat) && Objects.deepEquals(clientSequence, that.clientSequence);
+    return Objects.deepEquals(sessionId, that.sessionId) && Objects.deepEquals(keyCode, that.keyCode) && Objects.deepEquals(modifiers, that.modifiers) && Objects.deepEquals(pressed, that.pressed) && Objects.deepEquals(repeat, that.repeat) && Objects.deepEquals(clientSequence, that.clientSequence) && Objects.deepEquals(correlationId, that.correlationId);
   }
-  @Override public int hashCode() { return Objects.hash(sessionId, keyCode, modifiers, pressed, repeat, clientSequence); }
-  @Override public String toString() { return "TerminalKeyInput" + java.util.List.of(sessionId, keyCode, modifiers, pressed, repeat, clientSequence); }
+  @Override public int hashCode() { return Objects.hash(sessionId, keyCode, modifiers, pressed, repeat, clientSequence, correlationId); }
+  @Override public String toString() { return "TerminalKeyInput" + java.util.List.of(sessionId, keyCode, modifiers, pressed, repeat, clientSequence, correlationId); }
 }

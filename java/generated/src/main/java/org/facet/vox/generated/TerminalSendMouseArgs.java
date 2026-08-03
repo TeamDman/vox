@@ -12,7 +12,7 @@ public final class TerminalSendMouseArgs {
     this.request = Objects.requireNonNull(request, "request");
   }
   public TerminalMouseInput request() { return request; }
-  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0xbf350b46d3f24accL), List.of(), new Schema.TupleKind(List.of(Schema.Ref.concrete(SchemaId.fromLong(0x9fe84869739d5ac4L)))));
+  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x91cc713b7dc93892L), List.of(), new Schema.TupleKind(List.of(Schema.Ref.concrete(SchemaId.fromLong(0x2ed015bf57e56595L)))));
   public static final PhonAdapter<TerminalSendMouseArgs> ADAPTER = new PhonAdapter<>() {
     @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA, TerminalMouseInput.SCHEMA); }
     @Override public void encode(PhonEncoder encoder, TerminalSendMouseArgs value) throws PhonException {

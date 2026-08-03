@@ -17,8 +17,9 @@ public final class TerminalMouseInput {
   private final int wheelX;
   private final int wheelY;
   private final long clientSequence;
+  private final String correlationId;
 
-  public TerminalMouseInput(String sessionId, int x, int y, int buttons, int button, boolean pressed, boolean motion, int wheelX, int wheelY, long clientSequence) {
+  public TerminalMouseInput(String sessionId, int x, int y, int buttons, int button, boolean pressed, boolean motion, int wheelX, int wheelY, long clientSequence, String correlationId) {
     this.sessionId = Objects.requireNonNull(sessionId, "sessionId");
     this.x = x;
     this.y = y;
@@ -29,7 +30,12 @@ public final class TerminalMouseInput {
     this.wheelX = wheelX;
     this.wheelY = wheelY;
     this.clientSequence = clientSequence;
+    this.correlationId = Objects.requireNonNull(correlationId, "correlationId");
   }
+
+  /** Compatibility constructor omitting fields with a Rust default. */
+  public TerminalMouseInput(String sessionId, int x, int y, int buttons, int button, boolean pressed, boolean motion, int wheelX, int wheelY, long clientSequence) { this(sessionId, x, y, buttons, button, pressed, motion, wheelX, wheelY, clientSequence, ""); }
+
 
   public String sessionId() { return sessionId; }
   public int x() { return x; }
@@ -41,8 +47,9 @@ public final class TerminalMouseInput {
   public int wheelX() { return wheelX; }
   public int wheelY() { return wheelY; }
   public long clientSequence() { return clientSequence; }
+  public String correlationId() { return correlationId; }
 
-  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x9fe84869739d5ac4L), List.of(), new Schema.RecordKind("TerminalMouseInput", List.of(new Schema.Field("session_id", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true), new Schema.Field("x", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("y", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("buttons", Schema.Ref.concrete(SchemaId.fromLong(0x2c8d54f2314d0f20L)), true), new Schema.Field("button", Schema.Ref.concrete(SchemaId.fromLong(0x2c8d54f2314d0f20L)), true), new Schema.Field("pressed", Schema.Ref.concrete(SchemaId.fromLong(0x178367a87f66fb46L)), true), new Schema.Field("motion", Schema.Ref.concrete(SchemaId.fromLong(0x178367a87f66fb46L)), true), new Schema.Field("wheel_x", Schema.Ref.concrete(SchemaId.fromLong(0x361f4536eee9f991L)), true), new Schema.Field("wheel_y", Schema.Ref.concrete(SchemaId.fromLong(0x361f4536eee9f991L)), true), new Schema.Field("client_sequence", Schema.Ref.concrete(SchemaId.fromLong(0xc6eb8c46f1e17fbaL)), true))));
+  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x2ed015bf57e56595L), List.of(), new Schema.RecordKind("TerminalMouseInput", List.of(new Schema.Field("session_id", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true), new Schema.Field("x", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("y", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("buttons", Schema.Ref.concrete(SchemaId.fromLong(0x2c8d54f2314d0f20L)), true), new Schema.Field("button", Schema.Ref.concrete(SchemaId.fromLong(0x2c8d54f2314d0f20L)), true), new Schema.Field("pressed", Schema.Ref.concrete(SchemaId.fromLong(0x178367a87f66fb46L)), true), new Schema.Field("motion", Schema.Ref.concrete(SchemaId.fromLong(0x178367a87f66fb46L)), true), new Schema.Field("wheel_x", Schema.Ref.concrete(SchemaId.fromLong(0x361f4536eee9f991L)), true), new Schema.Field("wheel_y", Schema.Ref.concrete(SchemaId.fromLong(0x361f4536eee9f991L)), true), new Schema.Field("client_sequence", Schema.Ref.concrete(SchemaId.fromLong(0xc6eb8c46f1e17fbaL)), true), new Schema.Field("correlation_id", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true))));
   public static final PhonAdapter<TerminalMouseInput> ADAPTER = new PhonAdapter<>() {
     @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA); }
     @Override public void encode(PhonEncoder encoder, TerminalMouseInput value) throws PhonException {
@@ -56,14 +63,15 @@ public final class TerminalMouseInput {
       encoder.writeI32(value.wheelX());
       encoder.writeI32(value.wheelY());
       encoder.writeI64(value.clientSequence());
+      encoder.writeString(value.correlationId());
     }
-    @Override public TerminalMouseInput decode(PhonDecoder decoder) throws PhonException { return new TerminalMouseInput(decoder.readString(), decoder.readU16(), decoder.readU16(), decoder.readU8(), decoder.readU8(), decoder.readBool(), decoder.readBool(), decoder.readI32(), decoder.readI32(), decoder.readI64()); }
+    @Override public TerminalMouseInput decode(PhonDecoder decoder) throws PhonException { return new TerminalMouseInput(decoder.readString(), decoder.readU16(), decoder.readU16(), decoder.readU8(), decoder.readU8(), decoder.readBool(), decoder.readBool(), decoder.readI32(), decoder.readI32(), decoder.readI64(), decoder.readString()); }
   };
 
   @Override public boolean equals(Object other) {
     if (!(other instanceof TerminalMouseInput that)) return false;
-    return Objects.deepEquals(sessionId, that.sessionId) && Objects.deepEquals(x, that.x) && Objects.deepEquals(y, that.y) && Objects.deepEquals(buttons, that.buttons) && Objects.deepEquals(button, that.button) && Objects.deepEquals(pressed, that.pressed) && Objects.deepEquals(motion, that.motion) && Objects.deepEquals(wheelX, that.wheelX) && Objects.deepEquals(wheelY, that.wheelY) && Objects.deepEquals(clientSequence, that.clientSequence);
+    return Objects.deepEquals(sessionId, that.sessionId) && Objects.deepEquals(x, that.x) && Objects.deepEquals(y, that.y) && Objects.deepEquals(buttons, that.buttons) && Objects.deepEquals(button, that.button) && Objects.deepEquals(pressed, that.pressed) && Objects.deepEquals(motion, that.motion) && Objects.deepEquals(wheelX, that.wheelX) && Objects.deepEquals(wheelY, that.wheelY) && Objects.deepEquals(clientSequence, that.clientSequence) && Objects.deepEquals(correlationId, that.correlationId);
   }
-  @Override public int hashCode() { return Objects.hash(sessionId, x, y, buttons, button, pressed, motion, wheelX, wheelY, clientSequence); }
-  @Override public String toString() { return "TerminalMouseInput" + java.util.List.of(sessionId, x, y, buttons, button, pressed, motion, wheelX, wheelY, clientSequence); }
+  @Override public int hashCode() { return Objects.hash(sessionId, x, y, buttons, button, pressed, motion, wheelX, wheelY, clientSequence, correlationId); }
+  @Override public String toString() { return "TerminalMouseInput" + java.util.List.of(sessionId, x, y, buttons, button, pressed, motion, wheelX, wheelY, clientSequence, correlationId); }
 }

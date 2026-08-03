@@ -18,8 +18,10 @@ public final class TerminalCapabilities {
   private final int maxWidth;
   private final int maxHeight;
   private final long maxFrameBytes;
+  private final String backendId;
+  private final String transportId;
 
-  public TerminalCapabilities(boolean textInput, boolean keyInput, boolean mouseInput, boolean structuredCells, boolean rasterFrames, boolean selection, boolean scrollback, boolean dirtyFrames, int maxWidth, int maxHeight, long maxFrameBytes) {
+  public TerminalCapabilities(boolean textInput, boolean keyInput, boolean mouseInput, boolean structuredCells, boolean rasterFrames, boolean selection, boolean scrollback, boolean dirtyFrames, int maxWidth, int maxHeight, long maxFrameBytes, String backendId, String transportId) {
     this.textInput = textInput;
     this.keyInput = keyInput;
     this.mouseInput = mouseInput;
@@ -31,7 +33,13 @@ public final class TerminalCapabilities {
     this.maxWidth = maxWidth;
     this.maxHeight = maxHeight;
     this.maxFrameBytes = maxFrameBytes;
+    this.backendId = Objects.requireNonNull(backendId, "backendId");
+    this.transportId = Objects.requireNonNull(transportId, "transportId");
   }
+
+  /** Compatibility constructor omitting fields with a Rust default. */
+  public TerminalCapabilities(boolean textInput, boolean keyInput, boolean mouseInput, boolean structuredCells, boolean rasterFrames, boolean selection, boolean scrollback, boolean dirtyFrames, int maxWidth, int maxHeight, long maxFrameBytes) { this(textInput, keyInput, mouseInput, structuredCells, rasterFrames, selection, scrollback, dirtyFrames, maxWidth, maxHeight, maxFrameBytes, "", ""); }
+
 
   public boolean textInput() { return textInput; }
   public boolean keyInput() { return keyInput; }
@@ -44,8 +52,10 @@ public final class TerminalCapabilities {
   public int maxWidth() { return maxWidth; }
   public int maxHeight() { return maxHeight; }
   public long maxFrameBytes() { return maxFrameBytes; }
+  public String backendId() { return backendId; }
+  public String transportId() { return transportId; }
 
-  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x19d5c76a5d82ca17L), List.of(), new Schema.RecordKind("TerminalCapabilities", List.of(new Schema.Field("text_input", Schema.Ref.concrete(SchemaId.fromLong(0x178367a87f66fb46L)), true), new Schema.Field("key_input", Schema.Ref.concrete(SchemaId.fromLong(0x178367a87f66fb46L)), true), new Schema.Field("mouse_input", Schema.Ref.concrete(SchemaId.fromLong(0x178367a87f66fb46L)), true), new Schema.Field("structured_cells", Schema.Ref.concrete(SchemaId.fromLong(0x178367a87f66fb46L)), true), new Schema.Field("raster_frames", Schema.Ref.concrete(SchemaId.fromLong(0x178367a87f66fb46L)), true), new Schema.Field("selection", Schema.Ref.concrete(SchemaId.fromLong(0x178367a87f66fb46L)), true), new Schema.Field("scrollback", Schema.Ref.concrete(SchemaId.fromLong(0x178367a87f66fb46L)), true), new Schema.Field("dirty_frames", Schema.Ref.concrete(SchemaId.fromLong(0x178367a87f66fb46L)), true), new Schema.Field("max_width", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("max_height", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("max_frame_bytes", Schema.Ref.concrete(SchemaId.fromLong(0x281c5be4f2ee63b4L)), true))));
+  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x31ad4cd4eb8fd26cL), List.of(), new Schema.RecordKind("TerminalCapabilities", List.of(new Schema.Field("text_input", Schema.Ref.concrete(SchemaId.fromLong(0x178367a87f66fb46L)), true), new Schema.Field("key_input", Schema.Ref.concrete(SchemaId.fromLong(0x178367a87f66fb46L)), true), new Schema.Field("mouse_input", Schema.Ref.concrete(SchemaId.fromLong(0x178367a87f66fb46L)), true), new Schema.Field("structured_cells", Schema.Ref.concrete(SchemaId.fromLong(0x178367a87f66fb46L)), true), new Schema.Field("raster_frames", Schema.Ref.concrete(SchemaId.fromLong(0x178367a87f66fb46L)), true), new Schema.Field("selection", Schema.Ref.concrete(SchemaId.fromLong(0x178367a87f66fb46L)), true), new Schema.Field("scrollback", Schema.Ref.concrete(SchemaId.fromLong(0x178367a87f66fb46L)), true), new Schema.Field("dirty_frames", Schema.Ref.concrete(SchemaId.fromLong(0x178367a87f66fb46L)), true), new Schema.Field("max_width", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("max_height", Schema.Ref.concrete(SchemaId.fromLong(0x1be6c8d0625ea876L)), true), new Schema.Field("max_frame_bytes", Schema.Ref.concrete(SchemaId.fromLong(0x281c5be4f2ee63b4L)), true), new Schema.Field("backend_id", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true), new Schema.Field("transport_id", Schema.Ref.concrete(SchemaId.fromLong(0x6d7dce914ee150e8L)), true))));
   public static final PhonAdapter<TerminalCapabilities> ADAPTER = new PhonAdapter<>() {
     @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA); }
     @Override public void encode(PhonEncoder encoder, TerminalCapabilities value) throws PhonException {
@@ -60,14 +70,16 @@ public final class TerminalCapabilities {
       encoder.writeU16(value.maxWidth());
       encoder.writeU16(value.maxHeight());
       encoder.writeU32(value.maxFrameBytes());
+      encoder.writeString(value.backendId());
+      encoder.writeString(value.transportId());
     }
-    @Override public TerminalCapabilities decode(PhonDecoder decoder) throws PhonException { return new TerminalCapabilities(decoder.readBool(), decoder.readBool(), decoder.readBool(), decoder.readBool(), decoder.readBool(), decoder.readBool(), decoder.readBool(), decoder.readBool(), decoder.readU16(), decoder.readU16(), decoder.readU32()); }
+    @Override public TerminalCapabilities decode(PhonDecoder decoder) throws PhonException { return new TerminalCapabilities(decoder.readBool(), decoder.readBool(), decoder.readBool(), decoder.readBool(), decoder.readBool(), decoder.readBool(), decoder.readBool(), decoder.readBool(), decoder.readU16(), decoder.readU16(), decoder.readU32(), decoder.readString(), decoder.readString()); }
   };
 
   @Override public boolean equals(Object other) {
     if (!(other instanceof TerminalCapabilities that)) return false;
-    return Objects.deepEquals(textInput, that.textInput) && Objects.deepEquals(keyInput, that.keyInput) && Objects.deepEquals(mouseInput, that.mouseInput) && Objects.deepEquals(structuredCells, that.structuredCells) && Objects.deepEquals(rasterFrames, that.rasterFrames) && Objects.deepEquals(selection, that.selection) && Objects.deepEquals(scrollback, that.scrollback) && Objects.deepEquals(dirtyFrames, that.dirtyFrames) && Objects.deepEquals(maxWidth, that.maxWidth) && Objects.deepEquals(maxHeight, that.maxHeight) && Objects.deepEquals(maxFrameBytes, that.maxFrameBytes);
+    return Objects.deepEquals(textInput, that.textInput) && Objects.deepEquals(keyInput, that.keyInput) && Objects.deepEquals(mouseInput, that.mouseInput) && Objects.deepEquals(structuredCells, that.structuredCells) && Objects.deepEquals(rasterFrames, that.rasterFrames) && Objects.deepEquals(selection, that.selection) && Objects.deepEquals(scrollback, that.scrollback) && Objects.deepEquals(dirtyFrames, that.dirtyFrames) && Objects.deepEquals(maxWidth, that.maxWidth) && Objects.deepEquals(maxHeight, that.maxHeight) && Objects.deepEquals(maxFrameBytes, that.maxFrameBytes) && Objects.deepEquals(backendId, that.backendId) && Objects.deepEquals(transportId, that.transportId);
   }
-  @Override public int hashCode() { return Objects.hash(textInput, keyInput, mouseInput, structuredCells, rasterFrames, selection, scrollback, dirtyFrames, maxWidth, maxHeight, maxFrameBytes); }
-  @Override public String toString() { return "TerminalCapabilities" + java.util.List.of(textInput, keyInput, mouseInput, structuredCells, rasterFrames, selection, scrollback, dirtyFrames, maxWidth, maxHeight, maxFrameBytes); }
+  @Override public int hashCode() { return Objects.hash(textInput, keyInput, mouseInput, structuredCells, rasterFrames, selection, scrollback, dirtyFrames, maxWidth, maxHeight, maxFrameBytes, backendId, transportId); }
+  @Override public String toString() { return "TerminalCapabilities" + java.util.List.of(textInput, keyInput, mouseInput, structuredCells, rasterFrames, selection, scrollback, dirtyFrames, maxWidth, maxHeight, maxFrameBytes, backendId, transportId); }
 }

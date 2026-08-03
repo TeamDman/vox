@@ -12,7 +12,7 @@ public final class TerminalConnectArgs {
     this.request = Objects.requireNonNull(request, "request");
   }
   public TerminalConnectRequest request() { return request; }
-  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0xe3f77519456d110aL), List.of(), new Schema.TupleKind(List.of(Schema.Ref.concrete(SchemaId.fromLong(0x32f6957130573627L)))));
+  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0xff0020cb660acddbL), List.of(), new Schema.TupleKind(List.of(Schema.Ref.concrete(SchemaId.fromLong(0x18b25d2572b3420eL)))));
   public static final PhonAdapter<TerminalConnectArgs> ADAPTER = new PhonAdapter<>() {
     @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA, TerminalConnectRequest.SCHEMA); }
     @Override public void encode(PhonEncoder encoder, TerminalConnectArgs value) throws PhonException {

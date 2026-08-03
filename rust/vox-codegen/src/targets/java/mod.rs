@@ -405,6 +405,38 @@ fn generate_named_type(package: &str, name: &str, shape: &'static Shape) -> Stri
                 }
             }
             out.push_str("  }\n\n");
+            let required_fields = fields
+                .iter()
+                .filter(|field| field.default.is_none())
+                .collect::<Vec<_>>();
+            if required_fields.len() != fields.len() {
+                let args = required_fields
+                    .iter()
+                    .map(|field| {
+                        format!(
+                            "{} {}",
+                            java_type(field.shape(), false),
+                            java_ident(field.name)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let values = fields
+                    .iter()
+                    .map(|field| {
+                        if field.default.is_some() {
+                            java_default_expression(field.shape())
+                        } else {
+                            java_ident(field.name).to_string()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let _ = writeln!(
+                    out,
+                    "  /** Compatibility constructor omitting fields with a Rust default. */\n  public {name}({args}) {{ this({values}); }}\n\n"
+                );
+            }
             for field in fields {
                 let field_name = java_ident(field.name);
                 let _ = writeln!(
@@ -1309,6 +1341,52 @@ fn java_type(shape: &'static Shape, boxed: bool) -> String {
 
 fn boxed_java_type(shape: &'static Shape) -> String {
     java_type(shape, true)
+}
+
+fn java_default_expression(shape: &'static Shape) -> String {
+    match classify_shape(shape) {
+        ShapeKind::Scalar(ScalarType::Bool) => "false".into(),
+        ShapeKind::Scalar(
+            ScalarType::U8
+            | ScalarType::U16
+            | ScalarType::U32
+            | ScalarType::I8
+            | ScalarType::I16
+            | ScalarType::I32
+            | ScalarType::I64
+            | ScalarType::U64
+            | ScalarType::ISize
+            | ScalarType::USize,
+        ) => "0".into(),
+        ShapeKind::Scalar(ScalarType::F32) => "0.0f".into(),
+        ShapeKind::Scalar(ScalarType::F64) => "0.0d".into(),
+        ShapeKind::Scalar(
+            ScalarType::Char | ScalarType::Str | ScalarType::String | ScalarType::CowStr,
+        ) => "\"\"".into(),
+        ShapeKind::Scalar(ScalarType::U128 | ScalarType::I128) => {
+            "java.math.BigInteger.ZERO".into()
+        }
+        ShapeKind::Option { .. } => "java.util.Optional.empty()".into(),
+        ShapeKind::List { .. } | ShapeKind::Slice { .. } | ShapeKind::Array { .. } => {
+            "java.util.List.of()".into()
+        }
+        ShapeKind::Set { .. } => "java.util.Set.of()".into(),
+        ShapeKind::Map { .. } => "java.util.Map.of()".into(),
+        ShapeKind::Struct(StructInfo {
+            name: Some(name),
+            fields,
+            ..
+        }) => {
+            let values = fields
+                .iter()
+                .map(|field| java_default_expression(field.shape()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("new {}({values})", java_type_name(name))
+        }
+        ShapeKind::Pointer { pointee } => java_default_expression(pointee),
+        _ => "null".into(),
+    }
 }
 
 fn scalar_java(scalar: ScalarType, boxed: bool) -> String {

@@ -171,6 +171,8 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
     private final Map<String, SchemaClosure> receivedBindings = new HashMap<>();
     private final Set<String> sentBindings = new HashSet<>();
     private final Map<String, ActiveChannel> activeChannels = new HashMap<>();
+    private final Set<Long> locallyClosedLanes = new HashSet<>();
+    private final Map<Long, Set<Long>> laneRetirementBarriers = new HashMap<>();
     private final CompletableFuture<Void> closed = new CompletableFuture<>();
     private volatile int peerMaxConcurrentRequests = 1;
     private volatile int peerInitialChannelCredit = 16;
@@ -455,10 +457,12 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
                     codec.laneOpen(
                             open.lane.service().name(),
                             open.lane.options().metadata())));
+            laneRetirementBarriers.put(open.lane.id(), Set.copyOf(locallyClosedLanes));
         } else if (command instanceof CallCommand call) {
             queuedBytes.addAndGet(-call.call.arguments.length);
             if (!call.call.tryCommit()) return;
-            String binding = bindingKey(call.call.method.id(), WireCodec.Direction.ARGS);
+            String binding = bindingKey(
+                    call.call.laneId, call.call.method.id(), WireCodec.Direction.ARGS);
             if (sentBindings.add(binding)) {
                 dlog("send Args SchemaMessage method="
                         + Long.toUnsignedString(call.call.method.id()));
@@ -494,6 +498,11 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
                             call.call.options.metadata())));
         } else if (command instanceof CloseLaneCommand close) {
             framing.writeFrame(codec.encodeMessage(close.laneId, codec.laneClose()));
+            if (!locallyClosedLanes.contains(close.laneId)
+                    && locallyClosedLanes.size() >= options.maxOpenLanes()) {
+                throw new VoxException("retired service lane bound exceeded");
+            }
+            locallyClosedLanes.add(close.laneId);
             retireOutboundLane(close.laneId);
         } else if (command instanceof CancelCommand cancel) {
             framing.writeFrame(codec.encodeMessage(
@@ -560,9 +569,13 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
                         WireCodec.required(body, "connection_settings"), null);
                 requireLane(laneId).markOpen(
                         peer.maxConcurrentRequests(), peer.initialChannelCredit());
+                confirmLaneRetirements(laneId);
             }
-            case "LaneReject" -> requireLane(laneId).terminate(
-                    new VoxException("peer rejected service lane"), LaneState.FAILED);
+            case "LaneReject" -> {
+                requireLane(laneId).terminate(
+                        new VoxException("peer rejected service lane"), LaneState.FAILED);
+                confirmLaneRetirements(laneId);
+            }
             case "SchemaMessage" -> {
                 long methodId = WireCodec.unsignedLong(
                         WireCodec.required(body, "method_id"));
@@ -575,7 +588,7 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
                             "unsupported binding direction " + directionVariant);
                 };
                 receivedBindings.put(
-                        bindingKey(methodId, direction),
+                        bindingKey(laneId, methodId, direction),
                         codec.parseBinding(WireCodec.byteList(
                                 WireCodec.required(body, "schemas"))));
             }
@@ -616,7 +629,7 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
         Value response = WireCodec.variantPayload(requestBody);
         byte[] encoded = WireCodec.required(response, "ret").asBytes();
         SchemaClosure writer = receivedBindings.get(
-                bindingKey(call.method.id(), WireCodec.Direction.RESPONSE));
+                bindingKey(laneId, call.method.id(), WireCodec.Direction.RESPONSE));
         if (writer == null) {
             call.fail(new VoxException("response arrived before its schema binding"));
             return;
@@ -703,11 +716,11 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
         Value inlineSchemas = WireCodec.required(body, "schemas");
         if (!inlineSchemas.asList().isEmpty()) {
             receivedBindings.put(
-                    bindingKey(methodId, WireCodec.Direction.ARGS),
+                    bindingKey(laneId, methodId, WireCodec.Direction.ARGS),
                     codec.parseBinding(WireCodec.byteList(inlineSchemas)));
         }
         SchemaClosure writer =
-                receivedBindings.get(bindingKey(methodId, WireCodec.Direction.ARGS));
+                receivedBindings.get(bindingKey(laneId, methodId, WireCodec.Direction.ARGS));
         if (writer == null) {
             throw new VoxException("call arrived before its argument schema binding");
         }
@@ -786,7 +799,8 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
         if (reply.failure != null) {
             response = encodeInfrastructureFailure(reply.method, reply.failure);
         }
-        String binding = bindingKey(reply.method.id(), WireCodec.Direction.RESPONSE);
+        String binding = bindingKey(
+                reply.laneId, reply.method.id(), WireCodec.Direction.RESPONSE);
         if (sentBindings.add(binding)) {
             byte[] schemas;
             try {
@@ -907,7 +921,12 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
         long channelId = WireCodec.unsignedLong(WireCodec.required(channel, "id"));
         Value body = WireCodec.required(channel, "body");
         String variant = WireCodec.variant(body);
-        ActiveChannel active = requireActiveChannel(laneId, channelId);
+        ActiveChannel active = activeChannels.get(channelKey(laneId, channelId));
+        if (active == null && locallyClosedLanes.contains(laneId)) return;
+        if (active == null) {
+            throw new VoxException("message for unknown channel "
+                    + Long.toUnsignedString(laneId) + ":" + Long.toUnsignedString(channelId));
+        }
         active.progress();
         switch (variant) {
             case "Item" -> {
@@ -915,7 +934,7 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
                     throw new VoxException("peer sent item on locally-sending channel");
                 }
                 SchemaClosure binding = receivedBindings.get(
-                        bindingKey(active.method.id(), WireCodec.Direction.ARGS));
+                        bindingKey(laneId, active.method.id(), WireCodec.Direction.ARGS));
                 if (binding == null) {
                     throw new VoxException("channel item arrived before argument schema binding");
                 }
@@ -971,7 +990,7 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
     private void ensureArgsSchema(
             MethodDescriptor method, long laneId, StreamFraming framing, WireCodec codec)
             throws IOException, VoxException {
-        String binding = bindingKey(method.id(), WireCodec.Direction.ARGS);
+        String binding = bindingKey(laneId, method.id(), WireCodec.Direction.ARGS);
         if (!sentBindings.add(binding)) return;
         try {
             framing.writeFrame(codec.encodeMessage(
@@ -1024,14 +1043,20 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
     }
 
     private void processLaneClose(long laneId) throws VoxException {
+        if (locallyClosedLanes.remove(laneId)) {
+            laneRetirementBarriers.remove(laneId);
+            return;
+        }
         InboundLane inbound = inboundLanes.remove(laneId);
         if (inbound != null) {
             cancelInboundLane(laneId);
+            clearLaneBindings(laneId);
             return;
         }
         requireLane(laneId).terminate(
                 new VoxException("peer closed service lane"), LaneState.CLOSED);
         terminateLaneChannels(laneId, new VoxException("peer closed service lane"));
+        clearLaneBindings(laneId);
     }
 
     private void cancelInboundLane(long laneId) {
@@ -1092,6 +1117,7 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
         synchronized (lanes) {
             lanes.removeIf(lane -> lane.id() == laneId);
         }
+        clearLaneBindings(laneId);
     }
 
     private boolean hasOutboundLane(long laneId) {
@@ -1197,8 +1223,22 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
         return candidate;
     }
 
-    private static String bindingKey(long methodId, WireCodec.Direction direction) {
-        return Long.toUnsignedString(methodId) + ":" + direction;
+    private void clearLaneBindings(long laneId) {
+        String prefix = Long.toUnsignedString(laneId) + ":";
+        sentBindings.removeIf(key -> key.startsWith(prefix));
+        receivedBindings.keySet().removeIf(key -> key.startsWith(prefix));
+    }
+
+    private void confirmLaneRetirements(long acceptedLaneId) {
+        Set<Long> confirmed = laneRetirementBarriers.remove(acceptedLaneId);
+        if (confirmed != null) locallyClosedLanes.removeAll(confirmed);
+    }
+
+    private static String bindingKey(
+            long laneId, long methodId, WireCodec.Direction direction) {
+        return Long.toUnsignedString(laneId)
+                + ":" + Long.toUnsignedString(methodId)
+                + ":" + direction;
     }
 
     private static String requestKey(long laneId, long requestId) {

@@ -9,8 +9,11 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.facet.phon.PhonAdapter;
 import org.facet.phon.PhonDecoder;
@@ -18,6 +21,15 @@ import org.facet.phon.PhonEncoder;
 import org.facet.phon.PhonException;
 import org.facet.phon.Schema;
 import org.facet.phon.SchemaClosure;
+import org.facet.vox.generated.DivideByZero;
+import org.facet.vox.generated.DivideRequest;
+import org.facet.vox.generated.DivideResponse;
+import org.facet.vox.generated.JavaFixtureClient;
+import org.facet.vox.generated.JavaFixtureDispatcher;
+import org.facet.vox.generated.JavaFixtureHandler;
+import org.facet.vox.generated.JavaFixtureServiceDescriptor;
+import org.facet.vox.generated.NestedRequest;
+import org.facet.vox.generated.NestedResponse;
 
 public final class VoxRuntimeTest {
     private static final PhonAdapter<String> ADAPTER = new PhonAdapter<>() {
@@ -41,7 +53,164 @@ public final class VoxRuntimeTest {
         controlQueueFailureTerminatesLane();
         inboundCallIsExactlyOnce();
         connectionDriverOwnershipAndHandshake();
+        generatedChannelRoundTripHonorsCreditAndCancellation();
         System.out.println("VoxRuntimeTest: PASS");
+    }
+
+    private static void generatedChannelRoundTripHonorsCreditAndCancellation()
+            throws Exception {
+        AtomicInteger sent = new AtomicInteger();
+        AtomicBoolean cancelled = new AtomicBoolean();
+        ExecutorService handlers = Executors.newFixedThreadPool(2, runnable -> {
+            Thread thread = new Thread(runnable, "vox-java-test-handler");
+            thread.setDaemon(true);
+            return thread;
+        });
+        ConnectionOptions serverOptions = ConnectionOptions.builder()
+                .initialChannelCredit(2)
+                .handlerExecutor(handlers)
+                .build();
+        ConnectionOptions clientOptions = ConnectionOptions.builder()
+                .initialChannelCredit(3)
+                .build();
+        JavaFixtureHandler handler = new JavaFixtureHandler() {
+            @Override public CompletableFuture<String> echo(
+                    CallContext context, String value) {
+                return CompletableFuture.completedFuture(value);
+            }
+
+            @Override public CompletableFuture<NestedResponse> inspect(
+                    CallContext context, NestedRequest request) {
+                return CompletableFuture.failedFuture(
+                        new UnsupportedOperationException("unused by channel test"));
+            }
+
+            @Override public CompletableFuture<VoxResult<DivideResponse, DivideByZero>> divide(
+                    CallContext context, DivideRequest request) {
+                return CompletableFuture.failedFuture(
+                        new UnsupportedOperationException("unused by channel test"));
+            }
+
+            @Override public CompletableFuture<String> generate(
+                    CallContext context, long count, VoxTx<String> output) {
+                try {
+                    for (long index = 0; index < count; index++) {
+                        output.send("item-" + index);
+                        sent.incrementAndGet();
+                    }
+                    output.close();
+                    return CompletableFuture.completedFuture("sent-" + count);
+                } catch (InterruptedException failure) {
+                    Thread.currentThread().interrupt();
+                    return CompletableFuture.failedFuture(failure);
+                } catch (VoxException failure) {
+                    cancelled.set(context.isCancelled());
+                    return CompletableFuture.completedFuture("stopped");
+                }
+            }
+        };
+
+        try (ServerSocket listener = new ServerSocket(0)) {
+            CompletableFuture<VoxConnection> accepted = new CompletableFuture<>();
+            Thread acceptThread = new Thread(() -> {
+                try {
+                    Socket socket = listener.accept();
+                    accepted.complete(VoxConnection.accept(
+                            socket,
+                            new ServiceRegistry().register(
+                                    new JavaFixtureDispatcher(handler)),
+                            serverOptions));
+                } catch (Exception failure) {
+                    accepted.completeExceptionally(failure);
+                }
+            }, "vox-java-channel-accept");
+            acceptThread.start();
+            VoxConnection client = VoxConnection.connect(
+                    new InetSocketAddress("127.0.0.1", listener.getLocalPort()),
+                    clientOptions);
+            VoxConnection server = accepted.get(2, TimeUnit.SECONDS);
+            CompletableFuture<Void> serverDone = server.start(VoxRuntimeTest::startDaemon);
+            CompletableFuture<Void> clientDone = client.start(VoxRuntimeTest::startDaemon);
+            awaitConnectionOpen(client, server, clientDone, serverDone);
+
+            ServiceLane lane = client.openLane(
+                    JavaFixtureServiceDescriptor.INSTANCE,
+                    LaneOptions.defaults());
+            lane.opened().get(2, TimeUnit.SECONDS);
+            JavaFixtureClient fixture = new JavaFixtureClient(lane);
+
+            VoxChannels.Pair<String> stream = VoxChannels.channel(ADAPTER);
+            CompletableFuture<String> result = fixture.generate(
+                    40,
+                    stream.tx(),
+                    CallOptions.withIdleTimeout(Duration.ofMillis(150)));
+            Thread.sleep(75);
+            check(sent.get() == 3,
+                    "sender stops at receiver-advertised initial credit; sent=" + sent.get());
+            for (int index = 0; index < 40; index++) {
+                String item = stream.rx().receive(Duration.ofSeconds(2));
+                check(("item-" + index).equals(item), "ordered channel item " + index);
+                Thread.sleep(10);
+            }
+            check(stream.rx().receive(Duration.ofSeconds(2)) == null,
+                    "graceful channel close follows queued items");
+            check("sent-40".equals(result.get(2, TimeUnit.SECONDS)),
+                    "generated channel response");
+
+            sent.set(0);
+            cancelled.set(false);
+            VoxChannels.Pair<String> cancelledStream = VoxChannels.channel(ADAPTER);
+            CompletableFuture<String> cancelledCall = fixture.generate(
+                    10_000,
+                    cancelledStream.tx(),
+                    CallOptions.withIdleTimeout(Duration.ofSeconds(2)));
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (sent.get() < 3 && System.nanoTime() < deadline) Thread.sleep(5);
+            check(cancelledCall.cancel(false), "request cancellation accepted");
+            deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (!cancelled.get() && System.nanoTime() < deadline) Thread.sleep(5);
+            check(cancelled.get(), "remote handler observes request cancellation");
+            boolean receiverTerminated = false;
+            for (int attempt = 0; attempt < 5 && !receiverTerminated; attempt++) {
+                try {
+                    cancelledStream.rx().receive(Duration.ofSeconds(1));
+                } catch (VoxException failure) {
+                    receiverTerminated = true;
+                }
+            }
+            check(receiverTerminated, "cancelled request terminates local receiver");
+
+            lane.close();
+            client.close();
+            server.close();
+            try { clientDone.get(2, TimeUnit.SECONDS); } catch (ExecutionException ignored) {}
+            try { serverDone.get(2, TimeUnit.SECONDS); } catch (ExecutionException ignored) {}
+            acceptThread.join();
+        } finally {
+            handlers.shutdownNow();
+        }
+    }
+
+    private static void startDaemon(Runnable command) {
+        Thread thread = new Thread(command, "vox-java-test-driver");
+        thread.setDaemon(true);
+        thread.start();
+    }
+
+    private static void awaitConnectionOpen(
+            VoxConnection client,
+            VoxConnection server,
+            CompletableFuture<Void> clientDone,
+            CompletableFuture<Void> serverDone) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        while ((client.state() != ConnectionState.OPEN || server.state() != ConnectionState.OPEN)
+                && System.nanoTime() < deadline) {
+            Thread.sleep(5);
+        }
+        check(client.state() == ConnectionState.OPEN,
+                "channel client opens; failure=" + completionFailure(clientDone));
+        check(server.state() == ConnectionState.OPEN,
+                "channel server opens; failure=" + completionFailure(serverDone));
     }
 
     private static void requestIdsFollowNegotiatedParity() throws Exception {
@@ -58,7 +227,8 @@ public final class VoxRuntimeTest {
                         LaneOptions.defaults(),
                         LaneState.OPEN,
                         2,
-                        64);
+                        64,
+                        16);
         CompletableFuture<byte[]> first =
                 lane.call(method, new byte[0], CallOptions.defaults());
         ServiceLane.OutboundCall firstCall = driver.take();
@@ -264,7 +434,8 @@ public final class VoxRuntimeTest {
                 LaneOptions.defaults(),
                 LaneState.OPEN,
                 1,
-                64);
+                64,
+                16);
     }
 
     private static MethodDescriptor method() {

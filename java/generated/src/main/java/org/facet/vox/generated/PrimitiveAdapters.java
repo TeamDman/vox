@@ -55,6 +55,12 @@ final class PrimitiveAdapters {
     @Override public void encode(PhonEncoder encoder, byte[] value) throws PhonException { encoder.writeBytes(value); }
     @Override public byte[] decode(PhonDecoder decoder) throws PhonException { return decoder.readBytes(); }
   };
+  static final PhonAdapter<Void> UNIT = new PhonAdapter<>() {
+    private final SchemaClosure schema = SchemaClosure.uncheckedOf(Schema.primitive(Schema.Primitive.UNIT));
+    @Override public SchemaClosure schema() { return schema; }
+    @Override public void encode(PhonEncoder encoder, Void value) throws PhonException {}
+    @Override public Void decode(PhonDecoder decoder) throws PhonException { return null; }
+  };
   static <T> PhonAdapter<T> unsupported(String shape) { throw new IllegalArgumentException("unsupported generated adapter " + shape); }
   private PrimitiveAdapters() {}
 }

@@ -3,10 +3,10 @@
 package org.facet.vox.generated;
 
 import java.util.concurrent.CompletableFuture;
-import org.facet.vox.CallContext;
-import org.facet.vox.VoxResult;
+import org.facet.vox.*;
 
 public interface TestbedHandler {
   CompletableFuture<String> echo(CallContext context, String message);
   CompletableFuture<VoxResult<Long, MathError>> divide(CallContext context, long dividend, long divisor);
+  CompletableFuture<Void> generateLarge(CallContext context, long count, VoxTx<Integer> output);
 }

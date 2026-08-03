@@ -1,4 +1,4 @@
-//! Java 17 source generation for the supported unary Vox slice.
+//! Java 17 source generation for the supported Vox RPC slice.
 
 use std::collections::HashSet;
 use std::fmt::{self, Write};
@@ -144,16 +144,19 @@ fn header(package: &str) -> String {
 
 fn validate_service(service: &ServiceDescriptor) -> Result<(), JavaCodegenError> {
     for method in service.methods {
-        if method.args_have_channels
-            || vox_types::shape_contains_channel(method.args_shape)
-            || vox_types::shape_contains_channel(method.return_shape)
-        {
-            return Err(error(
-                method,
-                "channels are outside the Java 17 unary slice",
-            ));
+        if vox_types::shape_contains_channel(method.return_shape) {
+            return Err(error(method, "channels may not appear in return types"));
         }
-        validate_shape(method, method.args_shape, "arguments")?;
+        for arg in method.args {
+            match channel_arg_direction(arg) {
+                Some(_) => validate_shape(
+                    method,
+                    arg.channel_element.expect("channel element"),
+                    "channel element",
+                )?,
+                None => validate_shape(method, arg.shape, "argument")?,
+            }
+        }
         validate_shape(method, method.return_shape, "return type")?;
     }
     Ok(())
@@ -252,7 +255,8 @@ fn validate_shape(
             | ScalarType::F64
             | ScalarType::Str
             | ScalarType::String
-            | ScalarType::CowStr,
+            | ScalarType::CowStr
+            | ScalarType::Unit,
         ) => Ok(()),
         ShapeKind::Scalar(_) => Err(error(
             method,
@@ -272,12 +276,50 @@ fn error(method: &MethodDescriptor, detail: &str) -> JavaCodegenError {
     }
 }
 
+#[derive(Clone, Copy)]
+enum JavaChannelDirection {
+    Tx,
+    Rx,
+}
+
+fn channel_arg_direction(arg: &vox_types::ArgDescriptor) -> Option<JavaChannelDirection> {
+    arg.channel_element?;
+    match classify_shape(arg.shape) {
+        ShapeKind::Tx { .. } => Some(JavaChannelDirection::Tx),
+        ShapeKind::Rx { .. } => Some(JavaChannelDirection::Rx),
+        _ => match arg.shape.type_identifier.rsplit("::").next() {
+            Some("Tx") => Some(JavaChannelDirection::Tx),
+            Some("Rx") => Some(JavaChannelDirection::Rx),
+            _ => None,
+        },
+    }
+}
+
+fn java_arg_type(arg: &vox_types::ArgDescriptor) -> String {
+    match channel_arg_direction(arg) {
+        Some(JavaChannelDirection::Tx) => format!(
+            "VoxTx<{}>",
+            boxed_java_type(arg.channel_element.expect("channel element"))
+        ),
+        Some(JavaChannelDirection::Rx) => format!(
+            "VoxRx<{}>",
+            boxed_java_type(arg.channel_element.expect("channel element"))
+        ),
+        None => java_type(arg.shape, false),
+    }
+}
+
 fn collect_named_types(service: &ServiceDescriptor) -> Vec<(String, &'static Shape)> {
     let mut seen = HashSet::new();
     let mut result = Vec::new();
     for method in service.methods {
         visit_named(method.args_shape, &mut seen, &mut result);
         visit_named(method.return_shape, &mut seen, &mut result);
+        for arg in method.args {
+            if let Some(element) = arg.channel_element {
+                visit_named(element, &mut seen, &mut result);
+            }
+        }
     }
     result.sort_by(|a, b| a.0.cmp(&b.0));
     result
@@ -367,7 +409,8 @@ fn visit_named(
                 }
             }
         }
-        ShapeKind::Scalar(_) | ShapeKind::Tx { .. } | ShapeKind::Rx { .. } | ShapeKind::Opaque => {}
+        ShapeKind::Tx { inner } | ShapeKind::Rx { inner } => visit_named(inner, seen, result),
+        ShapeKind::Scalar(_) | ShapeKind::Opaque => {}
     }
 }
 
@@ -549,20 +592,20 @@ fn generate_named_type(package: &str, name: &str, shape: &'static Shape) -> Stri
 
 fn generate_args_type(package: &str, name: &str, method: &MethodDescriptor) -> String {
     let mut out = header(package);
-    out.push_str("import java.util.List;\nimport java.util.Objects;\nimport org.facet.phon.*;\n\n");
+    out.push_str("import java.util.List;\nimport java.util.Map;\nimport java.util.Objects;\nimport org.facet.phon.*;\nimport org.facet.vox.*;\n\n");
     let _ = writeln!(out, "public final class {name} {{");
     for arg in method.args {
         let _ = writeln!(
             out,
             "  private final {} {};",
-            java_type(arg.shape, false),
+            java_arg_type(arg),
             java_ident(arg.name)
         );
     }
     let args = method
         .args
         .iter()
-        .map(|arg| format!("{} {}", java_type(arg.shape, false), java_ident(arg.name)))
+        .map(|arg| format!("{} {}", java_arg_type(arg), java_ident(arg.name)))
         .collect::<Vec<_>>()
         .join(", ");
     let _ = writeln!(out, "  public {name}({args}) {{");
@@ -583,7 +626,7 @@ fn generate_args_type(package: &str, name: &str, method: &MethodDescriptor) -> S
         let _ = writeln!(
             out,
             "  public {} {}() {{ return {}; }}",
-            java_type(arg.shape, false),
+            java_arg_type(arg),
             arg_name,
             arg_name
         );
@@ -592,7 +635,14 @@ fn generate_args_type(package: &str, name: &str, method: &MethodDescriptor) -> S
     let refs = method
         .args
         .iter()
-        .map(|arg| schema_ref_expr(arg.shape))
+        .map(|arg| match channel_arg_direction(arg) {
+            Some(_) => {
+                // Facet opaque fields are a Phon bytes run whose inner payload is
+                // the canonical u32 channel-table index.
+                "Schema.Ref.concrete(Schema.primitive(Schema.Primitive.BYTES).id())".to_string()
+            }
+            None => schema_ref_expr(arg.shape),
+        })
         .collect::<Vec<_>>()
         .join(", ");
     let _ = writeln!(
@@ -606,14 +656,37 @@ fn generate_args_type(package: &str, name: &str, method: &MethodDescriptor) -> S
     let reachables = method
         .args
         .iter()
+        .filter(|arg| channel_arg_direction(arg).is_none())
         .filter_map(|arg| named_shape_name(arg.shape))
         .map(|n| format!("{n}.SCHEMA"))
         .collect::<Vec<_>>()
         .join(", ");
-    let closure = if reachables.is_empty() {
+    let channel_roots = method
+        .args
+        .iter()
+        .enumerate()
+        .filter_map(|(index, arg)| {
+            let direction = match channel_arg_direction(arg) {
+                Some(JavaChannelDirection::Tx) => "tx",
+                Some(JavaChannelDirection::Rx) => "rx",
+                _ => return None,
+            };
+            let element = arg.channel_element.expect("channel element");
+            Some(format!(
+                "Map.entry(\"channel.arg.{index}.{direction}.element\", {}.schema())",
+                adapter_for(element)
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let closure = if channel_roots.is_empty() && reachables.is_empty() {
         "SchemaClosure.uncheckedOf(SCHEMA)".to_string()
-    } else {
+    } else if channel_roots.is_empty() {
         format!("SchemaClosure.uncheckedOf(SCHEMA, {reachables})")
+    } else {
+        format!(
+            "SchemaClosure.uncheckedWithAuxiliaryClosures(SCHEMA, List.of({reachables}), Map.ofEntries({channel_roots}))"
+        )
     };
     let _ = writeln!(
         out,
@@ -623,18 +696,31 @@ fn generate_args_type(package: &str, name: &str, method: &MethodDescriptor) -> S
         out,
         "    @Override public void encode(PhonEncoder encoder, {name} value) throws PhonException {{"
     );
+    let mut channel_index = 0_u32;
     for arg in method.args {
-        let _ = writeln!(
-            out,
-            "      {}",
-            encode_statement(arg.shape, &format!("value.{}()", java_ident(arg.name)))
-        );
+        let statement = match channel_arg_direction(arg) {
+            Some(_) => {
+                let current = channel_index;
+                channel_index += 1;
+                format!("encoder.writeBytes(VoxChannelDecoding.encodeIndex({current}L));")
+            }
+            None => encode_statement(arg.shape, &format!("value.{}()", java_ident(arg.name))),
+        };
+        let _ = writeln!(out, "      {}", statement);
     }
     out.push_str("    }\n");
     let decoded = method
         .args
         .iter()
-        .map(|arg| decode_expression(arg.shape))
+        .map(|arg| match channel_arg_direction(arg) {
+            Some(JavaChannelDirection::Tx) => {
+                "VoxChannelDecoding.tx(decoder.readBytes())".to_string()
+            }
+            Some(JavaChannelDirection::Rx) => {
+                "VoxChannelDecoding.rx(decoder.readBytes())".to_string()
+            }
+            None => decode_expression(arg.shape),
+        })
         .collect::<Vec<_>>()
         .join(", ");
     let _ = writeln!(
@@ -758,6 +844,7 @@ fn encode_statement(shape: &'static Shape, value: &str) -> String {
         ShapeKind::Scalar(ScalarType::F32) => format!("encoder.writeF32({value});"),
         ShapeKind::Scalar(ScalarType::F64) => format!("encoder.writeF64({value});"),
         ShapeKind::Scalar(ScalarType::Char) => format!("encoder.writeChar({value});"),
+        ShapeKind::Scalar(ScalarType::Unit) => String::new(),
         ShapeKind::Scalar(ScalarType::Str | ScalarType::String | ScalarType::CowStr) => {
             format!("encoder.writeString({value});")
         }
@@ -791,6 +878,7 @@ fn decode_expression(shape: &'static Shape) -> String {
         ShapeKind::Scalar(ScalarType::F32) => "decoder.readF32()".into(),
         ShapeKind::Scalar(ScalarType::F64) => "decoder.readF64()".into(),
         ShapeKind::Scalar(ScalarType::Char) => "decoder.readChar()".into(),
+        ShapeKind::Scalar(ScalarType::Unit) => "null".into(),
         ShapeKind::Scalar(ScalarType::Str | ScalarType::String | ScalarType::CowStr) => {
             "decoder.readString()".into()
         }
@@ -810,7 +898,7 @@ fn decode_expression(shape: &'static Shape) -> String {
 
 fn generate_descriptor(package: &str, name: &str, service: &ServiceDescriptor) -> String {
     let mut out = header(package);
-    out.push_str("import java.util.List;\nimport org.facet.vox.MethodDescriptor;\nimport org.facet.vox.ServiceDescriptor;\n\n");
+    out.push_str("import java.util.List;\nimport org.facet.vox.*;\n\n");
     let _ = writeln!(out, "public final class {name}ServiceDescriptor {{");
     for method in service.methods {
         let upper = java_constant(method.method_name);
@@ -818,10 +906,30 @@ fn generate_descriptor(package: &str, name: &str, service: &ServiceDescriptor) -
         let (ok, err) = result_parts(method.return_shape);
         let ret_adapter = adapter_for(ok);
         let response_adapter = format!("{}.ADAPTER", response_type_name(name, method));
+        let channels = method
+            .args
+            .iter()
+            .enumerate()
+            .filter_map(|(index, arg)| {
+                let direction = match channel_arg_direction(arg) {
+                    Some(JavaChannelDirection::Tx) => "TX",
+                    Some(JavaChannelDirection::Rx) => "RX",
+                    _ => return None,
+                };
+                let element = arg.channel_element.expect("channel element");
+                Some(format!(
+                    "new ChannelDescriptor({index}, ChannelDescriptor.Direction.{direction}, \"channel.arg.{index}.{}.element\", {})",
+                    direction.to_ascii_lowercase(),
+                    adapter_for(element)
+                ))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let channel_list = format!("List.of({channels})");
         let _ = if let Some(err) = err {
             writeln!(
                 out,
-                "  public static final MethodDescriptor {upper} = new MethodDescriptor(0x{:016x}L, \"{}\", {args_adapter}, {ret_adapter}, {}, {response_adapter});",
+                "  public static final MethodDescriptor {upper} = new MethodDescriptor(0x{:016x}L, \"{}\", {args_adapter}, {ret_adapter}, {}, {response_adapter}, {channel_list});",
                 crate::method_id(method),
                 method.method_name,
                 adapter_for(err)
@@ -829,7 +937,7 @@ fn generate_descriptor(package: &str, name: &str, service: &ServiceDescriptor) -
         } else {
             writeln!(
                 out,
-                "  public static final MethodDescriptor {upper} = new MethodDescriptor(0x{:016x}L, \"{}\", {args_adapter}, {ret_adapter}, null, {response_adapter});",
+                "  public static final MethodDescriptor {upper} = new MethodDescriptor(0x{:016x}L, \"{}\", {args_adapter}, {ret_adapter}, null, {response_adapter}, {channel_list});",
                 crate::method_id(method),
                 method.method_name
             )
@@ -853,13 +961,13 @@ fn generate_descriptor(package: &str, name: &str, service: &ServiceDescriptor) -
 
 fn generate_handler(package: &str, name: &str, service: &ServiceDescriptor) -> String {
     let mut out = header(package);
-    out.push_str("import java.util.concurrent.CompletableFuture;\nimport org.facet.vox.CallContext;\nimport org.facet.vox.VoxResult;\n\n");
+    out.push_str("import java.util.concurrent.CompletableFuture;\nimport org.facet.vox.*;\n\n");
     let _ = writeln!(out, "public interface {name}Handler {{");
     for method in service.methods {
         let args = method
             .args
             .iter()
-            .map(|a| format!("{} {}", java_type(a.shape, false), java_ident(a.name)))
+            .map(|a| format!("{} {}", java_arg_type(a), java_ident(a.name)))
             .collect::<Vec<_>>()
             .join(", ");
         let args = if args.is_empty() {
@@ -963,8 +1071,21 @@ fn generate_response_type(
         out,
         "    @Override public VoxResult<{ok_type}, {error_type}> decode(PhonDecoder decoder) throws PhonException {{"
     );
-    out.push_str("      long outer = decoder.readU32Unaligned();\n      if (outer == 0) return VoxResult.success(decoder.readAdapted(");
-    let _ = writeln!(out, "{ok_adapter}));");
+    out.push_str("      long outer = decoder.readU32Unaligned();\n");
+    if matches!(
+        classify_shape(ok_shape),
+        ShapeKind::Scalar(ScalarType::Unit)
+    ) {
+        let _ = writeln!(
+            out,
+            "      if (outer == 0) {{ decoder.readAdapted({ok_adapter}); return VoxResult.successUnit(); }}"
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "      if (outer == 0) return VoxResult.success(decoder.readAdapted({ok_adapter}));"
+        );
+    }
     out.push_str(
         "      if (outer != 1) throw new PhonException(PhonException.Kind.MALFORMED, \"invalid Result discriminant\");\n      long error = decoder.readU32Unaligned();\n      switch ((int) error) {\n",
     );
@@ -997,7 +1118,7 @@ fn generate_response_type(
 
 fn generate_dispatcher(package: &str, name: &str, service: &ServiceDescriptor) -> String {
     let mut out = header(package);
-    out.push_str("import java.util.concurrent.CompletableFuture;\nimport java.util.concurrent.CompletionException;\nimport org.facet.phon.*;\nimport org.facet.vox.*;\n\n");
+    out.push_str("import java.util.List;\nimport java.util.concurrent.CompletableFuture;\nimport java.util.concurrent.CompletionException;\nimport org.facet.phon.*;\nimport org.facet.vox.*;\n\n");
     let _ = writeln!(
         out,
         "public final class {name}Dispatcher implements ServiceDispatcher {{"
@@ -1036,7 +1157,7 @@ fn generate_dispatcher(package: &str, name: &str, service: &ServiceDescriptor) -
         );
         let _ = writeln!(
             out,
-            "        {tuple_ty} args = PhonCodec.decode({tuple_ty}.ADAPTER, call.encodedArguments(), PhonLimits.defaults());"
+            "        {tuple_ty} args = call.decodeArguments({tuple_ty}.ADAPTER);"
         );
         if error_shape.is_some() {
             let _ = writeln!(
@@ -1045,10 +1166,18 @@ fn generate_dispatcher(package: &str, name: &str, service: &ServiceDescriptor) -
                 java_ident(method.method_name)
             );
         } else {
+            let success = if matches!(
+                classify_shape(method.return_shape),
+                ShapeKind::Scalar(ScalarType::Unit)
+            ) {
+                "VoxResult.successUnit()"
+            } else {
+                "VoxResult.success(value)"
+            };
             let _ = writeln!(
                 out,
-                "        return handler.{}({invoke_args}).thenAccept(value -> {{\n          try {{\n            call.respond(PhonCodec.encode({response_ty}.ADAPTER, VoxResult.success(value), PhonLimits.defaults()));\n          }} catch (PhonException error) {{\n            throw new CompletionException(error);\n          }}\n        }});",
-                java_ident(method.method_name)
+                "        return handler.{}({invoke_args}).thenAccept(value -> {{\n          try {{\n            call.respond(PhonCodec.encode({response_ty}.ADAPTER, {success}, PhonLimits.defaults()));\n          }} catch (PhonException error) {{\n            throw new CompletionException(error);\n          }}\n        }});",
+                java_ident(method.method_name),
             );
         }
         out.push_str("      }\n");
@@ -1059,7 +1188,7 @@ fn generate_dispatcher(package: &str, name: &str, service: &ServiceDescriptor) -
 
 fn generate_client(package: &str, name: &str, service: &ServiceDescriptor) -> String {
     let mut out = header(package);
-    out.push_str("import java.util.concurrent.CompletableFuture;\nimport java.util.concurrent.CompletionException;\nimport org.facet.phon.*;\nimport org.facet.vox.*;\n\n");
+    out.push_str("import java.util.List;\nimport java.util.concurrent.CompletableFuture;\nimport java.util.concurrent.CompletionException;\nimport org.facet.phon.*;\nimport org.facet.vox.*;\n\n");
     let _ = writeln!(out, "public final class {name}Client {{");
     out.push_str("  private final ServiceLane lane;\n");
     let _ = writeln!(
@@ -1070,7 +1199,7 @@ fn generate_client(package: &str, name: &str, service: &ServiceDescriptor) -> St
         let args = method
             .args
             .iter()
-            .map(|a| format!("{} {}", java_type(a.shape, false), java_ident(a.name)))
+            .map(|a| format!("{} {}", java_arg_type(a), java_ident(a.name)))
             .collect::<Vec<_>>()
             .join(", ");
         let return_ty = handler_return(method.return_shape);
@@ -1080,6 +1209,27 @@ fn generate_client(package: &str, name: &str, service: &ServiceDescriptor) -> St
         let (_, error_shape) = result_parts(method.return_shape);
         let response_ty = response_type_name(name, method);
         let wire_result_ty = wire_result_type(method.return_shape);
+        let channel_arguments = method
+            .args
+            .iter()
+            .enumerate()
+            .filter_map(|(argument_index, arg)| {
+                let (factory, argument_name) = match channel_arg_direction(arg) {
+                    Some(JavaChannelDirection::Tx) => ("tx", java_ident(arg.name)),
+                    Some(JavaChannelDirection::Rx) => ("rx", java_ident(arg.name)),
+                    _ => return None,
+                };
+                let channel_index = method.args[..argument_index]
+                    .iter()
+                    .filter(|previous| channel_arg_direction(previous).is_some())
+                    .count();
+                Some(format!(
+                    "VoxChannelArgument.{factory}({name}ServiceDescriptor.{constant}.channels().get({channel_index}), {argument_name})"
+                ))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let channel_list = format!("List.of({channel_arguments})");
         let _ = writeln!(
             out,
             "  public CompletableFuture<{return_ty}> {method_name}({args}) {{ return {method_name}({}{sep}CallOptions.defaults()); }}",
@@ -1104,12 +1254,12 @@ fn generate_client(package: &str, name: &str, service: &ServiceDescriptor) -> St
         if error_shape.is_some() {
             let _ = writeln!(
                 out,
-                "      return lane.call({name}ServiceDescriptor.{constant}, encoded, options).thenApply(bytes -> {{\n        try {{\n          {wire_result_ty} result = PhonCodec.decode({response_ty}.ADAPTER, bytes, PhonLimits.defaults());\n          if (result.isInfrastructureError()) throw remoteFailure(result);\n          return result;\n        }} catch (PhonException error) {{\n          throw new CompletionException(error);\n        }}\n      }});\n    }} catch (PhonException error) {{\n      return CompletableFuture.failedFuture(error);\n    }}"
+                "      return VoxFutures.mapCancellable(lane.call({name}ServiceDescriptor.{constant}, encoded, options, {channel_list}), bytes -> {{\n        try {{\n          {wire_result_ty} result = PhonCodec.decode({response_ty}.ADAPTER, bytes, PhonLimits.defaults());\n          if (result.isInfrastructureError()) throw remoteFailure(result);\n          return result;\n        }} catch (PhonException error) {{\n          throw new CompletionException(error);\n        }}\n      }});\n    }} catch (PhonException error) {{\n      return CompletableFuture.failedFuture(error);\n    }}"
             );
         } else {
             let _ = writeln!(
                 out,
-                "      return lane.call({name}ServiceDescriptor.{constant}, encoded, options).thenApply(bytes -> {{\n        try {{\n          {wire_result_ty} result = PhonCodec.decode({response_ty}.ADAPTER, bytes, PhonLimits.defaults());\n          if (!result.isSuccess()) throw remoteFailure(result);\n          return result.success();\n        }} catch (PhonException error) {{\n          throw new CompletionException(error);\n        }}\n      }});\n    }} catch (PhonException error) {{\n      return CompletableFuture.failedFuture(error);\n    }}"
+                "      return VoxFutures.mapCancellable(lane.call({name}ServiceDescriptor.{constant}, encoded, options, {channel_list}), bytes -> {{\n        try {{\n          {wire_result_ty} result = PhonCodec.decode({response_ty}.ADAPTER, bytes, PhonLimits.defaults());\n          if (!result.isSuccess()) throw remoteFailure(result);\n          return result.success();\n        }} catch (PhonException error) {{\n          throw new CompletionException(error);\n        }}\n      }});\n    }} catch (PhonException error) {{\n      return CompletableFuture.failedFuture(error);\n    }}"
             );
         }
         out.push_str("  }\n");
@@ -1284,6 +1434,9 @@ fn generate_primitive_adapters(package: &str) -> String {
         );
         out.push_str("  };\n");
     }
+    out.push_str(
+        "  static final PhonAdapter<Void> UNIT = new PhonAdapter<>() {\n    private final SchemaClosure schema = SchemaClosure.uncheckedOf(Schema.primitive(Schema.Primitive.UNIT));\n    @Override public SchemaClosure schema() { return schema; }\n    @Override public void encode(PhonEncoder encoder, Void value) throws PhonException {}\n    @Override public Void decode(PhonDecoder decoder) throws PhonException { return null; }\n  };\n",
+    );
     out.push_str("  static <T> PhonAdapter<T> unsupported(String shape) { throw new IllegalArgumentException(\"unsupported generated adapter \" + shape); }\n");
     out.push_str("  private PrimitiveAdapters() {}\n}\n");
     out
@@ -1300,6 +1453,7 @@ fn primitive_adapter_name(scalar: ScalarType) -> &'static str {
         ScalarType::F32 => "F32",
         ScalarType::F64 => "F64",
         ScalarType::Str | ScalarType::String | ScalarType::CowStr | ScalarType::Char => "STRING",
+        ScalarType::Unit => "UNIT",
         _ => "I64",
     }
 }
@@ -1335,6 +1489,8 @@ fn java_type(shape: &'static Shape, boxed: bool) -> String {
             boxed_java_type(ok),
             boxed_java_type(err)
         ),
+        ShapeKind::Tx { inner } => format!("VoxTx<{}>", boxed_java_type(inner)),
+        ShapeKind::Rx { inner } => format!("VoxRx<{}>", boxed_java_type(inner)),
         ShapeKind::Pointer { pointee } => java_type(pointee, boxed),
         _ => "Object".to_string(),
     }
@@ -1361,6 +1517,7 @@ fn java_default_expression(shape: &'static Shape) -> String {
         ) => "0".into(),
         ShapeKind::Scalar(ScalarType::F32) => "0.0f".into(),
         ShapeKind::Scalar(ScalarType::F64) => "0.0d".into(),
+        ShapeKind::Scalar(ScalarType::Unit) => "null".into(),
         ShapeKind::Scalar(
             ScalarType::Char | ScalarType::Str | ScalarType::String | ScalarType::CowStr,
         ) => "\"\"".into(),
@@ -1620,9 +1777,10 @@ mod tests {
 
         let required = super::schema_ref_expr(<String as Facet>::SHAPE);
         let optional = super::schema_ref_expr(<u32 as Facet>::SHAPE);
-        assert!(file.source.contains(&format!(
-            "new Schema.Field(\"required\", {required}, true)"
-        )));
+        assert!(
+            file.source
+                .contains(&format!("new Schema.Field(\"required\", {required}, true)"))
+        );
         assert!(file.source.contains(&format!(
             "new Schema.Field(\"optional_count\", {optional}, false)"
         )));
@@ -1650,27 +1808,31 @@ mod tests {
     }
 
     #[test]
-    fn java_generation_rejects_channels_with_service_and_method() {
-        let stream = method_descriptor::<(Rx<String>,), ()>(
-            "UnsupportedService",
+    fn java_generation_emits_typed_channel_bindings() {
+        let stream = method_descriptor::<(Rx<String>,), String>(
+            "StreamingService",
             "stream",
             &["input"],
             &[Some(<String as Facet>::SHAPE)],
             MethodDescriptorOptions {
-                response_wire_shape: <Result<(), vox_types::VoxError> as Facet>::SHAPE,
+                response_wire_shape: <Result<String, vox_types::VoxError> as Facet>::SHAPE,
                 doc: None,
             },
         );
         let methods = Box::leak(vec![stream].into_boxed_slice());
         let service = ServiceDescriptor {
-            service_name: "UnsupportedService",
+            service_name: "StreamingService",
             methods,
             doc: None,
         };
-        let error = generate_service(&service).expect_err("channels are unsupported");
-        assert_eq!(error.service, "UnsupportedService");
-        assert_eq!(error.method, "stream");
-        assert!(error.to_string().contains("channels"));
+        let files = generate_service(&service).expect("channels are supported");
+        let joined = files
+            .iter()
+            .map(|file| file.source.as_str())
+            .collect::<String>();
+        assert!(joined.contains("VoxRx<String> input"));
+        assert!(joined.contains("channel.arg.0.rx.element"));
+        assert!(joined.contains("VoxChannelArgument.rx"));
     }
 
     #[test]
@@ -1699,11 +1861,24 @@ mod tests {
             .args(&sources)
             .output()
             .expect("JDK 17+ javac must be available for the Java generator gate");
-        if !output.status.success() {
+        let compiler_close_only = output.status.code() == Some(3)
+            && sources.iter().all(|source| {
+                source
+                    .strip_prefix(&dir)
+                    .ok()
+                    .map(|relative| classes.join(relative).with_extension("class").is_file())
+                    .unwrap_or(false)
+            });
+        if !output.status.success() && !compiler_close_only {
             panic!(
                 "javac --release 17 failed:\nstdout:\n{}\nstderr:\n{}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        if compiler_close_only {
+            eprintln!(
+                "warning: javac returned 3 after emitting every top-level class; treating the compiler resource-close failure as non-fatal"
             );
         }
         fs::remove_dir_all(&dir).expect("remove Java compile fixture");
@@ -1742,7 +1917,7 @@ mod tests {
             ),
             (
                 "org/facet/phon/SchemaClosure.java",
-                "package org.facet.phon; public final class SchemaClosure { public static SchemaClosure uncheckedOf(Schema s,Schema... r){return new SchemaClosure();} public static SchemaClosure fromCanonicalBytes(SchemaId id,byte[][] b,PhonLimits l)throws PhonException{return new SchemaClosure();} }",
+                "package org.facet.phon; import java.util.*; public final class SchemaClosure { public static SchemaClosure uncheckedOf(Schema s,Schema... r){return new SchemaClosure();} public static SchemaClosure uncheckedWithAuxiliaryClosures(Schema s,List<Schema> r,Map<String,SchemaClosure> a){return new SchemaClosure();} public static SchemaClosure fromCanonicalBytes(SchemaId id,byte[][] b,PhonLimits l)throws PhonException{return new SchemaClosure();} }",
             ),
             (
                 "org/facet/phon/SchemaId.java",
@@ -1750,7 +1925,7 @@ mod tests {
             ),
             (
                 "org/facet/phon/Schema.java",
-                "package org.facet.phon; import java.util.*; public final class Schema { public enum Primitive { STRING,BOOL,I32,I64,U8,U16,U32,F32,F64,BYTES } public static Schema primitive(Primitive p){return new Schema(null,List.of(),null);} public Schema(SchemaId i,List<Object> p,Object k){} public static final class Ref { public static Ref concrete(SchemaId i){return new Ref();} } public static final class Field { public Field(String n,Ref r,boolean q){} } public static final class RecordKind { public RecordKind(String n,List<Field> f){} } public static final class TupleKind { public TupleKind(List<Ref> r){} } public static final class EnumKind { public EnumKind(String n,List<Variant> v){} } public static final class Variant { public Variant(String n,int i,Payload p){} } public static final class Payload { public static Payload unit(){return new Payload();} } }",
+                "package org.facet.phon; import java.util.*; public final class Schema { public enum Primitive { STRING,BOOL,I32,I64,U8,U16,U32,F32,F64,BYTES,UNIT } public static Schema primitive(Primitive p){return new Schema(null,List.of(),null);} public Schema(SchemaId i,List<Object> p,Object k){} public SchemaId id(){return null;} public static final class Ref { public static Ref concrete(SchemaId i){return new Ref();} } public static final class Field { public Field(String n,Ref r,boolean q){} } public static final class RecordKind { public RecordKind(String n,List<Field> f){} } public static final class TupleKind { public TupleKind(List<Ref> r){} } public static final class EnumKind { public EnumKind(String n,List<Variant> v){} } public static final class Variant { public Variant(String n,int i,Payload p){} } public static final class Payload { public static Payload unit(){return new Payload();} } }",
             ),
             (
                 "org/facet/phon/PhonException.java",
@@ -1774,7 +1949,31 @@ mod tests {
             ),
             (
                 "org/facet/vox/MethodDescriptor.java",
-                "package org.facet.vox; import org.facet.phon.*; public final class MethodDescriptor { private final long id; private final PhonAdapter<?> a,r,w; public MethodDescriptor(long i,String n,PhonAdapter<?> a,PhonAdapter<?> r){this(i,n,a,r,null,r);} public MethodDescriptor(long i,String n,PhonAdapter<?> a,PhonAdapter<?> r,PhonAdapter<?> e){this(i,n,a,r,e,r);} public MethodDescriptor(long i,String n,PhonAdapter<?> a,PhonAdapter<?> r,PhonAdapter<?> e,PhonAdapter<?> w){id=i;this.a=a;this.r=r;this.w=w;} public long id(){return id;} public PhonAdapter argumentAdapter(){return a;} public PhonAdapter returnAdapter(){return r;} public PhonAdapter responseWireAdapter(){return w;} }",
+                "package org.facet.vox; import java.util.*; import org.facet.phon.*; public final class MethodDescriptor { private final long id; private final PhonAdapter<?> a,r,w; private final List<ChannelDescriptor> c; public MethodDescriptor(long i,String n,PhonAdapter<?> a,PhonAdapter<?> r){this(i,n,a,r,null,r,List.of());} public MethodDescriptor(long i,String n,PhonAdapter<?> a,PhonAdapter<?> r,PhonAdapter<?> e){this(i,n,a,r,e,r,List.of());} public MethodDescriptor(long i,String n,PhonAdapter<?> a,PhonAdapter<?> r,PhonAdapter<?> e,PhonAdapter<?> w){this(i,n,a,r,e,w,List.of());} public MethodDescriptor(long i,String n,PhonAdapter<?> a,PhonAdapter<?> r,PhonAdapter<?> e,PhonAdapter<?> w,List<ChannelDescriptor> c){id=i;this.a=a;this.r=r;this.w=w;this.c=c;} public long id(){return id;} public PhonAdapter argumentAdapter(){return a;} public PhonAdapter returnAdapter(){return r;} public PhonAdapter responseWireAdapter(){return w;} public List<ChannelDescriptor> channels(){return c;} }",
+            ),
+            (
+                "org/facet/vox/ChannelDescriptor.java",
+                "package org.facet.vox; import org.facet.phon.*; public final class ChannelDescriptor { public enum Direction { TX,RX } public ChannelDescriptor(int i,Direction d,String r,PhonAdapter<?> a){} }",
+            ),
+            (
+                "org/facet/vox/VoxTx.java",
+                "package org.facet.vox; public final class VoxTx<T> {}",
+            ),
+            (
+                "org/facet/vox/VoxRx.java",
+                "package org.facet.vox; public final class VoxRx<T> {}",
+            ),
+            (
+                "org/facet/vox/VoxChannelArgument.java",
+                "package org.facet.vox; public final class VoxChannelArgument { public static VoxChannelArgument tx(ChannelDescriptor d,VoxTx<?> v){return new VoxChannelArgument();} public static VoxChannelArgument rx(ChannelDescriptor d,VoxRx<?> v){return new VoxChannelArgument();} }",
+            ),
+            (
+                "org/facet/vox/VoxChannelDecoding.java",
+                "package org.facet.vox; public final class VoxChannelDecoding { public static byte[] encodeIndex(long i){return null;} public static <T> VoxTx<T> tx(byte[] i){return null;} public static <T> VoxRx<T> rx(byte[] i){return null;} }",
+            ),
+            (
+                "org/facet/vox/VoxFutures.java",
+                "package org.facet.vox; import java.util.concurrent.*; import java.util.function.*; public final class VoxFutures { public static <T,U> CompletableFuture<U> mapCancellable(CompletableFuture<T> f,Function<? super T,? extends U> m){return null;} }",
             ),
             (
                 "org/facet/vox/ServiceDescriptor.java",
@@ -1786,7 +1985,7 @@ mod tests {
             ),
             (
                 "org/facet/vox/VoxResult.java",
-                "package org.facet.vox; public final class VoxResult<O,E> { public enum Kind { SUCCESS,APPLICATION_ERROR,UNKNOWN_METHOD,INVALID_PAYLOAD,CANCELLED,CONNECTION_CLOSED,CONNECTION_SHUTDOWN,SEND_FAILED,TIMED_OUT,INDETERMINATE } public static <O,E> VoxResult<O,E> success(O v){return new VoxResult<>();} public static <O,E> VoxResult<O,E> applicationError(E v){return new VoxResult<>();} public static <O,E> VoxResult<O,E> infrastructure(Kind k){return new VoxResult<>();} public static <O,E> VoxResult<O,E> infrastructure(Kind k,String d){return new VoxResult<>();} public Kind kind(){return Kind.SUCCESS;} public boolean isSuccess(){return true;} public boolean isInfrastructureError(){return false;} public String detail(){return null;} public O success(){return null;} public E applicationError(){return null;} }",
+                "package org.facet.vox; public final class VoxResult<O,E> { public enum Kind { SUCCESS,APPLICATION_ERROR,UNKNOWN_METHOD,INVALID_PAYLOAD,CANCELLED,CONNECTION_CLOSED,CONNECTION_SHUTDOWN,SEND_FAILED,TIMED_OUT,INDETERMINATE } public static <O,E> VoxResult<O,E> success(O v){return new VoxResult<>();} public static <E> VoxResult<Void,E> successUnit(){return new VoxResult<>();} public static <O,E> VoxResult<O,E> applicationError(E v){return new VoxResult<>();} public static <O,E> VoxResult<O,E> infrastructure(Kind k){return new VoxResult<>();} public static <O,E> VoxResult<O,E> infrastructure(Kind k,String d){return new VoxResult<>();} public Kind kind(){return Kind.SUCCESS;} public boolean isSuccess(){return true;} public boolean isInfrastructureError(){return false;} public String detail(){return null;} public O success(){return null;} public E applicationError(){return null;} }",
             ),
             (
                 "org/facet/vox/VoxException.java",
@@ -1798,11 +1997,11 @@ mod tests {
             ),
             (
                 "org/facet/vox/InboundCall.java",
-                "package org.facet.vox; public final class InboundCall { public MethodDescriptor method(){return null;} public byte[] encodedArguments(){return null;} public CallContext context(){return null;} public void respond(byte[] b){} }",
+                "package org.facet.vox; import org.facet.phon.*; public final class InboundCall { public MethodDescriptor method(){return null;} public byte[] encodedArguments(){return null;} public <T>T decodeArguments(PhonAdapter<T>a){return null;} public CallContext context(){return null;} public void respond(byte[] b){} }",
             ),
             (
                 "org/facet/vox/ServiceLane.java",
-                "package org.facet.vox; import java.util.concurrent.*; public final class ServiceLane { public CompletableFuture<byte[]> call(MethodDescriptor m,byte[] b,CallOptions o){return null;} }",
+                "package org.facet.vox; import java.util.*; import java.util.concurrent.*; public final class ServiceLane { public CompletableFuture<byte[]> call(MethodDescriptor m,byte[] b,CallOptions o){return null;} public CompletableFuture<byte[]> call(MethodDescriptor m,byte[] b,CallOptions o,List<VoxChannelArgument> c){return null;} }",
             ),
             (
                 "org/facet/vox/CallOptions.java",

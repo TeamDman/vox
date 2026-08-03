@@ -3,8 +3,7 @@
 package org.facet.vox.generated;
 
 import java.util.concurrent.CompletableFuture;
-import org.facet.vox.CallContext;
-import org.facet.vox.VoxResult;
+import org.facet.vox.*;
 
 public interface TerminalHandler {
   CompletableFuture<VoxResult<TerminalConnectResult, TerminalError>> connect(CallContext context, TerminalConnectRequest request);
@@ -14,6 +13,7 @@ public interface TerminalHandler {
   CompletableFuture<VoxResult<TerminalInputResult, TerminalError>> sendKey(CallContext context, TerminalKeyInput request);
   CompletableFuture<VoxResult<TerminalInputResult, TerminalError>> sendMouse(CallContext context, TerminalMouseInput request);
   CompletableFuture<VoxResult<TerminalSnapshot, TerminalError>> snapshot(CallContext context, TerminalSnapshotRequest request);
+  CompletableFuture<VoxResult<TerminalOperationResult, TerminalError>> subscribeFrames(CallContext context, TerminalSubscribeRequest request, VoxTx<TerminalFrameEvent> frames);
   CompletableFuture<VoxResult<TerminalContentResult, TerminalError>> getContent(CallContext context, TerminalContentRequest request);
   CompletableFuture<VoxResult<TerminalOperationResult, TerminalError>> cancel(CallContext context, TerminalCancelRequest request);
   CompletableFuture<VoxResult<TerminalOperationResult, TerminalError>> disconnect(CallContext context, TerminalDisconnectRequest request);

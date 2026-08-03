@@ -86,6 +86,16 @@ fn application_error_result_round_trips_both_directions() {
 }
 
 #[test]
+fn java_subject_calls_rust_bounded_generate_channel() {
+    testbed::run_subject_calls_generate_large(SubjectSpec::tcp(SubjectLanguage::Java));
+}
+
+#[test]
+fn rust_calls_java_bounded_generate_channel() {
+    testbed::run_rpc_channeling_large_stream(SubjectSpec::tcp(SubjectLanguage::Java));
+}
+
+#[test]
 fn disconnect_completes_pending_call_and_java_subject_exits() {
     run_async(async {
         let (client, mut child, connection) =

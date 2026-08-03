@@ -325,11 +325,21 @@ fn java_fixture_service() -> vox_types::ServiceDescriptor {
             doc: None,
         },
     );
-    let methods = Box::leak(vec![echo, inspect, divide].into_boxed_slice());
+    let generate = method_descriptor::<(u32, vox_types::Tx<String>), String>(
+        "JavaFixture",
+        "generate",
+        &["count", "output"],
+        &[None, Some(<String as Facet>::SHAPE)],
+        MethodDescriptorOptions {
+            response_wire_shape: <Result<String, vox_types::VoxError> as Facet>::SHAPE,
+            doc: None,
+        },
+    );
+    let methods = Box::leak(vec![echo, inspect, divide, generate].into_boxed_slice());
     ServiceDescriptor {
         service_name: "JavaFixture",
         methods,
-        doc: Some("Frozen Java 17 unary generation fixture"),
+        doc: Some("Frozen Java 17 generation fixture"),
     }
 }
 
@@ -411,7 +421,7 @@ fn check_codegen_java(workspace_root: &std::path::Path) -> Result<(), Box<dyn st
 fn java_testbed_unary_files()
 -> Result<Vec<vox_codegen::targets::java::JavaFile>, Box<dyn std::error::Error>> {
     let service = spec_proto::testbed_service_descriptor();
-    let methods = ["echo", "divide"]
+    let methods = ["echo", "divide", "generate_large"]
         .into_iter()
         .map(|name| {
             service
@@ -426,7 +436,7 @@ fn java_testbed_unary_files()
     let unary_service = vox_types::ServiceDescriptor {
         service_name: service.service_name,
         methods,
-        doc: Some("Rust-authoritative Testbed Java unary wire slice"),
+        doc: Some("Rust-authoritative Testbed Java wire slice"),
     };
     let mut files = vox_codegen::targets::java::generate_service(&unary_service)?;
     // `PrimitiveAdapters` is shared with the fixture service and generated identically.

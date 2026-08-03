@@ -2,6 +2,7 @@
 // Regenerate with `cargo xtask codegen --java`.
 package org.facet.vox.generated;
 
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import org.facet.phon.*;
@@ -14,7 +15,7 @@ public final class TestbedDispatcher implements ServiceDispatcher {
   @Override public CompletableFuture<Void> dispatch(InboundCall call) {
     try {
       if (call.method().id() == TestbedServiceDescriptor.ECHO.id()) {
-        TestbedEchoArgs args = PhonCodec.decode(TestbedEchoArgs.ADAPTER, call.encodedArguments(), PhonLimits.defaults());
+        TestbedEchoArgs args = call.decodeArguments(TestbedEchoArgs.ADAPTER);
         return handler.echo(call.context(), args.message()).thenAccept(value -> {
           try {
             call.respond(PhonCodec.encode(TestbedEchoResponse.ADAPTER, VoxResult.success(value), PhonLimits.defaults()));
@@ -24,10 +25,20 @@ public final class TestbedDispatcher implements ServiceDispatcher {
         });
       }
       if (call.method().id() == TestbedServiceDescriptor.DIVIDE.id()) {
-        TestbedDivideArgs args = PhonCodec.decode(TestbedDivideArgs.ADAPTER, call.encodedArguments(), PhonLimits.defaults());
+        TestbedDivideArgs args = call.decodeArguments(TestbedDivideArgs.ADAPTER);
         return handler.divide(call.context(), args.dividend(), args.divisor()).thenAccept(value -> {
           try {
             call.respond(PhonCodec.encode(TestbedDivideResponse.ADAPTER, value, PhonLimits.defaults()));
+          } catch (PhonException error) {
+            throw new CompletionException(error);
+          }
+        });
+      }
+      if (call.method().id() == TestbedServiceDescriptor.GENERATE_LARGE.id()) {
+        TestbedGenerateLargeArgs args = call.decodeArguments(TestbedGenerateLargeArgs.ADAPTER);
+        return handler.generateLarge(call.context(), args.count(), args.output()).thenAccept(value -> {
+          try {
+            call.respond(PhonCodec.encode(TestbedGenerateLargeResponse.ADAPTER, VoxResult.successUnit(), PhonLimits.defaults()));
           } catch (PhonException error) {
             throw new CompletionException(error);
           }

@@ -22,10 +22,12 @@ final class WireCodec {
     private final PhonLimits limits;
     private final SchemaClosure handshakeSchema;
     private final SchemaClosure messageSchema;
+    private final int initialChannelCredit;
     private SchemaClosure peerMessageSchema;
     private CompatibilityPlan peerMessagePlan;
 
     WireCodec(ConnectionOptions options) throws VoxException {
+        initialChannelCredit = options.initialChannelCredit();
         limits = new PhonLimits(
                 options.maxFrameBytes(),
                 options.maxSchemaBytes(),
@@ -163,16 +165,42 @@ final class WireCodec {
             long requestId,
             long methodId,
             byte[] arguments,
+            List<Long> channels,
             Map<String, String> metadata) {
         Value call = map(
                 "method_id", unsigned(methodId),
-                "channels", Value.list(List.of()),
+                "channels", Value.list(channels.stream().map(WireCodec::unsigned).toList()),
                 "metadata", Value.map(stringMetadata(metadata)),
                 "args", Value.bytes(arguments),
                 "schemas", Value.list(List.of()));
         return enumValue("RequestMessage", map(
                 "id", unsigned(requestId),
                 "body", enumValue("Call", call)));
+    }
+
+    Value channelItem(long channelId, byte[] payload) {
+        return enumValue("ChannelMessage", map(
+                "id", unsigned(channelId),
+                "body", enumValue("Item", map("item", Value.bytes(payload)))));
+    }
+
+    Value channelClose(long channelId) {
+        return enumValue("ChannelMessage", map(
+                "id", unsigned(channelId),
+                "body", enumValue("Close", map("metadata", Value.nullValue()))));
+    }
+
+    Value channelReset(long channelId) {
+        return enumValue("ChannelMessage", map(
+                "id", unsigned(channelId),
+                "body", enumValue("Reset", map("metadata", Value.nullValue()))));
+    }
+
+    Value channelGrant(long channelId, int additional) {
+        return enumValue("ChannelMessage", map(
+                "id", unsigned(channelId),
+                "body", enumValue("GrantCredit", map(
+                        "additional", Value.unsigned(Integer.toUnsignedLong(additional))))));
     }
 
     Value laneClose() {
@@ -304,11 +332,11 @@ final class WireCodec {
         }
     }
 
-    private static Value connectionSettings(boolean odd) {
+    private Value connectionSettings(boolean odd) {
         return map(
                 "parity", parity(odd),
                 "max_concurrent_requests", Value.unsigned(64),
-                "initial_channel_credit", Value.unsigned(16));
+                "initial_channel_credit", Value.unsigned(initialChannelCredit));
     }
 
     private static Value parity(boolean odd) {

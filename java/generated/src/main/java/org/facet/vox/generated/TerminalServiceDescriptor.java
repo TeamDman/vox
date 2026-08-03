@@ -3,20 +3,20 @@
 package org.facet.vox.generated;
 
 import java.util.List;
-import org.facet.vox.MethodDescriptor;
-import org.facet.vox.ServiceDescriptor;
+import org.facet.vox.*;
 
 public final class TerminalServiceDescriptor {
-  public static final MethodDescriptor CONNECT = new MethodDescriptor(0x9e81b88f62f1eb60L, "connect", TerminalConnectArgs.ADAPTER, TerminalConnectResult.ADAPTER, TerminalError.ADAPTER, TerminalConnectResponse.ADAPTER);
-  public static final MethodDescriptor CAPABILITIES = new MethodDescriptor(0x56523a97a4da5b64L, "capabilities", TerminalCapabilitiesArgs.ADAPTER, TerminalCapabilitiesResult.ADAPTER, TerminalError.ADAPTER, TerminalCapabilitiesResponse.ADAPTER);
-  public static final MethodDescriptor RESIZE = new MethodDescriptor(0xffd4c5752861fc1fL, "resize", TerminalResizeArgs.ADAPTER, TerminalResizeResult.ADAPTER, TerminalError.ADAPTER, TerminalResizeResponse.ADAPTER);
-  public static final MethodDescriptor SEND_TEXT = new MethodDescriptor(0xa0f86a8a39ae0dcbL, "send_text", TerminalSendTextArgs.ADAPTER, TerminalInputResult.ADAPTER, TerminalError.ADAPTER, TerminalSendTextResponse.ADAPTER);
-  public static final MethodDescriptor SEND_KEY = new MethodDescriptor(0xe0e1cb7a111dc0c7L, "send_key", TerminalSendKeyArgs.ADAPTER, TerminalInputResult.ADAPTER, TerminalError.ADAPTER, TerminalSendKeyResponse.ADAPTER);
-  public static final MethodDescriptor SEND_MOUSE = new MethodDescriptor(0xfd17ea461870349aL, "send_mouse", TerminalSendMouseArgs.ADAPTER, TerminalInputResult.ADAPTER, TerminalError.ADAPTER, TerminalSendMouseResponse.ADAPTER);
-  public static final MethodDescriptor SNAPSHOT = new MethodDescriptor(0x4648749132a0ebb8L, "snapshot", TerminalSnapshotArgs.ADAPTER, TerminalSnapshot.ADAPTER, TerminalError.ADAPTER, TerminalSnapshotResponse.ADAPTER);
-  public static final MethodDescriptor GET_CONTENT = new MethodDescriptor(0x6f1917e81fe9c050L, "get_content", TerminalGetContentArgs.ADAPTER, TerminalContentResult.ADAPTER, TerminalError.ADAPTER, TerminalGetContentResponse.ADAPTER);
-  public static final MethodDescriptor CANCEL = new MethodDescriptor(0x94967d6dfd5fa677L, "cancel", TerminalCancelArgs.ADAPTER, TerminalOperationResult.ADAPTER, TerminalError.ADAPTER, TerminalCancelResponse.ADAPTER);
-  public static final MethodDescriptor DISCONNECT = new MethodDescriptor(0xbabc04d89ee3e7a7L, "disconnect", TerminalDisconnectArgs.ADAPTER, TerminalOperationResult.ADAPTER, TerminalError.ADAPTER, TerminalDisconnectResponse.ADAPTER);
-  public static final ServiceDescriptor INSTANCE = new ServiceDescriptor("Terminal", List.of(CONNECT, CAPABILITIES, RESIZE, SEND_TEXT, SEND_KEY, SEND_MOUSE, SNAPSHOT, GET_CONTENT, CANCEL, DISCONNECT));
+  public static final MethodDescriptor CONNECT = new MethodDescriptor(0x9e81b88f62f1eb60L, "connect", TerminalConnectArgs.ADAPTER, TerminalConnectResult.ADAPTER, TerminalError.ADAPTER, TerminalConnectResponse.ADAPTER, List.of());
+  public static final MethodDescriptor CAPABILITIES = new MethodDescriptor(0x56523a97a4da5b64L, "capabilities", TerminalCapabilitiesArgs.ADAPTER, TerminalCapabilitiesResult.ADAPTER, TerminalError.ADAPTER, TerminalCapabilitiesResponse.ADAPTER, List.of());
+  public static final MethodDescriptor RESIZE = new MethodDescriptor(0xffd4c5752861fc1fL, "resize", TerminalResizeArgs.ADAPTER, TerminalResizeResult.ADAPTER, TerminalError.ADAPTER, TerminalResizeResponse.ADAPTER, List.of());
+  public static final MethodDescriptor SEND_TEXT = new MethodDescriptor(0xa0f86a8a39ae0dcbL, "send_text", TerminalSendTextArgs.ADAPTER, TerminalInputResult.ADAPTER, TerminalError.ADAPTER, TerminalSendTextResponse.ADAPTER, List.of());
+  public static final MethodDescriptor SEND_KEY = new MethodDescriptor(0xe0e1cb7a111dc0c7L, "send_key", TerminalSendKeyArgs.ADAPTER, TerminalInputResult.ADAPTER, TerminalError.ADAPTER, TerminalSendKeyResponse.ADAPTER, List.of());
+  public static final MethodDescriptor SEND_MOUSE = new MethodDescriptor(0xfd17ea461870349aL, "send_mouse", TerminalSendMouseArgs.ADAPTER, TerminalInputResult.ADAPTER, TerminalError.ADAPTER, TerminalSendMouseResponse.ADAPTER, List.of());
+  public static final MethodDescriptor SNAPSHOT = new MethodDescriptor(0x4648749132a0ebb8L, "snapshot", TerminalSnapshotArgs.ADAPTER, TerminalSnapshot.ADAPTER, TerminalError.ADAPTER, TerminalSnapshotResponse.ADAPTER, List.of());
+  public static final MethodDescriptor SUBSCRIBE_FRAMES = new MethodDescriptor(0x4f1b9f66093e3e90L, "subscribe_frames", TerminalSubscribeFramesArgs.ADAPTER, TerminalOperationResult.ADAPTER, TerminalError.ADAPTER, TerminalSubscribeFramesResponse.ADAPTER, List.of(new ChannelDescriptor(1, ChannelDescriptor.Direction.TX, "channel.arg.1.tx.element", TerminalFrameEvent.ADAPTER)));
+  public static final MethodDescriptor GET_CONTENT = new MethodDescriptor(0x6f1917e81fe9c050L, "get_content", TerminalGetContentArgs.ADAPTER, TerminalContentResult.ADAPTER, TerminalError.ADAPTER, TerminalGetContentResponse.ADAPTER, List.of());
+  public static final MethodDescriptor CANCEL = new MethodDescriptor(0x94967d6dfd5fa677L, "cancel", TerminalCancelArgs.ADAPTER, TerminalOperationResult.ADAPTER, TerminalError.ADAPTER, TerminalCancelResponse.ADAPTER, List.of());
+  public static final MethodDescriptor DISCONNECT = new MethodDescriptor(0xbabc04d89ee3e7a7L, "disconnect", TerminalDisconnectArgs.ADAPTER, TerminalOperationResult.ADAPTER, TerminalError.ADAPTER, TerminalDisconnectResponse.ADAPTER, List.of());
+  public static final ServiceDescriptor INSTANCE = new ServiceDescriptor("Terminal", List.of(CONNECT, CAPABILITIES, RESIZE, SEND_TEXT, SEND_KEY, SEND_MOUSE, SNAPSHOT, SUBSCRIBE_FRAMES, GET_CONTENT, CANCEL, DISCONNECT));
   private TerminalServiceDescriptor() {}
 }

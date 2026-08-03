@@ -15,15 +15,26 @@ working.
 
 ## Message shape
 
-The first slice is unary and intentionally avoids channels, file descriptors,
+Control operations remain unary and intentionally avoid file descriptors,
 dynamic values, and remote UI objects. `connect` negotiates capabilities and
 creates a session; `capabilities` and `resize` report the current session;
 `send_text`, `send_key`, and `send_mouse` carry input; `snapshot` returns the
-latest frame; and `cancel`/`disconnect` close the corresponding operation or
-session. Every request and response carries a session id and monotonic client
-or server sequence. Transport cancellation and disconnect remain Vox
-infrastructure outcomes; `TerminalError` is reserved for structured
-application errors.
+latest recovery frame; `subscribe_frames` opens a typed, request-scoped
+`Tx<TerminalFrameEvent>`; and `cancel`/`disconnect` close the corresponding
+operation or session. Every request and response carries a session id and
+monotonic client or server sequence. Transport cancellation and disconnect
+remain Vox infrastructure outcomes; `TerminalError` is reserved for
+structured application errors.
+
+The live path is push-based. Rust publishes immediately after PTY state
+mutation, bounded by Vox channel credit plus one newest pending full-state
+frame. Superseded pending work is coalesced before rendering where possible;
+no rendering or terminal lock is held while waiting for credit or transport.
+The first event is a full resynchronization. Java validates connection/session
+epochs and monotonic sequence numbers, keeps only the latest accepted frame,
+and uses unary `snapshot` only for bootstrap or recovery—not steady polling.
+Each event carries producer counters and mutation-to-send/credit-wait timing so
+latency and boundedness can be verified without relying on perception alone.
 
 `TerminalSnapshot.payload` is bounded bytes whose representation is selected
 by `TerminalFrameEncoding`: structured cells, RGBA8, BGRA8, or PNG. The
@@ -44,8 +55,9 @@ wire contract.
 
 ## Evidence
 
-- `vox/test-fixtures/terminal/terminal-contract-v1.json` records service,
-  method ids, DTO names, encodings, lifecycle states, and default bounds.
+- `vox/test-fixtures/terminal/terminal-contract-v1.json` remains the immutable
+  unary contract; `terminal-contract-v2.json` adds the typed subscription,
+  bounded coalescing invariants, epochs, and publication telemetry.
 - `spec-proto` tests round-trip a representative RGBA snapshot through Phon
   and verify every fixture method id.
 - The Java generator test compiles both the existing Review fixture and this

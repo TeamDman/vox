@@ -2,6 +2,7 @@
 // Regenerate with `cargo xtask codegen --java`.
 package org.facet.vox.generated;
 
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import org.facet.phon.*;
@@ -14,7 +15,7 @@ public final class TestbedClient {
   public CompletableFuture<String> echo(String message, CallOptions options) {
     try {
       byte[] encoded = PhonCodec.encode(TestbedEchoArgs.ADAPTER, new TestbedEchoArgs(message), PhonLimits.defaults());
-      return lane.call(TestbedServiceDescriptor.ECHO, encoded, options).thenApply(bytes -> {
+      return VoxFutures.mapCancellable(lane.call(TestbedServiceDescriptor.ECHO, encoded, options, List.of()), bytes -> {
         try {
           VoxResult<String, Void> result = PhonCodec.decode(TestbedEchoResponse.ADAPTER, bytes, PhonLimits.defaults());
           if (!result.isSuccess()) throw remoteFailure(result);
@@ -31,11 +32,28 @@ public final class TestbedClient {
   public CompletableFuture<VoxResult<Long, MathError>> divide(long dividend, long divisor, CallOptions options) {
     try {
       byte[] encoded = PhonCodec.encode(TestbedDivideArgs.ADAPTER, new TestbedDivideArgs(dividend, divisor), PhonLimits.defaults());
-      return lane.call(TestbedServiceDescriptor.DIVIDE, encoded, options).thenApply(bytes -> {
+      return VoxFutures.mapCancellable(lane.call(TestbedServiceDescriptor.DIVIDE, encoded, options, List.of()), bytes -> {
         try {
           VoxResult<Long, MathError> result = PhonCodec.decode(TestbedDivideResponse.ADAPTER, bytes, PhonLimits.defaults());
           if (result.isInfrastructureError()) throw remoteFailure(result);
           return result;
+        } catch (PhonException error) {
+          throw new CompletionException(error);
+        }
+      });
+    } catch (PhonException error) {
+      return CompletableFuture.failedFuture(error);
+    }
+  }
+  public CompletableFuture<Void> generateLarge(long count, VoxTx<Integer> output) { return generateLarge(count, output, CallOptions.defaults()); }
+  public CompletableFuture<Void> generateLarge(long count, VoxTx<Integer> output, CallOptions options) {
+    try {
+      byte[] encoded = PhonCodec.encode(TestbedGenerateLargeArgs.ADAPTER, new TestbedGenerateLargeArgs(count, output), PhonLimits.defaults());
+      return VoxFutures.mapCancellable(lane.call(TestbedServiceDescriptor.GENERATE_LARGE, encoded, options, List.of(VoxChannelArgument.tx(TestbedServiceDescriptor.GENERATE_LARGE.channels().get(0), output))), bytes -> {
+        try {
+          VoxResult<Void, Void> result = PhonCodec.decode(TestbedGenerateLargeResponse.ADAPTER, bytes, PhonLimits.defaults());
+          if (!result.isSuccess()) throw remoteFailure(result);
+          return result.success();
         } catch (PhonException error) {
           throw new CompletionException(error);
         }

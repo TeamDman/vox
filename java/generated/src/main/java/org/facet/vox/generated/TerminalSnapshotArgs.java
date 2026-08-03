@@ -3,8 +3,10 @@
 package org.facet.vox.generated;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import org.facet.phon.*;
+import org.facet.vox.*;
 
 public final class TerminalSnapshotArgs {
   private final TerminalSnapshotRequest request;

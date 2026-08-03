@@ -13,6 +13,9 @@ The current runtime implements:
 - finite outbound, lane, pending-request, frame, schema, and timeout bounds;
 - lane-owned request identifiers, correlation, cancellation, idle timeout,
   late-response discard, and terminal shutdown propagation;
+- request-scoped typed `Tx`/`Rx` channels with negotiated credit, bounded
+  queues, role-keyed auxiliary schemas, ordered close/reset propagation, and
+  cancellation that reaches both the request and its channels;
 - service descriptors, registries, dispatch interfaces, and exactly-once
   inbound response ownership; and
 - the hosted-subject process and socket lifecycle for the existing

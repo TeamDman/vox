@@ -1,14 +1,13 @@
 //! Rust-authoritative contract for the optional terminal presentation lane.
 //!
-//! The terminal service deliberately uses bounded, unary messages for the
-//! first Java/Rust slice.  A terminal frame is a byte payload with explicit
-//! dimensions and encoding; transport/runtime bounds cap its size before a
-//! decoder allocates.  The service does not require channels, file
-//! descriptors, or a remote UI toolkit, so Java can provide a local fallback
-//! when Vox is unavailable.
+//! The terminal service uses bounded unary control messages plus one typed,
+//! request-scoped frame channel. A terminal frame is a byte payload with
+//! explicit dimensions and encoding; transport/runtime bounds cap its size
+//! before a decoder allocates. Java can provide a local fallback when Vox is
+//! unavailable.
 
 use facet::Facet;
-use vox::service;
+use vox::{Tx, service};
 
 /// Terminal lifecycle and presentation service.
 #[service]
@@ -54,6 +53,14 @@ pub trait Terminal {
         &self,
         request: TerminalSnapshotRequest,
     ) -> Result<TerminalSnapshot, TerminalError>;
+
+    /// Push full latest-state frames until the request is cancelled, the
+    /// channel closes, or the terminal session ends.
+    async fn subscribe_frames(
+        &self,
+        request: TerminalSubscribeRequest,
+        frames: Tx<TerminalFrameEvent>,
+    ) -> Result<TerminalOperationResult, TerminalError>;
 
     /// Return the bounded visible terminal text for deterministic probes and
     /// accessibility/debug witnesses without requiring PNG interpretation.
@@ -240,6 +247,51 @@ pub struct TerminalSnapshotRequest {
     pub client_sequence: i64,
     #[facet(default)]
     pub correlation_id: String,
+}
+
+/// Opens one fresh request-scoped live-frame subscription.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalSubscribeRequest {
+    pub session_id: String,
+    pub after_terminal_sequence: i64,
+    pub max_frame_bytes: u32,
+    pub client_sequence: i64,
+    #[facet(default)]
+    pub correlation_id: String,
+}
+
+/// Bounded producer evidence attached to each pushed frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Facet)]
+pub struct TerminalPublicationTelemetry {
+    pub mutations: i64,
+    pub renders_started: i64,
+    pub renders_completed: i64,
+    pub pre_render_coalesced: i64,
+    pub credit_blocked_sends: i64,
+    pub frames_pushed: i64,
+    pub pending_depth: u8,
+    pub pending_depth_max: u8,
+    pub mutation_to_send_us: i64,
+    pub credit_wait_us: i64,
+}
+
+/// One authoritative terminal publication. Epochs are opaque and must only be
+/// compared for equality; sequences are monotonic within a session epoch.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalFrameEvent {
+    pub session_id: String,
+    pub connection_epoch: String,
+    pub session_epoch: String,
+    pub terminal_sequence: i64,
+    pub frame_sequence: i64,
+    pub full_resync: bool,
+    pub max_frame_bytes: u32,
+    pub backend_id: String,
+    pub transport_id: String,
+    pub correlation_id: String,
+    pub frame: TerminalSnapshot,
+    #[facet(default)]
+    pub publication: TerminalPublicationTelemetry,
 }
 
 /// Requests bounded visible-grid text, optionally after a known sequence.
@@ -571,8 +623,8 @@ mod tests {
         };
         let payload = vox_phon::to_vec(&Ok::<_, vox::VoxError<TerminalError>>(snapshot))
             .expect("encode terminal snapshot response");
-        let _: WireResponse = vox_phon::from_slice(&payload)
-            .expect("decode terminal snapshot response");
+        let _: WireResponse =
+            vox_phon::from_slice(&payload).expect("decode terminal snapshot response");
     }
 
     #[test]
@@ -644,20 +696,21 @@ mod tests {
             },
         });
         let payload = vox_phon::to_vec(&wire).expect("encode terminal content response");
-        let decoded: WireResponse = vox_phon::from_slice(&payload)
-            .expect("decode terminal content response");
-        assert!(matches!(decoded, Ok(TerminalContentResult { complete: true, .. })));
+        let decoded: WireResponse =
+            vox_phon::from_slice(&payload).expect("decode terminal content response");
+        assert!(matches!(
+            decoded,
+            Ok(TerminalContentResult { complete: true, .. })
+        ));
 
-        let error = Err::<TerminalContentResult, _>(vox::VoxError::User(Box::new(
-            TerminalError {
-                code: TerminalErrorCode::Internal,
-                message: "pty output unavailable".to_string(),
-                retryable: true,
-                server_sequence: 8,
-            },
-        )));
-        let error_payload = vox_phon::to_vec(&error)
-            .expect("encode terminal content application error");
+        let error = Err::<TerminalContentResult, _>(vox::VoxError::User(Box::new(TerminalError {
+            code: TerminalErrorCode::Internal,
+            message: "pty output unavailable".to_string(),
+            retryable: true,
+            server_sequence: 8,
+        })));
+        let error_payload =
+            vox_phon::to_vec(&error).expect("encode terminal content application error");
         let decoded_error: WireResponse = vox_phon::from_slice(&error_payload)
             .expect("decode terminal content application error");
         assert!(matches!(decoded_error, Err(vox::VoxError::User(error))
@@ -690,26 +743,47 @@ mod tests {
 
     #[test]
     fn terminal_contract_fixture_matches_method_ids_and_bounds() {
-        let fixture = include_str!(concat!(
+        let v1 = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../test-fixtures/terminal/terminal-contract-v1.json"
         ));
+        let v2 = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test-fixtures/terminal/terminal-contract-v2.json"
+        ));
         let service = terminal_service_descriptor();
         assert_eq!(service.service_name, "Terminal");
-        assert_eq!(service.methods.len(), 10);
+        assert_eq!(service.methods.len(), 11);
+        for method in service
+            .methods
+            .iter()
+            .filter(|method| method.method_name != "subscribe_frames")
+        {
+            let expected = format!(
+                "\"name\": \"{}\", \"id\": \"{:016x}\"",
+                method.method_name, method.id.0
+            );
+            assert!(
+                v1.contains(&expected),
+                "v1 fixture is missing immutable descriptor entry: {expected}"
+            );
+        }
         for method in service.methods {
             let expected = format!(
                 "\"name\": \"{}\", \"id\": \"{:016x}\"",
                 method.method_name, method.id.0
             );
             assert!(
-                fixture.contains(&expected),
-                "fixture is missing descriptor entry: {expected}"
+                v2.contains(&expected),
+                "v2 fixture is missing descriptor entry: {expected}"
             );
         }
-        assert!(fixture.contains("\"max_width\": 512"));
-        assert!(fixture.contains("\"max_height\": 256"));
-        assert!(fixture.contains("\"max_frame_bytes\": 16777216"));
-        assert!(fixture.contains("\"frame_fields\": [\"sequence\", \"request_sequence\", \"logical_dimensions\", \"pixel_dimensions\", \"surface_metrics\", \"correlation_id\", \"stride\", \"kind\", \"tile_bounds\", \"cursor\", \"selection\", \"prompt\", \"command_range\"]"));
+        assert!(v2.contains("\"role\": \"channel.arg.1.tx.element\""));
+        assert!(v2.contains("\"producer_pending_bound\": 1"));
+        assert!(v2.contains("\"coalescing\": \"newest-full-state-wins\""));
+        assert!(v2.contains("\"polling\": \"recovery-only\""));
+        assert!(v2.contains("\"max_width\": 512"));
+        assert!(v2.contains("\"max_height\": 256"));
+        assert!(v2.contains("\"max_frame_bytes\": 16777216"));
     }
 }

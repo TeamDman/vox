@@ -3,11 +3,11 @@
 package org.facet.vox.generated;
 
 import java.util.concurrent.CompletableFuture;
-import org.facet.vox.CallContext;
-import org.facet.vox.VoxResult;
+import org.facet.vox.*;
 
 public interface JavaFixtureHandler {
   CompletableFuture<String> echo(CallContext context, String value);
   CompletableFuture<NestedResponse> inspect(CallContext context, NestedRequest request);
   CompletableFuture<VoxResult<DivideResponse, DivideByZero>> divide(CallContext context, DivideRequest request);
+  CompletableFuture<String> generate(CallContext context, long count, VoxTx<String> output);
 }

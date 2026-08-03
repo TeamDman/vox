@@ -31,7 +31,8 @@ import org.facet.phon.Value;
  * <p>The stream and transport prologues are interoperable now. The subsequent self-describing
  * Phon handshake is an intentional integration seam until the Phon Java track lands.
  */
-public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCommands {
+public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCommands,
+        ChannelRuntime.Transport {
     private interface DriverCommand {}
     private static final class CallCommand implements DriverCommand {
         final ServiceLane.OutboundCall call;
@@ -52,6 +53,42 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
     private static final class OpenLaneCommand implements DriverCommand {
         final ServiceLane lane;
         OpenLaneCommand(ServiceLane lane) { this.lane = lane; }
+    }
+    private static final class ChannelItemCommand implements DriverCommand {
+        final long laneId;
+        final long channelId;
+        final byte[] payload;
+        ChannelItemCommand(long laneId, long channelId, byte[] payload) {
+            this.laneId = laneId;
+            this.channelId = channelId;
+            this.payload = payload.clone();
+        }
+    }
+    private static final class ChannelCloseCommand implements DriverCommand {
+        final long laneId;
+        final long channelId;
+        ChannelCloseCommand(long laneId, long channelId) {
+            this.laneId = laneId;
+            this.channelId = channelId;
+        }
+    }
+    private static final class ChannelResetCommand implements DriverCommand {
+        final long laneId;
+        final long channelId;
+        ChannelResetCommand(long laneId, long channelId) {
+            this.laneId = laneId;
+            this.channelId = channelId;
+        }
+    }
+    private static final class ChannelGrantCommand implements DriverCommand {
+        final long laneId;
+        final long channelId;
+        final int additional;
+        ChannelGrantCommand(long laneId, long channelId, int additional) {
+            this.laneId = laneId;
+            this.channelId = channelId;
+            this.additional = additional;
+        }
     }
     private static final class ReplyCommand implements DriverCommand {
         final long laneId;
@@ -80,6 +117,41 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
             this.call = call;
         }
     }
+    private record PeerSettings(
+            int maxConcurrentRequests, int initialChannelCredit, boolean odd) {}
+    private record InboundLane(ServiceDispatcher dispatcher, PeerSettings peerSettings) {}
+    private static final class ActiveChannel {
+        final String requestKey;
+        final MethodDescriptor method;
+        final ChannelDescriptor descriptor;
+        final ChannelRuntime.Sender<?> sender;
+        final ChannelRuntime.Receiver<?> receiver;
+        final ServiceLane.OutboundCall outboundCall;
+
+        ActiveChannel(
+                String requestKey,
+                MethodDescriptor method,
+                ChannelDescriptor descriptor,
+                ChannelRuntime.Sender<?> sender,
+                ChannelRuntime.Receiver<?> receiver,
+                ServiceLane.OutboundCall outboundCall) {
+            this.requestKey = requestKey;
+            this.method = method;
+            this.descriptor = descriptor;
+            this.sender = sender;
+            this.receiver = receiver;
+            this.outboundCall = outboundCall;
+        }
+
+        void progress() {
+            if (outboundCall != null) outboundCall.progress();
+        }
+
+        void terminate(VoxException reason) {
+            if (sender != null) sender.terminate(reason);
+            if (receiver != null) receiver.terminate(reason);
+        }
+    }
 
     private final Socket socket;
     private final boolean initiator;
@@ -94,12 +166,14 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
     private final AtomicBoolean laneIdsExhausted = new AtomicBoolean();
     private final List<ServiceLane> lanes = new ArrayList<>();
     private final Map<String, ServiceLane.OutboundCall> inFlight = new HashMap<>();
-    private final Map<Long, ServiceDispatcher> inboundLanes = new HashMap<>();
+    private final Map<Long, InboundLane> inboundLanes = new HashMap<>();
     private final Map<String, InboundRequest> inboundRequests = new HashMap<>();
     private final Map<String, SchemaClosure> receivedBindings = new HashMap<>();
     private final Set<String> sentBindings = new HashSet<>();
+    private final Map<String, ActiveChannel> activeChannels = new HashMap<>();
     private final CompletableFuture<Void> closed = new CompletableFuture<>();
     private volatile int peerMaxConcurrentRequests = 1;
+    private volatile int peerInitialChannelCredit = 16;
 
     private VoxConnection(
             Socket socket,
@@ -189,7 +263,8 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
                     laneOptions,
                     LaneState.OPENING,
                     1,
-                    peerMaxConcurrentRequests);
+                    peerMaxConcurrentRequests,
+                    peerInitialChannelCredit);
             lanes.add(lane);
             if (!commands.offer(new OpenLaneCommand(lane))) {
                 lanes.remove(lane);
@@ -247,6 +322,38 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
         return false;
     }
 
+    @Override
+    public boolean item(long laneId, long channelId, byte[] payload) {
+        Objects.requireNonNull(payload, "payload");
+        int bytes = payload.length;
+        for (;;) {
+            int current = queuedBytes.get();
+            if (bytes > options.maxQueuedOutboundBytes() - current) return false;
+            if (queuedBytes.compareAndSet(current, current + bytes)) break;
+        }
+        if (commands.offer(new ChannelItemCommand(laneId, channelId, payload))) return true;
+        queuedBytes.addAndGet(-bytes);
+        return false;
+    }
+
+    @Override public boolean close(long laneId, long channelId) {
+        return offerControl(new ChannelCloseCommand(laneId, channelId));
+    }
+
+    @Override public boolean reset(long laneId, long channelId) {
+        return offerControl(new ChannelResetCommand(laneId, channelId));
+    }
+
+    @Override public boolean grant(long laneId, long channelId, int additional) {
+        return offerControl(new ChannelGrantCommand(laneId, channelId, additional));
+    }
+
+    private boolean offerControl(DriverCommand command) {
+        if (commands.offer(command)) return true;
+        fail(new VoxException("outbound channel control queue is full"));
+        return false;
+    }
+
     private void driveOwned() throws IOException, VoxException {
         try {
             if (!state.compareAndSet(ConnectionState.NEW, ConnectionState.TRANSPORT_NEGOTIATING)) {
@@ -291,9 +398,10 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
                 throw new VoxException("expected HelloYourself, got " + variant);
             }
             Value helloYourself = WireCodec.variantPayload(response);
-            peerMaxConcurrentRequests =
-                    validatePeerSettings(
-                            WireCodec.required(helloYourself, "connection_settings"));
+            PeerSettings peer = validatePeerSettings(
+                    WireCodec.required(helloYourself, "connection_settings"));
+            peerMaxConcurrentRequests = peer.maxConcurrentRequests();
+            peerInitialChannelCredit = peer.initialChannelCredit();
             codec.bindPeerMessageSchema(
                     WireCodec.byteList(
                             WireCodec.required(helloYourself, "message_payload_schema")));
@@ -304,8 +412,10 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
                 throw new VoxException("expected Hello, got " + WireCodec.variant(request));
             }
             Value hello = WireCodec.variantPayload(request);
-            peerMaxConcurrentRequests =
-                    validatePeerSettings(WireCodec.required(hello, "connection_settings"));
+            PeerSettings peer = validatePeerSettings(
+                    WireCodec.required(hello, "connection_settings"));
+            peerMaxConcurrentRequests = peer.maxConcurrentRequests();
+            peerInitialChannelCredit = peer.initialChannelCredit();
             codec.bindPeerMessageSchema(
                     WireCodec.byteList(
                             WireCodec.required(hello, "message_payload_schema")));
@@ -362,7 +472,14 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
                 framing.writeFrame(codec.encodeMessage(
                         call.call.laneId,
                         codec.schemaMessage(
-                                call.call.method.id(), WireCodec.Direction.ARGS, schemas)));
+                            call.call.method.id(), WireCodec.Direction.ARGS, schemas)));
+            }
+            List<Long> channelIds;
+            try {
+                channelIds = bindOutboundChannels(call.call);
+            } catch (VoxException failure) {
+                call.call.fail(failure);
+                return;
             }
             inFlight.put(requestKey(call.call.laneId, call.call.requestId), call.call);
             dlog("send RequestCall lane=" + Long.toUnsignedString(call.call.laneId)
@@ -373,14 +490,45 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
                             call.call.requestId,
                             call.call.method.id(),
                             call.call.arguments,
+                            channelIds,
                             call.call.options.metadata())));
         } else if (command instanceof CloseLaneCommand close) {
             framing.writeFrame(codec.encodeMessage(close.laneId, codec.laneClose()));
         } else if (command instanceof CancelCommand cancel) {
             framing.writeFrame(codec.encodeMessage(
                     cancel.laneId, codec.requestCancel(cancel.requestId)));
+            terminateRequestChannels(
+                    requestKey(cancel.laneId, cancel.requestId),
+                    new VoxException("local request cancelled"));
         } else if (command instanceof ReplyCommand reply) {
             processReply(reply, framing, codec);
+        } else if (command instanceof ChannelItemCommand item) {
+            queuedBytes.addAndGet(-item.payload.length);
+            ActiveChannel channel = requireActiveChannel(item.laneId, item.channelId);
+            channel.progress();
+            ensureArgsSchema(channel.method, item.laneId, framing, codec);
+            framing.writeFrame(codec.encodeMessage(
+                    item.laneId, codec.channelItem(item.channelId, item.payload)));
+        } else if (command instanceof ChannelCloseCommand close) {
+            requireActiveChannel(close.laneId, close.channelId).progress();
+            framing.writeFrame(codec.encodeMessage(
+                    close.laneId, codec.channelClose(close.channelId)));
+            activeChannels.remove(channelKey(close.laneId, close.channelId));
+        } else if (command instanceof ChannelResetCommand reset) {
+            requireActiveChannel(reset.laneId, reset.channelId).progress();
+            framing.writeFrame(codec.encodeMessage(
+                    reset.laneId, codec.channelReset(reset.channelId)));
+            ActiveChannel removed = activeChannels.remove(channelKey(reset.laneId, reset.channelId));
+            if (removed != null) removed.terminate(new VoxException("local receiver reset channel"));
+        } else if (command instanceof ChannelGrantCommand grant) {
+            ActiveChannel active = activeChannels.get(channelKey(grant.laneId, grant.channelId));
+            // A receive can queue replenishment just before an already-in-flight
+            // remote Close is observed. Credit after graceful close is useless,
+            // so drop that local race instead of failing the whole connection.
+            if (active == null) return;
+            active.progress();
+            framing.writeFrame(codec.encodeMessage(
+                    grant.laneId, codec.channelGrant(grant.channelId, grant.additional)));
         }
     }
 
@@ -394,9 +542,12 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
         Value body = WireCodec.variantPayload(payload);
         switch (variant) {
             case "LaneOpen" -> processInboundLaneOpen(laneId, body, framing, codec);
-            case "LaneAccept" -> requireLane(laneId).markOpen(
-                    validatePeerSettings(
-                            WireCodec.required(body, "connection_settings"), false));
+            case "LaneAccept" -> {
+                PeerSettings peer = validatePeerSettings(
+                        WireCodec.required(body, "connection_settings"), null);
+                requireLane(laneId).markOpen(
+                        peer.maxConcurrentRequests(), peer.initialChannelCredit());
+            }
             case "LaneReject" -> requireLane(laneId).terminate(
                     new VoxException("peer rejected service lane"), LaneState.FAILED);
             case "SchemaMessage" -> {
@@ -416,6 +567,7 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
                                 WireCodec.required(body, "schemas"))));
             }
             case "RequestMessage" -> processInboundRequest(laneId, body, codec);
+            case "ChannelMessage" -> processInboundChannel(laneId, body);
             case "LaneClose" -> processLaneClose(laneId);
             default -> throw new VoxException(
                     "unsupported Java wire message " + variant);
@@ -436,6 +588,8 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
             InboundRequest inbound =
                     inboundRequests.remove(requestKey(laneId, requestId));
             if (inbound != null) inbound.context.cancel();
+            terminateRequestChannels(
+                    requestKey(laneId, requestId), new VoxException("request cancelled"));
             return;
         }
         if (!"Response".equals(variant)) {
@@ -443,6 +597,9 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
         }
         ServiceLane.OutboundCall call = inFlight.remove(requestKey(laneId, requestId));
         if (call == null) return; // Late response after cancellation/timeout.
+        terminateRequestChannels(
+                requestKey(laneId, requestId),
+                new VoxException("request completed before channel closed"));
         Value response = WireCodec.variantPayload(requestBody);
         byte[] encoded = WireCodec.required(response, "ret").asBytes();
         SchemaClosure writer = receivedBindings.get(
@@ -464,7 +621,8 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
             throw new VoxException(
                     "peer opened lane with invalid parity " + Long.toUnsignedString(laneId));
         }
-        validatePeerSettings(WireCodec.required(open, "connection_settings"), true);
+        PeerSettings peerSettings = validatePeerSettings(
+                WireCodec.required(open, "connection_settings"), null);
         if (inboundLanes.containsKey(laneId) || hasOutboundLane(laneId)) {
             throw new VoxException("duplicate lane " + Long.toUnsignedString(laneId));
         }
@@ -486,31 +644,48 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
                     laneId, codec.laneReject("unknown-service")));
             return;
         }
-        inboundLanes.put(laneId, dispatcher);
+        inboundLanes.put(laneId, new InboundLane(dispatcher, peerSettings));
         framing.writeFrame(codec.encodeMessage(laneId, codec.laneAccept()));
     }
 
     private void processInboundCall(
             long laneId, long requestId, Value body, WireCodec codec)
             throws VoxException {
-        ServiceDispatcher dispatcher = inboundLanes.get(laneId);
-        if (dispatcher == null) {
+        InboundLane inboundLane = inboundLanes.get(laneId);
+        if (inboundLane == null) {
             throw new VoxException(
                     "call for unopened inbound lane " + Long.toUnsignedString(laneId));
         }
-        if ((requestId & 1L) == 0) {
+        boolean expectedOdd = inboundLane.peerSettings().odd();
+        if ((requestId & 1L) != (expectedOdd ? 1L : 0L)) {
             throw new VoxException(
-                    "inbound request id violates opener's odd parity: "
+                    "inbound request id violates opener's negotiated parity: "
                             + Long.toUnsignedString(requestId));
         }
-        if (!WireCodec.required(body, "channels").asList().isEmpty()) {
-            throw new VoxException("channels are outside the Java unary slice");
-        }
+        ServiceDispatcher dispatcher = inboundLane.dispatcher();
+        List<Value> channelValues = WireCodec.required(body, "channels").asList();
         long methodId = WireCodec.unsignedLong(WireCodec.required(body, "method_id"));
         MethodDescriptor method = dispatcher.descriptor().method(methodId);
         if (method == null) {
             throw new VoxException(
                     "unknown method " + Long.toUnsignedString(methodId));
+        }
+        if (channelValues.size() != method.channels().size()) {
+            throw new VoxException("request channel count does not match method descriptor");
+        }
+        List<Long> channelIds = new ArrayList<>(channelValues.size());
+        Set<Long> uniqueChannelIds = new HashSet<>();
+        for (Value value : channelValues) {
+            long channelId = WireCodec.unsignedLong(value);
+            if (channelId == 0
+                    || (channelId & 1L) != (expectedOdd ? 1L : 0L)) {
+                throw new VoxException("inbound channel id violates caller parity: "
+                        + Long.toUnsignedString(channelId));
+            }
+            if (!uniqueChannelIds.add(channelId)) {
+                throw new VoxException("duplicate channel id " + Long.toUnsignedString(channelId));
+            }
+            channelIds.add(channelId);
         }
         Value inlineSchemas = WireCodec.required(body, "schemas");
         if (!inlineSchemas.asList().isEmpty()) {
@@ -538,6 +713,9 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
                 requestId,
                 laneId,
                 metadataStrings(WireCodec.required(body, "metadata")));
+        List<Object> channelEndpoints = bindInboundChannels(
+                laneId, requestId, method, channelIds,
+                inboundLane.peerSettings().initialChannelCredit());
         InboundCall call = new InboundCall(
                 requestId,
                 method,
@@ -555,7 +733,8 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
                         enqueueReply(new ReplyCommand(
                                 laneId, requestId, method, null, failure));
                     }
-                });
+                },
+                channelEndpoints);
         inboundRequests.put(key, new InboundRequest(context, call));
         try {
             options.handlerExecutor().execute(() -> {
@@ -588,6 +767,8 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
         InboundRequest inbound =
                 inboundRequests.remove(requestKey(reply.laneId, reply.requestId));
         if (inbound == null) return;
+        finishInboundRequestChannels(
+                requestKey(reply.laneId, reply.requestId), reply.laneId, framing, codec);
         byte[] response = reply.response;
         if (reply.failure != null) {
             response = encodeInfrastructureFailure(reply.method, reply.failure);
@@ -608,6 +789,205 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
         framing.writeFrame(codec.encodeMessage(
                 reply.laneId,
                 codec.requestResponse(reply.requestId, response)));
+    }
+
+    private List<Long> bindOutboundChannels(ServiceLane.OutboundCall call) throws VoxException {
+        if (call.channels.isEmpty()) return List.of();
+        ArrayList<Long> ids = new ArrayList<>(call.channels.size());
+        String request = requestKey(call.laneId, call.requestId);
+        for (VoxChannelArgument argument : call.channels) {
+            long channelId = call.allocateChannelId();
+            bindOutboundChannel(
+                    call, request, call.laneId, channelId, call.method,
+                    argument.descriptor(), argument.endpoint());
+            ids.add(channelId);
+        }
+        return List.copyOf(ids);
+    }
+
+    @SuppressWarnings("unchecked")
+    private <T> void bindOutboundChannel(
+            ServiceLane.OutboundCall call,
+            String request,
+            long laneId,
+            long channelId,
+            MethodDescriptor method,
+            ChannelDescriptor descriptor,
+            Object endpoint) throws VoxException {
+        org.facet.phon.PhonAdapter<T> adapter =
+                (org.facet.phon.PhonAdapter<T>) descriptor.elementAdapter();
+        ChannelRuntime.Sender<T> sender = null;
+        ChannelRuntime.Receiver<T> receiver = null;
+        if (descriptor.direction() == ChannelDescriptor.Direction.TX) {
+            if (!(endpoint instanceof VoxTx<?> tx)) {
+                throw new VoxException("Tx descriptor received non-Tx endpoint");
+            }
+            receiver = new ChannelRuntime.Receiver<>(
+                    laneId, channelId, adapter, this, options.initialChannelCredit());
+            ((VoxTx<T>) tx).core().bindReceiver(receiver);
+        } else {
+            if (!(endpoint instanceof VoxRx<?> rx)) {
+                throw new VoxException("Rx descriptor received non-Rx endpoint");
+            }
+            sender = new ChannelRuntime.Sender<>(
+                    laneId, channelId, adapter, this, call.peerInitialChannelCredit());
+            ((VoxRx<T>) rx).core().bindSender(sender);
+        }
+        String key = channelKey(laneId, channelId);
+        if (activeChannels.put(key,
+                new ActiveChannel(request, method, descriptor, sender, receiver, call)) != null) {
+            throw new VoxException("duplicate active channel " + key);
+        }
+    }
+
+    private List<Object> bindInboundChannels(
+            long laneId,
+            long requestId,
+            MethodDescriptor method,
+            List<Long> ids,
+            int peerInitialChannelCredit)
+            throws VoxException {
+        ArrayList<Object> endpoints = new ArrayList<>(ids.size());
+        String request = requestKey(laneId, requestId);
+        for (int index = 0; index < ids.size(); index++) {
+            endpoints.add(bindInboundChannel(
+                    request, laneId, ids.get(index), method, method.channels().get(index),
+                    peerInitialChannelCredit));
+        }
+        return List.copyOf(endpoints);
+    }
+
+    @SuppressWarnings("unchecked")
+    private <T> Object bindInboundChannel(
+            String request,
+            long laneId,
+            long channelId,
+            MethodDescriptor method,
+            ChannelDescriptor descriptor,
+            int peerInitialChannelCredit) throws VoxException {
+        org.facet.phon.PhonAdapter<T> adapter =
+                (org.facet.phon.PhonAdapter<T>) descriptor.elementAdapter();
+        ChannelRuntime.Core<T> core = new ChannelRuntime.Core<>(adapter);
+        ChannelRuntime.Sender<T> sender = null;
+        ChannelRuntime.Receiver<T> receiver = null;
+        Object endpoint;
+        if (descriptor.direction() == ChannelDescriptor.Direction.TX) {
+            sender = new ChannelRuntime.Sender<>(
+                    laneId, channelId, adapter, this, peerInitialChannelCredit);
+            core.bindSender(sender);
+            endpoint = new VoxTx<>(core);
+        } else {
+            receiver = new ChannelRuntime.Receiver<>(
+                    laneId, channelId, adapter, this, options.initialChannelCredit());
+            core.bindReceiver(receiver);
+            endpoint = new VoxRx<>(core);
+        }
+        String key = channelKey(laneId, channelId);
+        if (activeChannels.put(key,
+                new ActiveChannel(request, method, descriptor, sender, receiver, null)) != null) {
+            throw new VoxException("duplicate active channel " + key);
+        }
+        return endpoint;
+    }
+
+    private void processInboundChannel(long laneId, Value channel) throws VoxException {
+        long channelId = WireCodec.unsignedLong(WireCodec.required(channel, "id"));
+        Value body = WireCodec.required(channel, "body");
+        String variant = WireCodec.variant(body);
+        ActiveChannel active = requireActiveChannel(laneId, channelId);
+        active.progress();
+        switch (variant) {
+            case "Item" -> {
+                if (active.receiver == null) {
+                    throw new VoxException("peer sent item on locally-sending channel");
+                }
+                SchemaClosure binding = receivedBindings.get(
+                        bindingKey(active.method.id(), WireCodec.Direction.ARGS));
+                if (binding == null) {
+                    throw new VoxException("channel item arrived before argument schema binding");
+                }
+                SchemaClosure writer;
+                try {
+                    writer = binding.auxiliary(active.descriptor.role());
+                } catch (org.facet.phon.PhonException failure) {
+                    throw new VoxException("invalid channel auxiliary schema", failure);
+                }
+                if (writer == null) {
+                    throw new VoxException("missing channel auxiliary schema "
+                            + active.descriptor.role());
+                }
+                Value item = WireCodec.variantPayload(body);
+                receiveItem(active.receiver, WireCodec.required(item, "item").asBytes(), writer);
+            }
+            case "Close" -> {
+                if (active.receiver == null) {
+                    throw new VoxException("peer closed locally-sending channel");
+                }
+                active.receiver.closeGracefully();
+                activeChannels.remove(channelKey(laneId, channelId));
+            }
+            case "Reset" -> {
+                if (active.sender == null) {
+                    throw new VoxException("peer reset locally-receiving channel");
+                }
+                active.sender.terminate(new VoxException("peer reset channel"));
+                activeChannels.remove(channelKey(laneId, channelId));
+            }
+            case "GrantCredit" -> {
+                if (active.sender == null) {
+                    throw new VoxException("peer granted credit to locally-receiving channel");
+                }
+                long additional = WireCodec.unsignedLong(
+                        WireCodec.required(WireCodec.variantPayload(body), "additional"));
+                if (additional == 0 || additional > Integer.MAX_VALUE) {
+                    throw new VoxException("invalid channel credit " + additional);
+                }
+                active.sender.grant((int) additional);
+            }
+            default -> throw new VoxException("unsupported channel message " + variant);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T> void receiveItem(
+            ChannelRuntime.Receiver<?> receiver, byte[] payload, SchemaClosure writer)
+            throws VoxException {
+        ((ChannelRuntime.Receiver<T>) receiver).item(payload, writer);
+    }
+
+    private void ensureArgsSchema(
+            MethodDescriptor method, long laneId, StreamFraming framing, WireCodec codec)
+            throws IOException, VoxException {
+        String binding = bindingKey(method.id(), WireCodec.Direction.ARGS);
+        if (!sentBindings.add(binding)) return;
+        try {
+            framing.writeFrame(codec.encodeMessage(
+                    laneId,
+                    codec.schemaMessage(
+                            method.id(), WireCodec.Direction.ARGS,
+                            method.argumentAdapter().schema().bundleBytes())));
+        } catch (org.facet.phon.PhonException failure) {
+            throw new VoxException("cannot encode channel schema binding", failure);
+        }
+    }
+
+    private ActiveChannel requireActiveChannel(long laneId, long channelId) throws VoxException {
+        ActiveChannel channel = activeChannels.get(channelKey(laneId, channelId));
+        if (channel == null) {
+            throw new VoxException("message for unknown channel "
+                    + Long.toUnsignedString(laneId) + ":" + Long.toUnsignedString(channelId));
+        }
+        return channel;
+    }
+
+    private void terminateRequestChannels(String request, VoxException reason) {
+        for (Map.Entry<String, ActiveChannel> entry :
+                new ArrayList<>(activeChannels.entrySet())) {
+            if (entry.getValue().requestKey.equals(request)) {
+                ActiveChannel removed = activeChannels.remove(entry.getKey());
+                if (removed != null) removed.terminate(reason);
+            }
+        }
     }
 
     @SuppressWarnings({"rawtypes", "unchecked"})
@@ -631,13 +1011,14 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
     }
 
     private void processLaneClose(long laneId) throws VoxException {
-        ServiceDispatcher inbound = inboundLanes.remove(laneId);
+        InboundLane inbound = inboundLanes.remove(laneId);
         if (inbound != null) {
             cancelInboundLane(laneId);
             return;
         }
         requireLane(laneId).terminate(
                 new VoxException("peer closed service lane"), LaneState.CLOSED);
+        terminateLaneChannels(laneId, new VoxException("peer closed service lane"));
     }
 
     private void cancelInboundLane(long laneId) {
@@ -647,6 +1028,41 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
                 entry.getValue().context.cancel();
                 inboundRequests.remove(entry.getKey());
             }
+        }
+        terminateLaneChannels(laneId, new VoxException("service lane closed"));
+    }
+
+    private void finishInboundRequestChannels(
+            String request, long laneId, StreamFraming framing, WireCodec codec)
+            throws IOException, VoxException {
+        for (Map.Entry<String, ActiveChannel> entry :
+                new ArrayList<>(activeChannels.entrySet())) {
+            ActiveChannel active = entry.getValue();
+            if (!active.requestKey.equals(request)) continue;
+            if (active.sender != null) {
+                ensureArgsSchema(active.method, laneId, framing, codec);
+                framing.writeFrame(codec.encodeMessage(
+                        laneId,
+                        codec.channelClose(parseChannelId(entry.getKey()))));
+            } else {
+                framing.writeFrame(codec.encodeMessage(
+                        laneId,
+                        codec.channelReset(parseChannelId(entry.getKey()))));
+            }
+            ActiveChannel removed = activeChannels.remove(entry.getKey());
+            if (removed != null) {
+                removed.terminate(new VoxException("request scope completed"));
+            }
+        }
+    }
+
+    private void terminateLaneChannels(long laneId, VoxException reason) {
+        String prefix = Long.toUnsignedString(laneId) + ":";
+        for (Map.Entry<String, ActiveChannel> entry :
+                new ArrayList<>(activeChannels.entrySet())) {
+            if (!entry.getKey().startsWith(prefix)) continue;
+            ActiveChannel removed = activeChannels.remove(entry.getKey());
+            if (removed != null) removed.terminate(reason);
         }
     }
 
@@ -708,18 +1124,23 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
         return frame;
     }
 
-    private int validatePeerSettings(Value settings) throws VoxException {
+    private PeerSettings validatePeerSettings(Value settings) throws VoxException {
         return validatePeerSettings(settings, !initiator);
     }
 
-    private int validatePeerSettings(Value settings, boolean expectedOdd)
+    private PeerSettings validatePeerSettings(Value settings, Boolean expectedOdd)
             throws VoxException {
         long credit = WireCodec.unsignedLong(
                 WireCodec.required(settings, "initial_channel_credit"));
         if (credit == 0) throw new VoxException("initial_channel_credit must be nonzero");
         String parity = WireCodec.variant(WireCodec.required(settings, "parity"));
-        String expected = expectedOdd ? "Odd" : "Even";
-        if (!expected.equals(parity)) {
+        boolean odd = switch (parity) {
+            case "Odd" -> true;
+            case "Even" -> false;
+            default -> throw new VoxException("invalid peer parity " + parity);
+        };
+        if (expectedOdd != null && expectedOdd.booleanValue() != odd) {
+            String expected = expectedOdd ? "Odd" : "Even";
             throw new VoxException(
                     "peer advertised " + parity + " parity; expected " + expected);
         }
@@ -728,7 +1149,10 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
         if (maximum == 0 || maximum > Integer.MAX_VALUE) {
             throw new VoxException("invalid peer max_concurrent_requests " + maximum);
         }
-        return (int) maximum;
+        if (credit > Integer.MAX_VALUE) {
+            throw new VoxException("invalid initial_channel_credit " + credit);
+        }
+        return new PeerSettings((int) maximum, (int) credit, odd);
     }
 
     private synchronized long allocateLaneId() {
@@ -751,6 +1175,14 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
 
     private static String requestKey(long laneId, long requestId) {
         return Long.toUnsignedString(laneId) + ":" + Long.toUnsignedString(requestId);
+    }
+
+    private static String channelKey(long laneId, long channelId) {
+        return Long.toUnsignedString(laneId) + ":" + Long.toUnsignedString(channelId);
+    }
+
+    private static long parseChannelId(String key) {
+        return Long.parseUnsignedLong(key.substring(key.indexOf(':') + 1));
     }
 
     private static void dlog(String message) {
@@ -779,11 +1211,19 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
             if (command instanceof CallCommand call) {
                 queuedBytes.addAndGet(-call.call.arguments.length);
                 call.call.fail(failure);
+            } else if (command instanceof ChannelItemCommand item) {
+                queuedBytes.addAndGet(-item.payload.length);
             }
         }
     }
 
     private void terminateLanes(Throwable failure, LaneState terminal) {
+        VoxException channelFailure = failure instanceof VoxException vox
+                ? vox : new VoxException("connection terminated", failure);
+        for (ActiveChannel channel : new ArrayList<>(activeChannels.values())) {
+            channel.terminate(channelFailure);
+        }
+        activeChannels.clear();
         synchronized (lanes) {
             for (ServiceLane lane : lanes) {
                 lane.terminate(failure, terminal);

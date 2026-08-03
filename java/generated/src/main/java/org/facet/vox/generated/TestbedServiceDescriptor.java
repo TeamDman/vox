@@ -3,12 +3,12 @@
 package org.facet.vox.generated;
 
 import java.util.List;
-import org.facet.vox.MethodDescriptor;
-import org.facet.vox.ServiceDescriptor;
+import org.facet.vox.*;
 
 public final class TestbedServiceDescriptor {
-  public static final MethodDescriptor ECHO = new MethodDescriptor(0x880bc4eee23574beL, "echo", TestbedEchoArgs.ADAPTER, PrimitiveAdapters.STRING, null, TestbedEchoResponse.ADAPTER);
-  public static final MethodDescriptor DIVIDE = new MethodDescriptor(0xfb68d9318f830875L, "divide", TestbedDivideArgs.ADAPTER, PrimitiveAdapters.I64, MathError.ADAPTER, TestbedDivideResponse.ADAPTER);
-  public static final ServiceDescriptor INSTANCE = new ServiceDescriptor("Testbed", List.of(ECHO, DIVIDE));
+  public static final MethodDescriptor ECHO = new MethodDescriptor(0x880bc4eee23574beL, "echo", TestbedEchoArgs.ADAPTER, PrimitiveAdapters.STRING, null, TestbedEchoResponse.ADAPTER, List.of());
+  public static final MethodDescriptor DIVIDE = new MethodDescriptor(0xfb68d9318f830875L, "divide", TestbedDivideArgs.ADAPTER, PrimitiveAdapters.I64, MathError.ADAPTER, TestbedDivideResponse.ADAPTER, List.of());
+  public static final MethodDescriptor GENERATE_LARGE = new MethodDescriptor(0x8edfbd65d162f685L, "generate_large", TestbedGenerateLargeArgs.ADAPTER, PrimitiveAdapters.UNIT, null, TestbedGenerateLargeResponse.ADAPTER, List.of(new ChannelDescriptor(1, ChannelDescriptor.Direction.TX, "channel.arg.1.tx.element", PrimitiveAdapters.I32)));
+  public static final ServiceDescriptor INSTANCE = new ServiceDescriptor("Testbed", List.of(ECHO, DIVIDE, GENERATE_LARGE));
   private TestbedServiceDescriptor() {}
 }

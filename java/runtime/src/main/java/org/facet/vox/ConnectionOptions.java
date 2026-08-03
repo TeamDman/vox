@@ -15,6 +15,7 @@ public final class ConnectionOptions {
     private final int maxOpenLanes;
     private final int maxSchemaBytes;
     private final int maxSchemas;
+    private final int initialChannelCredit;
     private final Duration handshakeTimeout;
     private final Duration idleTimeout;
     private final Duration closeTimeout;
@@ -31,6 +32,7 @@ public final class ConnectionOptions {
         maxOpenLanes = positive(builder.maxOpenLanes, "maxOpenLanes");
         maxSchemaBytes = positive(builder.maxSchemaBytes, "maxSchemaBytes");
         maxSchemas = positive(builder.maxSchemas, "maxSchemas");
+        initialChannelCredit = positive(builder.initialChannelCredit, "initialChannelCredit");
         handshakeTimeout = positive(builder.handshakeTimeout, "handshakeTimeout");
         idleTimeout = positive(builder.idleTimeout, "idleTimeout");
         closeTimeout = positive(builder.closeTimeout, "closeTimeout");
@@ -63,6 +65,7 @@ public final class ConnectionOptions {
     public int maxOpenLanes() { return maxOpenLanes; }
     public int maxSchemaBytes() { return maxSchemaBytes; }
     public int maxSchemas() { return maxSchemas; }
+    public int initialChannelCredit() { return initialChannelCredit; }
     public Duration handshakeTimeout() { return handshakeTimeout; }
     public Duration idleTimeout() { return idleTimeout; }
     public Duration closeTimeout() { return closeTimeout; }
@@ -96,6 +99,7 @@ public final class ConnectionOptions {
         private int maxOpenLanes = 128;
         private int maxSchemaBytes = 4 * 1024 * 1024;
         private int maxSchemas = 4_096;
+        private int initialChannelCredit = 16;
         private Duration handshakeTimeout = Duration.ofSeconds(10);
         private Duration idleTimeout = Duration.ofSeconds(30);
         private Duration closeTimeout = Duration.ofSeconds(5);
@@ -109,6 +113,7 @@ public final class ConnectionOptions {
         public Builder maxOpenLanes(int value) { maxOpenLanes = value; return this; }
         public Builder maxSchemaBytes(int value) { maxSchemaBytes = value; return this; }
         public Builder maxSchemas(int value) { maxSchemas = value; return this; }
+        public Builder initialChannelCredit(int value) { initialChannelCredit = value; return this; }
         public Builder handshakeTimeout(Duration value) { handshakeTimeout = value; return this; }
         public Builder idleTimeout(Duration value) { idleTimeout = value; return this; }
         public Builder closeTimeout(Duration value) { closeTimeout = value; return this; }

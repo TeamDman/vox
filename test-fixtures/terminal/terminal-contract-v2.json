@@ -1,0 +1,35 @@
+{
+  "version": 2,
+  "extends": "terminal-contract-v1.json",
+  "service": "Terminal",
+  "methods": [
+    {"name": "connect", "id": "9e81b88f62f1eb60", "request": "TerminalConnectRequest", "success": "TerminalConnectResult", "error": "TerminalError"},
+    {"name": "capabilities", "id": "56523a97a4da5b64", "request": "TerminalCapabilitiesRequest", "success": "TerminalCapabilitiesResult", "error": "TerminalError"},
+    {"name": "resize", "id": "ffd4c5752861fc1f", "request": "TerminalResizeRequest", "success": "TerminalResizeResult", "error": "TerminalError"},
+    {"name": "send_text", "id": "a0f86a8a39ae0dcb", "request": "TerminalTextInput", "success": "TerminalInputResult", "error": "TerminalError"},
+    {"name": "send_key", "id": "e0e1cb7a111dc0c7", "request": "TerminalKeyInput", "success": "TerminalInputResult", "error": "TerminalError"},
+    {"name": "send_mouse", "id": "fd17ea461870349a", "request": "TerminalMouseInput", "success": "TerminalInputResult", "error": "TerminalError"},
+    {"name": "snapshot", "id": "4648749132a0ebb8", "request": "TerminalSnapshotRequest", "success": "TerminalSnapshot", "error": "TerminalError"},
+    {"name": "subscribe_frames", "id": "4f1b9f66093e3e90", "request": "TerminalSubscribeRequest", "channel": {"argument": 1, "direction": "tx", "role": "channel.arg.1.tx.element", "element": "TerminalFrameEvent"}, "success": "TerminalOperationResult", "error": "TerminalError"},
+    {"name": "get_content", "id": "6f1917e81fe9c050", "request": "TerminalContentRequest", "success": "TerminalContentResult", "error": "TerminalError"},
+    {"name": "cancel", "id": "94967d6dfd5fa677", "request": "TerminalCancelRequest", "success": "TerminalOperationResult", "error": "TerminalError"},
+    {"name": "disconnect", "id": "babc04d89ee3e7a7", "request": "TerminalDisconnectRequest", "success": "TerminalOperationResult", "error": "TerminalError"}
+  ],
+  "subscription": {
+    "scope": "request",
+    "delivery": "bounded-credit",
+    "producer_pending_bound": 1,
+    "coalescing": "newest-full-state-wins",
+    "initial_event": "full-resync",
+    "sequence_scope": "session-epoch",
+    "epochs": ["connection_epoch", "session_epoch"],
+    "terminal_event": "pty-state-mutation",
+    "polling": "recovery-only"
+  },
+  "frame_event_fields": ["session_id", "connection_epoch", "session_epoch", "terminal_sequence", "frame_sequence", "full_resync", "max_frame_bytes", "backend_id", "transport_id", "correlation_id", "frame", "publication"],
+  "publication_telemetry_fields": ["mutations", "renders_started", "renders_completed", "pre_render_coalesced", "credit_blocked_sends", "frames_pushed", "pending_depth", "pending_depth_max", "mutation_to_send_us", "credit_wait_us"],
+  "frame_encodings": ["StructuredCells", "Rgba8", "Bgra8", "Png"],
+  "frame_fields": ["sequence", "request_sequence", "logical_dimensions", "pixel_dimensions", "surface_metrics", "correlation_id", "stride", "kind", "tile_bounds", "cursor", "selection", "prompt", "command_range"],
+  "states": ["Ready", "Closing", "Closed", "Disconnected"],
+  "bounds": {"max_width": 512, "max_height": 256, "max_frame_bytes": 16777216}
+}

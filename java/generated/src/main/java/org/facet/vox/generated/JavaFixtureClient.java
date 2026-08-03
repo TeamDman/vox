@@ -2,6 +2,7 @@
 // Regenerate with `cargo xtask codegen --java`.
 package org.facet.vox.generated;
 
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import org.facet.phon.*;
@@ -14,7 +15,7 @@ public final class JavaFixtureClient {
   public CompletableFuture<String> echo(String value, CallOptions options) {
     try {
       byte[] encoded = PhonCodec.encode(JavaFixtureEchoArgs.ADAPTER, new JavaFixtureEchoArgs(value), PhonLimits.defaults());
-      return lane.call(JavaFixtureServiceDescriptor.ECHO, encoded, options).thenApply(bytes -> {
+      return VoxFutures.mapCancellable(lane.call(JavaFixtureServiceDescriptor.ECHO, encoded, options, List.of()), bytes -> {
         try {
           VoxResult<String, Void> result = PhonCodec.decode(JavaFixtureEchoResponse.ADAPTER, bytes, PhonLimits.defaults());
           if (!result.isSuccess()) throw remoteFailure(result);
@@ -31,7 +32,7 @@ public final class JavaFixtureClient {
   public CompletableFuture<NestedResponse> inspect(NestedRequest request, CallOptions options) {
     try {
       byte[] encoded = PhonCodec.encode(JavaFixtureInspectArgs.ADAPTER, new JavaFixtureInspectArgs(request), PhonLimits.defaults());
-      return lane.call(JavaFixtureServiceDescriptor.INSPECT, encoded, options).thenApply(bytes -> {
+      return VoxFutures.mapCancellable(lane.call(JavaFixtureServiceDescriptor.INSPECT, encoded, options, List.of()), bytes -> {
         try {
           VoxResult<NestedResponse, Void> result = PhonCodec.decode(JavaFixtureInspectResponse.ADAPTER, bytes, PhonLimits.defaults());
           if (!result.isSuccess()) throw remoteFailure(result);
@@ -48,11 +49,28 @@ public final class JavaFixtureClient {
   public CompletableFuture<VoxResult<DivideResponse, DivideByZero>> divide(DivideRequest request, CallOptions options) {
     try {
       byte[] encoded = PhonCodec.encode(JavaFixtureDivideArgs.ADAPTER, new JavaFixtureDivideArgs(request), PhonLimits.defaults());
-      return lane.call(JavaFixtureServiceDescriptor.DIVIDE, encoded, options).thenApply(bytes -> {
+      return VoxFutures.mapCancellable(lane.call(JavaFixtureServiceDescriptor.DIVIDE, encoded, options, List.of()), bytes -> {
         try {
           VoxResult<DivideResponse, DivideByZero> result = PhonCodec.decode(JavaFixtureDivideResponse.ADAPTER, bytes, PhonLimits.defaults());
           if (result.isInfrastructureError()) throw remoteFailure(result);
           return result;
+        } catch (PhonException error) {
+          throw new CompletionException(error);
+        }
+      });
+    } catch (PhonException error) {
+      return CompletableFuture.failedFuture(error);
+    }
+  }
+  public CompletableFuture<String> generate(long count, VoxTx<String> output) { return generate(count, output, CallOptions.defaults()); }
+  public CompletableFuture<String> generate(long count, VoxTx<String> output, CallOptions options) {
+    try {
+      byte[] encoded = PhonCodec.encode(JavaFixtureGenerateArgs.ADAPTER, new JavaFixtureGenerateArgs(count, output), PhonLimits.defaults());
+      return VoxFutures.mapCancellable(lane.call(JavaFixtureServiceDescriptor.GENERATE, encoded, options, List.of(VoxChannelArgument.tx(JavaFixtureServiceDescriptor.GENERATE.channels().get(0), output))), bytes -> {
+        try {
+          VoxResult<String, Void> result = PhonCodec.decode(JavaFixtureGenerateResponse.ADAPTER, bytes, PhonLimits.defaults());
+          if (!result.isSuccess()) throw remoteFailure(result);
+          return result.success();
         } catch (PhonException error) {
           throw new CompletionException(error);
         }

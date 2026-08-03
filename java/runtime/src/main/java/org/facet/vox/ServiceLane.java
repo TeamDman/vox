@@ -1,6 +1,7 @@
 package org.facet.vox;
 
 import java.util.Map;
+import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -24,6 +25,7 @@ public final class ServiceLane implements AutoCloseable {
         final MethodDescriptor method;
         final byte[] arguments;
         final CallOptions options;
+        final List<VoxChannelArgument> channels;
         private final ServiceLane owner;
         // 0 = queued, 1 = committed to the wire owner, 2 = cancelled before commitment.
         private final java.util.concurrent.atomic.AtomicInteger commitment =
@@ -35,13 +37,15 @@ public final class ServiceLane implements AutoCloseable {
                 long requestId,
                 MethodDescriptor method,
                 byte[] arguments,
-                CallOptions options) {
+                CallOptions options,
+                List<VoxChannelArgument> channels) {
             this.owner = owner;
             this.laneId = laneId;
             this.requestId = requestId;
             this.method = method;
             this.arguments = arguments;
             this.options = options;
+            this.channels = List.copyOf(channels);
         }
 
         boolean tryCommit() {
@@ -54,6 +58,9 @@ public final class ServiceLane implements AutoCloseable {
 
         boolean cancelBeforeCommit() { return commitment.compareAndSet(0, 2); }
         boolean isCommitted() { return commitment.get() == 1; }
+        long allocateChannelId() { return owner.allocateChannelId(); }
+        int peerInitialChannelCredit() { return owner.peerInitialChannelCredit; }
+        void progress() { owner.progress(requestId); }
         void succeed(byte[] response) { owner.succeed(requestId, response); }
         void fail(Throwable failure) { owner.fail(requestId, failure); }
     }
@@ -79,6 +86,7 @@ public final class ServiceLane implements AutoCloseable {
         final PendingFuture future;
         final OutboundCall call;
         volatile ScheduledFuture<?> timeout;
+        final AtomicLong timeoutGeneration = new AtomicLong();
 
         Pending(PendingFuture future, OutboundCall call) {
             this.future = future;
@@ -93,8 +101,10 @@ public final class ServiceLane implements AutoCloseable {
     private final LaneOptions laneOptions;
     private final AtomicReference<LaneState> state;
     private final AtomicLong nextRequestId;
+    private final AtomicLong nextChannelId;
     private final AtomicBoolean requestIdsExhausted = new AtomicBoolean();
     private volatile int peerMaxPendingRequests;
+    private volatile int peerInitialChannelCredit;
     private final Map<Long, Pending> pending = new ConcurrentHashMap<>();
     private final CompletableFuture<Void> opened = new CompletableFuture<>();
 
@@ -106,7 +116,8 @@ public final class ServiceLane implements AutoCloseable {
             LaneOptions laneOptions,
             LaneState initialState,
             long firstRequestId,
-            int peerMaxPendingRequests) {
+            int peerMaxPendingRequests,
+            int peerInitialChannelCredit) {
         this.id = id;
         this.service = service;
         this.driver = driver;
@@ -114,14 +125,25 @@ public final class ServiceLane implements AutoCloseable {
         this.laneOptions = laneOptions;
         this.state = new AtomicReference<>(initialState);
         this.nextRequestId = new AtomicLong(firstRequestId);
+        this.nextChannelId = new AtomicLong(firstRequestId);
         this.peerMaxPendingRequests = peerMaxPendingRequests;
+        this.peerInitialChannelCredit = peerInitialChannelCredit;
     }
 
     public CompletableFuture<byte[]> call(
             MethodDescriptor method, byte[] encodedArguments, CallOptions options) {
+        return call(method, encodedArguments, options, List.of());
+    }
+
+    public CompletableFuture<byte[]> call(
+            MethodDescriptor method,
+            byte[] encodedArguments,
+            CallOptions options,
+            List<VoxChannelArgument> channels) {
         Objects.requireNonNull(method, "method");
         Objects.requireNonNull(encodedArguments, "encodedArguments");
         Objects.requireNonNull(options, "options");
+        Objects.requireNonNull(channels, "channels");
         if (service.method(method.id()) != method && service.method(method.id()) == null) {
             return CompletableFuture.failedFuture(
                     new VoxException("method does not belong to service " + service.name()));
@@ -129,6 +151,22 @@ public final class ServiceLane implements AutoCloseable {
         if (state.get() != LaneState.OPEN) {
             return CompletableFuture.failedFuture(
                     new VoxException("lane is not open: " + state.get()));
+        }
+        if (channels.size() != method.channels().size()) {
+            return CompletableFuture.failedFuture(new VoxException(
+                    "expected " + method.channels().size() + " channel arguments, got "
+                            + channels.size()));
+        }
+        for (int index = 0; index < channels.size(); index++) {
+            ChannelDescriptor expected = method.channels().get(index);
+            ChannelDescriptor actual = channels.get(index).descriptor();
+            if (actual != expected
+                    && (actual.argumentIndex() != expected.argumentIndex()
+                            || actual.direction() != expected.direction()
+                            || !actual.role().equals(expected.role()))) {
+                return CompletableFuture.failedFuture(
+                        new VoxException("channel argument metadata mismatch at " + index));
+            }
         }
         if (pending.size() >= Math.min(
                 connectionOptions.maxPendingRequests(), peerMaxPendingRequests)) {
@@ -143,7 +181,7 @@ public final class ServiceLane implements AutoCloseable {
         }
         PendingFuture future = new PendingFuture(this, requestId);
         OutboundCall outbound = new OutboundCall(
-                this, id, requestId, method, encodedArguments.clone(), options);
+                this, id, requestId, method, encodedArguments.clone(), options, channels);
         Pending entry = new Pending(future, outbound);
         pending.put(requestId, entry);
         if (!driver.submit(outbound)) {
@@ -168,13 +206,19 @@ public final class ServiceLane implements AutoCloseable {
     ServiceDescriptor service() { return service; }
     LaneOptions options() { return laneOptions; }
 
-    void markOpen(int peerMaxPendingRequests) {
+    void markOpen(int peerMaxPendingRequests, int peerInitialChannelCredit) {
         if (peerMaxPendingRequests <= 0) {
             terminate(new VoxException("peer max concurrent requests must be positive"),
                     LaneState.FAILED);
             return;
         }
+        if (peerInitialChannelCredit <= 0) {
+            terminate(new VoxException("peer initial channel credit must be positive"),
+                    LaneState.FAILED);
+            return;
+        }
         this.peerMaxPendingRequests = peerMaxPendingRequests;
+        this.peerInitialChannelCredit = peerInitialChannelCredit;
         if (state.compareAndSet(LaneState.OPENING, LaneState.OPEN)) {
             opened.complete(null);
         }
@@ -208,18 +252,40 @@ public final class ServiceLane implements AutoCloseable {
         }
     }
 
+    synchronized long allocateChannelId() {
+        long candidate = nextChannelId.getAndAdd(2);
+        if (candidate == 0 || candidate == -1L || candidate == -2L) {
+            throw new IllegalStateException("channel id space exhausted");
+        }
+        return candidate;
+    }
+
     private void committed(OutboundCall call) {
         Pending entry = pending.get(call.requestId);
         if (entry == null || entry.future.isDone()) return;
+        scheduleTimeout(call.requestId, entry);
+    }
+
+    private void progress(long requestId) {
+        Pending entry = pending.get(requestId);
+        if (entry == null || entry.future.isDone() || !entry.call.isCommitted()) return;
+        scheduleTimeout(requestId, entry);
+    }
+
+    private void scheduleTimeout(long requestId, Pending entry) {
+        long generation = entry.timeoutGeneration.incrementAndGet();
+        ScheduledFuture<?> previous = entry.timeout;
+        if (previous != null) previous.cancel(false);
         entry.timeout = connectionOptions.scheduler().schedule(
-                () -> timeout(call.requestId),
-                call.options.idleTimeout().toNanos(),
+                () -> timeout(requestId, generation),
+                entry.call.options.idleTimeout().toNanos(),
                 TimeUnit.NANOSECONDS);
     }
 
-    private void timeout(long requestId) {
-        Pending removed = pending.remove(requestId);
-        if (removed == null) return;
+    private void timeout(long requestId, long generation) {
+        Pending removed = pending.get(requestId);
+        if (removed == null || removed.timeoutGeneration.get() != generation
+                || !pending.remove(requestId, removed)) return;
         removed.future.completeExceptionally(
                 new TimeoutException("vox request " + Long.toUnsignedString(requestId)
                         + " exceeded idle timeout"));
@@ -256,6 +322,7 @@ public final class ServiceLane implements AutoCloseable {
     }
 
     private static void cancelTimeout(Pending pending) {
+        pending.timeoutGeneration.incrementAndGet();
         ScheduledFuture<?> timeout = pending.timeout;
         if (timeout != null) timeout.cancel(false);
     }

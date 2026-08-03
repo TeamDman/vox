@@ -31,7 +31,10 @@ import org.facet.vox.ServiceDescriptor;
 import org.facet.vox.ServiceLane;
 import org.facet.vox.ServiceRegistry;
 import org.facet.vox.VoxConnection;
+import org.facet.vox.VoxChannels;
+import org.facet.vox.VoxException;
 import org.facet.vox.VoxResult;
+import org.facet.vox.VoxTx;
 import org.facet.vox.generated.EvolutionWireConstants;
 import org.facet.vox.generated.EvolvedMeasurementArgsWireSchemas;
 import org.facet.vox.generated.EvolvedMeasurementResponseWireSchemas;
@@ -58,14 +61,20 @@ public final class VoxJavaSubject {
         String mode = System.getenv().getOrDefault("SUBJECT_MODE", "server");
         long inactivitySeconds = parseLong(
                 System.getenv("SUBJECT_INACTIVITY_TIMEOUT_SECS"), 60);
-        ConnectionOptions options = ConnectionOptions.builder()
-                .idleTimeout(Duration.ofSeconds(Math.max(1, inactivitySeconds)))
-                .build();
         ExecutorService driver = Executors.newSingleThreadExecutor(runnable -> {
             Thread thread = new Thread(runnable, "vox-java-subject-driver");
             thread.setDaemon(true);
             return thread;
         });
+        ExecutorService handlers = Executors.newFixedThreadPool(4, runnable -> {
+            Thread thread = new Thread(runnable, "vox-java-subject-handler");
+            thread.setDaemon(true);
+            return thread;
+        });
+        ConnectionOptions options = ConnectionOptions.builder()
+                .idleTimeout(Duration.ofSeconds(Math.max(1, inactivitySeconds)))
+                .handlerExecutor(handlers)
+                .build();
         try {
             if ("server-listen".equals(mode)) {
                 listenAndServe(options, driver);
@@ -76,6 +85,7 @@ public final class VoxJavaSubject {
             }
         } finally {
             driver.shutdownNow();
+            handlers.shutdownNow();
         }
     }
 
@@ -151,6 +161,7 @@ public final class VoxJavaSubject {
             case "cancel_timeout" -> runCancelTimeout(connection);
             case "invalid_payload" -> runInvalidPayload(connection);
             case "divide_error" -> runDivideError(connection);
+            case "generate_large" -> runGenerateLarge(connection);
             case "unknown_method" -> runUnknownMethod(connection);
             case "compatible_schema_evolution" -> runCompatibleSchemaEvolution(connection);
             case "incompatible_schema_evolution" -> runIncompatibleSchemaEvolution(connection);
@@ -205,6 +216,28 @@ public final class VoxJavaSubject {
                     || result.applicationError() != MathError.DIVISION_BY_ZERO) {
                 throw new AssertionError("unexpected divide result " + result);
             }
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void runGenerateLarge(VoxConnection connection) throws Exception {
+        try (ServiceLane lane = openTestbed(connection)) {
+            PhonAdapter<Integer> element = (PhonAdapter<Integer>)
+                    TestbedServiceDescriptor.GENERATE_LARGE.channels().get(0).elementAdapter();
+            VoxChannels.Pair<Integer> stream = VoxChannels.channel(element);
+            CompletableFuture<Void> call = new TestbedClient(lane)
+                    .generateLarge(100, stream.tx());
+            for (int expected = 0; expected < 100; expected++) {
+                Integer actual = stream.rx().receive(Duration.ofSeconds(3));
+                if (actual == null || actual != expected) {
+                    throw new AssertionError(
+                            "generate_large expected " + expected + ", got " + actual);
+                }
+            }
+            if (stream.rx().receive(Duration.ofSeconds(3)) != null) {
+                throw new AssertionError("generate_large produced more than 100 items");
+            }
+            call.get(3, TimeUnit.SECONDS);
         }
     }
 
@@ -385,6 +418,23 @@ public final class VoxJavaSubject {
                 }
                 return CompletableFuture.completedFuture(
                         VoxResult.success(dividend / divisor));
+            }
+
+            @Override
+            public CompletableFuture<Void> generateLarge(
+                    org.facet.vox.CallContext context,
+                    long count,
+                    VoxTx<Integer> output) {
+                try {
+                    for (int value = 0; value < count; value++) output.send(value);
+                    output.close();
+                    return CompletableFuture.completedFuture(null);
+                } catch (InterruptedException failure) {
+                    Thread.currentThread().interrupt();
+                    return CompletableFuture.failedFuture(failure);
+                } catch (VoxException failure) {
+                    return CompletableFuture.failedFuture(failure);
+                }
             }
         }));
     }

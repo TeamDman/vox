@@ -32,6 +32,11 @@ public final class VoxResult<O, E> {
         return new VoxResult<>(Objects.requireNonNull(value, "value"), null, Kind.SUCCESS, null);
     }
 
+    /** Successful unit/void result; Java represents the sole unit value as {@code null}. */
+    public static <E> VoxResult<Void, E> successUnit() {
+        return new VoxResult<>(null, null, Kind.SUCCESS, null);
+    }
+
     public static <O, E> VoxResult<O, E> applicationError(E error) {
         return new VoxResult<>(null, Objects.requireNonNull(error, "error"),
                 Kind.APPLICATION_ERROR, null);

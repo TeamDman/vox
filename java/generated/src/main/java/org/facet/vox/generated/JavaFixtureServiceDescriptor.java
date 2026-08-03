@@ -3,13 +3,13 @@
 package org.facet.vox.generated;
 
 import java.util.List;
-import org.facet.vox.MethodDescriptor;
-import org.facet.vox.ServiceDescriptor;
+import org.facet.vox.*;
 
 public final class JavaFixtureServiceDescriptor {
-  public static final MethodDescriptor ECHO = new MethodDescriptor(0x712f68659c89f2acL, "echo", JavaFixtureEchoArgs.ADAPTER, PrimitiveAdapters.STRING, null, JavaFixtureEchoResponse.ADAPTER);
-  public static final MethodDescriptor INSPECT = new MethodDescriptor(0x0b31bd8dddefd7c3L, "inspect", JavaFixtureInspectArgs.ADAPTER, NestedResponse.ADAPTER, null, JavaFixtureInspectResponse.ADAPTER);
-  public static final MethodDescriptor DIVIDE = new MethodDescriptor(0x3e2a0d1a14b69cedL, "divide", JavaFixtureDivideArgs.ADAPTER, DivideResponse.ADAPTER, DivideByZero.ADAPTER, JavaFixtureDivideResponse.ADAPTER);
-  public static final ServiceDescriptor INSTANCE = new ServiceDescriptor("JavaFixture", List.of(ECHO, INSPECT, DIVIDE));
+  public static final MethodDescriptor ECHO = new MethodDescriptor(0x712f68659c89f2acL, "echo", JavaFixtureEchoArgs.ADAPTER, PrimitiveAdapters.STRING, null, JavaFixtureEchoResponse.ADAPTER, List.of());
+  public static final MethodDescriptor INSPECT = new MethodDescriptor(0x0b31bd8dddefd7c3L, "inspect", JavaFixtureInspectArgs.ADAPTER, NestedResponse.ADAPTER, null, JavaFixtureInspectResponse.ADAPTER, List.of());
+  public static final MethodDescriptor DIVIDE = new MethodDescriptor(0x3e2a0d1a14b69cedL, "divide", JavaFixtureDivideArgs.ADAPTER, DivideResponse.ADAPTER, DivideByZero.ADAPTER, JavaFixtureDivideResponse.ADAPTER, List.of());
+  public static final MethodDescriptor GENERATE = new MethodDescriptor(0x162798cca432e3b8L, "generate", JavaFixtureGenerateArgs.ADAPTER, PrimitiveAdapters.STRING, null, JavaFixtureGenerateResponse.ADAPTER, List.of(new ChannelDescriptor(1, ChannelDescriptor.Direction.TX, "channel.arg.1.tx.element", PrimitiveAdapters.STRING)));
+  public static final ServiceDescriptor INSTANCE = new ServiceDescriptor("JavaFixture", List.of(ECHO, INSPECT, DIVIDE, GENERATE));
   private JavaFixtureServiceDescriptor() {}
 }

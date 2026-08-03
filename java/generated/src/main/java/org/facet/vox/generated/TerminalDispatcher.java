@@ -2,6 +2,7 @@
 // Regenerate with `cargo xtask codegen --java`.
 package org.facet.vox.generated;
 
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import org.facet.phon.*;
@@ -14,7 +15,7 @@ public final class TerminalDispatcher implements ServiceDispatcher {
   @Override public CompletableFuture<Void> dispatch(InboundCall call) {
     try {
       if (call.method().id() == TerminalServiceDescriptor.CONNECT.id()) {
-        TerminalConnectArgs args = PhonCodec.decode(TerminalConnectArgs.ADAPTER, call.encodedArguments(), PhonLimits.defaults());
+        TerminalConnectArgs args = call.decodeArguments(TerminalConnectArgs.ADAPTER);
         return handler.connect(call.context(), args.request()).thenAccept(value -> {
           try {
             call.respond(PhonCodec.encode(TerminalConnectResponse.ADAPTER, value, PhonLimits.defaults()));
@@ -24,7 +25,7 @@ public final class TerminalDispatcher implements ServiceDispatcher {
         });
       }
       if (call.method().id() == TerminalServiceDescriptor.CAPABILITIES.id()) {
-        TerminalCapabilitiesArgs args = PhonCodec.decode(TerminalCapabilitiesArgs.ADAPTER, call.encodedArguments(), PhonLimits.defaults());
+        TerminalCapabilitiesArgs args = call.decodeArguments(TerminalCapabilitiesArgs.ADAPTER);
         return handler.capabilities(call.context(), args.request()).thenAccept(value -> {
           try {
             call.respond(PhonCodec.encode(TerminalCapabilitiesResponse.ADAPTER, value, PhonLimits.defaults()));
@@ -34,7 +35,7 @@ public final class TerminalDispatcher implements ServiceDispatcher {
         });
       }
       if (call.method().id() == TerminalServiceDescriptor.RESIZE.id()) {
-        TerminalResizeArgs args = PhonCodec.decode(TerminalResizeArgs.ADAPTER, call.encodedArguments(), PhonLimits.defaults());
+        TerminalResizeArgs args = call.decodeArguments(TerminalResizeArgs.ADAPTER);
         return handler.resize(call.context(), args.request()).thenAccept(value -> {
           try {
             call.respond(PhonCodec.encode(TerminalResizeResponse.ADAPTER, value, PhonLimits.defaults()));
@@ -44,7 +45,7 @@ public final class TerminalDispatcher implements ServiceDispatcher {
         });
       }
       if (call.method().id() == TerminalServiceDescriptor.SEND_TEXT.id()) {
-        TerminalSendTextArgs args = PhonCodec.decode(TerminalSendTextArgs.ADAPTER, call.encodedArguments(), PhonLimits.defaults());
+        TerminalSendTextArgs args = call.decodeArguments(TerminalSendTextArgs.ADAPTER);
         return handler.sendText(call.context(), args.request()).thenAccept(value -> {
           try {
             call.respond(PhonCodec.encode(TerminalSendTextResponse.ADAPTER, value, PhonLimits.defaults()));
@@ -54,7 +55,7 @@ public final class TerminalDispatcher implements ServiceDispatcher {
         });
       }
       if (call.method().id() == TerminalServiceDescriptor.SEND_KEY.id()) {
-        TerminalSendKeyArgs args = PhonCodec.decode(TerminalSendKeyArgs.ADAPTER, call.encodedArguments(), PhonLimits.defaults());
+        TerminalSendKeyArgs args = call.decodeArguments(TerminalSendKeyArgs.ADAPTER);
         return handler.sendKey(call.context(), args.request()).thenAccept(value -> {
           try {
             call.respond(PhonCodec.encode(TerminalSendKeyResponse.ADAPTER, value, PhonLimits.defaults()));
@@ -64,7 +65,7 @@ public final class TerminalDispatcher implements ServiceDispatcher {
         });
       }
       if (call.method().id() == TerminalServiceDescriptor.SEND_MOUSE.id()) {
-        TerminalSendMouseArgs args = PhonCodec.decode(TerminalSendMouseArgs.ADAPTER, call.encodedArguments(), PhonLimits.defaults());
+        TerminalSendMouseArgs args = call.decodeArguments(TerminalSendMouseArgs.ADAPTER);
         return handler.sendMouse(call.context(), args.request()).thenAccept(value -> {
           try {
             call.respond(PhonCodec.encode(TerminalSendMouseResponse.ADAPTER, value, PhonLimits.defaults()));
@@ -74,7 +75,7 @@ public final class TerminalDispatcher implements ServiceDispatcher {
         });
       }
       if (call.method().id() == TerminalServiceDescriptor.SNAPSHOT.id()) {
-        TerminalSnapshotArgs args = PhonCodec.decode(TerminalSnapshotArgs.ADAPTER, call.encodedArguments(), PhonLimits.defaults());
+        TerminalSnapshotArgs args = call.decodeArguments(TerminalSnapshotArgs.ADAPTER);
         return handler.snapshot(call.context(), args.request()).thenAccept(value -> {
           try {
             call.respond(PhonCodec.encode(TerminalSnapshotResponse.ADAPTER, value, PhonLimits.defaults()));
@@ -83,8 +84,18 @@ public final class TerminalDispatcher implements ServiceDispatcher {
           }
         });
       }
+      if (call.method().id() == TerminalServiceDescriptor.SUBSCRIBE_FRAMES.id()) {
+        TerminalSubscribeFramesArgs args = call.decodeArguments(TerminalSubscribeFramesArgs.ADAPTER);
+        return handler.subscribeFrames(call.context(), args.request(), args.frames()).thenAccept(value -> {
+          try {
+            call.respond(PhonCodec.encode(TerminalSubscribeFramesResponse.ADAPTER, value, PhonLimits.defaults()));
+          } catch (PhonException error) {
+            throw new CompletionException(error);
+          }
+        });
+      }
       if (call.method().id() == TerminalServiceDescriptor.GET_CONTENT.id()) {
-        TerminalGetContentArgs args = PhonCodec.decode(TerminalGetContentArgs.ADAPTER, call.encodedArguments(), PhonLimits.defaults());
+        TerminalGetContentArgs args = call.decodeArguments(TerminalGetContentArgs.ADAPTER);
         return handler.getContent(call.context(), args.request()).thenAccept(value -> {
           try {
             call.respond(PhonCodec.encode(TerminalGetContentResponse.ADAPTER, value, PhonLimits.defaults()));
@@ -94,7 +105,7 @@ public final class TerminalDispatcher implements ServiceDispatcher {
         });
       }
       if (call.method().id() == TerminalServiceDescriptor.CANCEL.id()) {
-        TerminalCancelArgs args = PhonCodec.decode(TerminalCancelArgs.ADAPTER, call.encodedArguments(), PhonLimits.defaults());
+        TerminalCancelArgs args = call.decodeArguments(TerminalCancelArgs.ADAPTER);
         return handler.cancel(call.context(), args.request()).thenAccept(value -> {
           try {
             call.respond(PhonCodec.encode(TerminalCancelResponse.ADAPTER, value, PhonLimits.defaults()));
@@ -104,7 +115,7 @@ public final class TerminalDispatcher implements ServiceDispatcher {
         });
       }
       if (call.method().id() == TerminalServiceDescriptor.DISCONNECT.id()) {
-        TerminalDisconnectArgs args = PhonCodec.decode(TerminalDisconnectArgs.ADAPTER, call.encodedArguments(), PhonLimits.defaults());
+        TerminalDisconnectArgs args = call.decodeArguments(TerminalDisconnectArgs.ADAPTER);
         return handler.disconnect(call.context(), args.request()).thenAccept(value -> {
           try {
             call.respond(PhonCodec.encode(TerminalDisconnectResponse.ADAPTER, value, PhonLimits.defaults()));

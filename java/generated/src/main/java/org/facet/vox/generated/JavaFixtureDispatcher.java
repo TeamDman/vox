@@ -2,6 +2,7 @@
 // Regenerate with `cargo xtask codegen --java`.
 package org.facet.vox.generated;
 
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import org.facet.phon.*;
@@ -14,7 +15,7 @@ public final class JavaFixtureDispatcher implements ServiceDispatcher {
   @Override public CompletableFuture<Void> dispatch(InboundCall call) {
     try {
       if (call.method().id() == JavaFixtureServiceDescriptor.ECHO.id()) {
-        JavaFixtureEchoArgs args = PhonCodec.decode(JavaFixtureEchoArgs.ADAPTER, call.encodedArguments(), PhonLimits.defaults());
+        JavaFixtureEchoArgs args = call.decodeArguments(JavaFixtureEchoArgs.ADAPTER);
         return handler.echo(call.context(), args.value()).thenAccept(value -> {
           try {
             call.respond(PhonCodec.encode(JavaFixtureEchoResponse.ADAPTER, VoxResult.success(value), PhonLimits.defaults()));
@@ -24,7 +25,7 @@ public final class JavaFixtureDispatcher implements ServiceDispatcher {
         });
       }
       if (call.method().id() == JavaFixtureServiceDescriptor.INSPECT.id()) {
-        JavaFixtureInspectArgs args = PhonCodec.decode(JavaFixtureInspectArgs.ADAPTER, call.encodedArguments(), PhonLimits.defaults());
+        JavaFixtureInspectArgs args = call.decodeArguments(JavaFixtureInspectArgs.ADAPTER);
         return handler.inspect(call.context(), args.request()).thenAccept(value -> {
           try {
             call.respond(PhonCodec.encode(JavaFixtureInspectResponse.ADAPTER, VoxResult.success(value), PhonLimits.defaults()));
@@ -34,10 +35,20 @@ public final class JavaFixtureDispatcher implements ServiceDispatcher {
         });
       }
       if (call.method().id() == JavaFixtureServiceDescriptor.DIVIDE.id()) {
-        JavaFixtureDivideArgs args = PhonCodec.decode(JavaFixtureDivideArgs.ADAPTER, call.encodedArguments(), PhonLimits.defaults());
+        JavaFixtureDivideArgs args = call.decodeArguments(JavaFixtureDivideArgs.ADAPTER);
         return handler.divide(call.context(), args.request()).thenAccept(value -> {
           try {
             call.respond(PhonCodec.encode(JavaFixtureDivideResponse.ADAPTER, value, PhonLimits.defaults()));
+          } catch (PhonException error) {
+            throw new CompletionException(error);
+          }
+        });
+      }
+      if (call.method().id() == JavaFixtureServiceDescriptor.GENERATE.id()) {
+        JavaFixtureGenerateArgs args = call.decodeArguments(JavaFixtureGenerateArgs.ADAPTER);
+        return handler.generate(call.context(), args.count(), args.output()).thenAccept(value -> {
+          try {
+            call.respond(PhonCodec.encode(JavaFixtureGenerateResponse.ADAPTER, VoxResult.success(value), PhonLimits.defaults()));
           } catch (PhonException error) {
             throw new CompletionException(error);
           }

@@ -460,7 +460,9 @@ public final class VoxRuntimeTest {
             }
             check(client.state() == ConnectionState.OPEN,
                     "client handshake opens; state=" + client.state()
-                            + ", failure=" + completionFailure(clientDone));
+                            + ", failure=" + completionFailure(clientDone)
+                            + ", server_state=" + server.state()
+                            + ", server_failure=" + completionFailure(serverDone));
             check(server.state() == ConnectionState.OPEN,
                     "server handshake opens; state=" + server.state()
                             + ", failure=" + completionFailure(serverDone));

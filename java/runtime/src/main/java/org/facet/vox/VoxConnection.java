@@ -714,10 +714,11 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
             channelIds.add(channelId);
         }
         Value inlineSchemas = WireCodec.required(body, "schemas");
-        if (!inlineSchemas.asList().isEmpty()) {
+        byte[] inlineSchemaBytes = WireCodec.byteList(inlineSchemas);
+        if (inlineSchemaBytes.length != 0) {
             receivedBindings.put(
                     bindingKey(laneId, methodId, WireCodec.Direction.ARGS),
-                    codec.parseBinding(WireCodec.byteList(inlineSchemas)));
+                    codec.parseBinding(inlineSchemaBytes));
         }
         SchemaClosure writer =
                 receivedBindings.get(bindingKey(laneId, methodId, WireCodec.Direction.ARGS));

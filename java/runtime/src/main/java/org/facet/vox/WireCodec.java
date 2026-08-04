@@ -302,6 +302,7 @@ final class WireCodec {
     }
 
     static byte[] byteList(Value value) throws VoxException {
+        if (value.type() == Value.Type.BYTES) return value.asBytes();
         if (value.type() != Value.Type.LIST) {
             throw new VoxException("expected wire byte list");
         }
@@ -360,9 +361,7 @@ final class WireCodec {
     }
 
     private static Value byteList(byte[] bytes) {
-        java.util.ArrayList<Value> result = new java.util.ArrayList<>(bytes.length);
-        for (byte value : bytes) result.add(Value.unsigned(Byte.toUnsignedInt(value)));
-        return Value.list(result);
+        return Value.bytes(bytes);
     }
 
     private static LinkedHashMap<String, Value> stringMetadata(

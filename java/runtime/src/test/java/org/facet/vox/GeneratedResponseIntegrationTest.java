@@ -24,6 +24,7 @@ import org.facet.vox.generated.TerminalFrameOrigin;
 import org.facet.vox.generated.TerminalGetContentResponse;
 import org.facet.vox.generated.TerminalPresentationCapabilitiesResult;
 import org.facet.vox.generated.TerminalPresentationMode;
+import org.facet.vox.generated.TerminalPresentationUnavailable;
 import org.facet.vox.generated.TerminalRasterFrameEvent;
 import org.facet.vox.generated.TerminalRasterFrameKind;
 import org.facet.vox.generated.TerminalRasterSubscribeRequest;
@@ -72,7 +73,7 @@ public final class GeneratedResponseIntegrationTest {
         terminalRustApplicationErrorTranscodesThroughGeneratedResponseSchema();
         terminalRustSnapshotPayloadTranscodesThroughGeneratedResponseSchema();
         terminalFrameChannelElementSchemaIsTransitivelySelfContained();
-        terminalPresentationV2FieldsRoundTripAndRejectUnknownOwner();
+        terminalPresentationV3FieldsRoundTripAndRejectUnknownOwner();
         System.out.println("GeneratedResponseIntegrationTest: PASS");
     }
 
@@ -184,35 +185,63 @@ public final class GeneratedResponseIntegrationTest {
         CompatibilityPlan.plan(writer, reader, PhonLimits.defaults());
     }
 
-    private static void terminalPresentationV2FieldsRoundTripAndRejectUnknownOwner()
+    private static void terminalPresentationV3FieldsRoundTripAndRejectUnknownOwner()
             throws Exception {
         java.util.List<TerminalPresentationMode> modes = new java.util.ArrayList<>();
-        for (String rendererId : java.util.List.of("rust-cpu-fontdue", "rust-gpu-slug")) {
-            modes.add(terminalPresentationMode(rendererId, "full", "full-png",
-                    TerminalFrameEncoding.PNG, TerminalRasterFrameKind.FULL));
-            modes.add(terminalPresentationMode(rendererId, "full", "full-raw-rgba",
-                    TerminalFrameEncoding.RGBA8, TerminalRasterFrameKind.FULL));
-            modes.add(terminalPresentationMode(rendererId, "dirty", "dirty-raw-rgba",
-                    TerminalFrameEncoding.RGBA8, TerminalRasterFrameKind.DIRTY_REGIONS));
-        }
+        modes.add(terminalPresentationMode("rust-cpu-fontdue", "full", "full-png",
+                TerminalFrameEncoding.PNG, TerminalRasterFrameKind.FULL));
+        modes.add(terminalPresentationMode("rust-cpu-fontdue", "full", "full-raw-rgba",
+                TerminalFrameEncoding.RGBA8, TerminalRasterFrameKind.FULL));
+        modes.add(terminalPresentationMode("rust-cpu-fontdue", "dirty", "dirty-raw-rgba",
+                TerminalFrameEncoding.RGBA8, TerminalRasterFrameKind.DIRTY_REGIONS));
+        TerminalError gpuError = new TerminalError(
+                TerminalErrorCode.UNSUPPORTED_CAPABILITY,
+                "rust-gpu-slug unavailable: no Vulkan 1.2 compute device was found",
+                false,
+                7L);
+        java.util.List<TerminalPresentationUnavailable> unavailable = java.util.List.of(
+                terminalPresentationUnavailable("full", "full-png", gpuError),
+                terminalPresentationUnavailable("full", "full-raw-rgba", gpuError),
+                terminalPresentationUnavailable("dirty", "dirty-raw-rgba", gpuError));
         TerminalPresentationCapabilitiesResult capabilities =
                 new TerminalPresentationCapabilitiesResult(
-                        "session-v4", "rust-cpu-fontdue", "full-png", modes, 7L);
+                        "session-v5", "rust-cpu-fontdue", "full-png", modes,
+                        unavailable, 7L);
         TerminalPresentationCapabilitiesResult capabilitiesBack = PhonCodec.decode(
                 TerminalPresentationCapabilitiesResult.ADAPTER,
                 PhonCodec.encode(TerminalPresentationCapabilitiesResult.ADAPTER,
                         capabilities, PhonLimits.defaults()),
                 PhonLimits.defaults());
         check(capabilities.equals(capabilitiesBack),
-                "presentation V2 capabilities roundtrip");
+                "presentation V3 capabilities roundtrip");
         check(capabilitiesBack.defaultRendererId().equals("rust-cpu-fontdue")
-                        && capabilitiesBack.modes().size() == 6,
-                "presentation V2 defaults and six pixel tuples");
+                        && capabilitiesBack.modes().size() == 3
+                        && capabilitiesBack.modes().stream().allMatch(mode ->
+                                mode.rendererId().equals("rust-cpu-fontdue"))
+                        && capabilitiesBack.unavailablePresentations().size() == 3,
+                "presentation V3 keeps selectable and unavailable tuples separate");
+        check(capabilitiesBack.modes().stream().anyMatch(mode ->
+                        mode.rendererId().equals(capabilitiesBack.defaultRendererId())
+                                && mode.transportId().equals(
+                                        capabilitiesBack.defaultTransportId())),
+                "presentation defaults identify a selectable mode");
+        check(capabilitiesBack.unavailablePresentations().stream().allMatch(entry ->
+                        entry.rendererId().equals("rust-gpu-slug")
+                                && entry.rasterizationOwner()
+                                        == TerminalRasterizationOwner.SERVER
+                                && entry.transportVersion() == 1
+                                && entry.error().code()
+                                        == TerminalErrorCode.UNSUPPORTED_CAPABILITY
+                                && entry.error().message().contains(
+                                        "Vulkan 1.2 compute device")
+                                && !entry.error().retryable()
+                                && entry.error().serverSequence() == 7L),
+                "unavailable tuples preserve exact identity and actionable error");
 
         TerminalRasterSubscribeRequest request = new TerminalRasterSubscribeRequest(
-                "session-v4", "rust-gpu-slug", "dirty", "dirty-raw-rgba", 1,
+                "session-v5", "rust-gpu-slug", "dirty", "dirty-raw-rgba", 1,
                 "panel-2-presentation-3", 18L, 3L, 16L * 1024L * 1024L, 64,
-                20L, "subscribe-v4-3");
+                20L, "subscribe-v5-3");
         TerminalRasterSubscribeRequest requestBack = PhonCodec.decode(
                 TerminalRasterSubscribeRequest.ADAPTER,
                 PhonCodec.encode(TerminalRasterSubscribeRequest.ADAPTER,
@@ -225,8 +254,16 @@ public final class GeneratedResponseIntegrationTest {
         check(recordHasField(TerminalPresentationCapabilitiesResult.SCHEMA,
                         "default_renderer_id"),
                 "generated capability result carries default_renderer_id");
+        check(recordHasField(TerminalPresentationCapabilitiesResult.SCHEMA,
+                        "unavailable_presentations"),
+                "generated capability result carries unavailable_presentations");
         check(recordHasField(TerminalPresentationMode.SCHEMA, "rasterization_owner"),
                 "generated capability mode carries rasterization_owner");
+        check(recordHasField(TerminalPresentationUnavailable.SCHEMA,
+                        "rasterization_owner")
+                        && recordHasField(TerminalPresentationUnavailable.SCHEMA,
+                                "error"),
+                "generated unavailable presentation carries closed owner and error");
         check(recordHasField(TerminalRasterSubscribeRequest.SCHEMA,
                         "presentation_generation")
                         && recordHasField(TerminalRasterFrameEvent.SCHEMA,
@@ -278,6 +315,19 @@ public final class GeneratedResponseIntegrationTest {
                 4096,
                 16L * 1024L * 1024L,
                 64);
+    }
+
+    private static TerminalPresentationUnavailable terminalPresentationUnavailable(
+            String damageModeId,
+            String transportId,
+            TerminalError error) {
+        return new TerminalPresentationUnavailable(
+                "rust-gpu-slug",
+                TerminalRasterizationOwner.SERVER,
+                damageModeId,
+                transportId,
+                1,
+                error);
     }
 
     private static boolean recordHasField(Schema schema, String fieldName) {

@@ -61,14 +61,25 @@ the frame payload remains a bounded byte run so Java can
 upload a texture or fall back to structured-cell rendering without a second
 wire contract.
 
-## Presentation contract V2 (terminal fixture V4)
+## Presentation contract V3 (terminal fixture V5)
 
 The current raster API uses `renderer_id` as its canonical renderer identity;
 the older `backend_id` field remains legacy snapshot vocabulary only. The
 capability response supplies independent `default_renderer_id` and
 `default_transport_id` values and enumerates every valid atomic tuple of
-`renderer_id`, `damage_mode_id`, `transport_id`, and `transport_version`.
-Clients select one advertised tuple rather than assembling unvalidated axes.
+`renderer_id`, `damage_mode_id`, `transport_id`, and `transport_version` in
+`modes`. Every entry in `modes` is selectable, and the two defaults must
+identify a tuple in that collection. Clients select one advertised tuple
+rather than assembling unvalidated axes.
+
+Known tuples that cannot currently be selected are reported separately in
+`unavailable_presentations`. Each `TerminalPresentationUnavailable` repeats
+the exact renderer, closed rasterization owner, damage mode, transport, and
+transport version and carries a structured `TerminalError`. This lets a
+cached capability response preserve working CPU modes while explaining a GPU
+initialization failure with its original actionable message. An unavailable
+tuple is never a selectable mode, and selecting one is rejected with the
+advertised error without silently substituting a fallback.
 
 `TerminalRasterSubscribeRequest` and every `TerminalRasterFrameEvent` carry a
 client-chosen opaque `presentation_generation`. It changes whenever any member
@@ -79,11 +90,14 @@ generation is stale even when its numeric sequence is newer. Unsupported tuples
 leave the current presentation active rather than silently selecting a
 different renderer or transport.
 
-The V4 fixture advertises `rust-cpu-fontdue` and `rust-gpu-slug`, both
-server-owned, across `full-png`, `full-raw-rgba`, and `dirty-raw-rgba`. The
-presentation-envelope contract version is 2. The unchanged RGBA/PNG payload
-layout remains `frame_contract_version` 1. V1 through V3 remain immutable
-historical fixtures, so there is no compatibility alias for the former
+The immutable V4 fixture records presentation contract V2 and advertises
+`rust-cpu-fontdue` and `rust-gpu-slug`, both server-owned, across `full-png`,
+`full-raw-rgba`, and `dirty-raw-rgba`. V5 records presentation contract V3:
+the same three CPU tuples remain valid modes while all three GPU tuples are
+unavailable with an `UnsupportedCapability` error describing the Vulkan
+device failure. The unchanged RGBA/PNG payload layout remains
+`frame_contract_version` 1. V1 through V4 remain immutable historical
+fixtures, so there is no compatibility alias for the former
 `transport_generation` name in the current raster API.
 
 Raster subscriptions remain request-scoped typed channels on a nonzero service
@@ -97,11 +111,14 @@ is a separate application operation.
 - `vox/test-fixtures/terminal/terminal-contract-v1.json` remains the immutable
   unary contract; `terminal-contract-v2.json` adds the typed subscription,
   bounded coalescing invariants, epochs, and publication telemetry;
-  `terminal-contract-v3.json` records the first versioned raster transports;
-  and `terminal-contract-v4.json` records presentation contract V2.
-- `spec-proto` tests round-trip both renderer identities, all three pixel
-  transports, both rasterization-owner values, subscribe/event presentation
-  generations, and verify every fixture method id.
+  `terminal-contract-v3.json` records the first versioned raster transports,
+  `terminal-contract-v4.json` records presentation contract V2, and
+  `terminal-contract-v5.json` records typed negative presentation
+  capabilities in V3 without modifying V4.
+- `spec-proto` tests round-trip selectable CPU modes and unavailable GPU
+  tuples with actionable errors, all three pixel transports, both
+  rasterization-owner values, subscribe/event presentation generations, and
+  verify every fixture method id.
 - The Java generator test compiles both the existing Review fixture and this
   Terminal service with `javac --release 17`; the Java runtime gate also proves
   presentation-lane close, sibling/control-lane survival, and replacement.

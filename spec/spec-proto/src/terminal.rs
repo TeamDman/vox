@@ -140,13 +140,19 @@ pub struct TerminalPresentationCapabilitiesRequest {
     pub client_sequence: i64,
 }
 
-/// Presentation-contract V2 capabilities accepted by both peers.
+/// Presentation-contract V3 capabilities accepted by both peers.
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct TerminalPresentationCapabilitiesResult {
     pub session_id: String,
     pub default_renderer_id: String,
     pub default_transport_id: String,
+    /// Every tuple in this list is valid and selectable. Unavailable tuples
+    /// are reported separately so clients never mistake diagnostics for modes.
     pub modes: Vec<TerminalPresentationMode>,
+    /// Exact tuples that are known but cannot currently be selected, together
+    /// with the structured reason reported by the owning process.
+    #[facet(default)]
+    pub unavailable_presentations: Vec<TerminalPresentationUnavailable>,
     pub server_sequence: i64,
 }
 
@@ -168,6 +174,21 @@ pub struct TerminalPresentationMode {
     pub max_pixel_height: u16,
     pub max_frame_bytes: u32,
     pub max_regions: u16,
+}
+
+/// One known but currently unavailable presentation tuple.
+///
+/// This record intentionally repeats the complete tuple identity rather than
+/// weakening [`TerminalPresentationMode`] with an availability flag. The
+/// `modes` collection therefore remains an exhaustive list of valid choices.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalPresentationUnavailable {
+    pub renderer_id: String,
+    pub rasterization_owner: TerminalRasterizationOwner,
+    pub damage_mode_id: String,
+    pub transport_id: String,
+    pub transport_version: u16,
+    pub error: TerminalError,
 }
 
 /// Process boundary that owns conversion of semantic terminal cells to pixels.
@@ -913,70 +934,119 @@ mod tests {
     }
 
     #[test]
-    fn terminal_v4_presentation_capabilities_round_trip_all_pixel_tuples() {
+    fn terminal_v5_presentation_capabilities_round_trip_with_unavailable_gpu() {
         let mut modes = Vec::new();
-        for renderer_id in ["rust-cpu-fontdue", "rust-gpu-slug"] {
-            for (damage_mode_id, transport_id, encoding, steady_frame_kind) in [
-                (
-                    "full",
-                    "full-png",
-                    TerminalFrameEncoding::Png,
-                    TerminalRasterFrameKind::Full,
-                ),
-                (
-                    "full",
-                    "full-raw-rgba",
-                    TerminalFrameEncoding::Rgba8,
-                    TerminalRasterFrameKind::Full,
-                ),
-                (
-                    "dirty",
-                    "dirty-raw-rgba",
-                    TerminalFrameEncoding::Rgba8,
-                    TerminalRasterFrameKind::DirtyRegions,
-                ),
-            ] {
-                modes.push(TerminalPresentationMode {
-                    renderer_id: renderer_id.to_string(),
-                    rasterization_owner: TerminalRasterizationOwner::Server,
-                    damage_mode_id: damage_mode_id.to_string(),
-                    transport_id: transport_id.to_string(),
-                    transport_version: 1,
-                    encoding,
-                    steady_frame_kind,
-                    frame_contract_version: 1,
-                    origin: TerminalFrameOrigin::TopLeft,
-                    alpha_mode: TerminalAlphaMode::Straight,
-                    color_space: TerminalColorSpace::Srgb,
-                    max_pixel_width: 4096,
-                    max_pixel_height: 4096,
-                    max_frame_bytes: 16 * 1024 * 1024,
-                    max_regions: 64,
-                });
-            }
+        let pixel_transports = [
+            (
+                "full",
+                "full-png",
+                TerminalFrameEncoding::Png,
+                TerminalRasterFrameKind::Full,
+            ),
+            (
+                "full",
+                "full-raw-rgba",
+                TerminalFrameEncoding::Rgba8,
+                TerminalRasterFrameKind::Full,
+            ),
+            (
+                "dirty",
+                "dirty-raw-rgba",
+                TerminalFrameEncoding::Rgba8,
+                TerminalRasterFrameKind::DirtyRegions,
+            ),
+        ];
+        for (damage_mode_id, transport_id, encoding, steady_frame_kind) in pixel_transports {
+            modes.push(TerminalPresentationMode {
+                renderer_id: "rust-cpu-fontdue".to_string(),
+                rasterization_owner: TerminalRasterizationOwner::Server,
+                damage_mode_id: damage_mode_id.to_string(),
+                transport_id: transport_id.to_string(),
+                transport_version: 1,
+                encoding,
+                steady_frame_kind,
+                frame_contract_version: 1,
+                origin: TerminalFrameOrigin::TopLeft,
+                alpha_mode: TerminalAlphaMode::Straight,
+                color_space: TerminalColorSpace::Srgb,
+                max_pixel_width: 4096,
+                max_pixel_height: 4096,
+                max_frame_bytes: 16 * 1024 * 1024,
+                max_regions: 64,
+            });
         }
+        let gpu_error = TerminalError {
+            code: TerminalErrorCode::UnsupportedCapability,
+            message: "rust-gpu-slug unavailable: no Vulkan 1.2 compute device was found"
+                .to_string(),
+            retryable: false,
+            server_sequence: 7,
+        };
+        let unavailable_presentations = pixel_transports
+            .iter()
+            .map(
+                |(damage_mode_id, transport_id, _encoding, _steady_frame_kind)| {
+                    TerminalPresentationUnavailable {
+                        renderer_id: "rust-gpu-slug".to_string(),
+                        rasterization_owner: TerminalRasterizationOwner::Server,
+                        damage_mode_id: (*damage_mode_id).to_string(),
+                        transport_id: (*transport_id).to_string(),
+                        transport_version: 1,
+                        error: gpu_error.clone(),
+                    }
+                },
+            )
+            .collect();
         let result = TerminalPresentationCapabilitiesResult {
-            session_id: "session-v4".to_string(),
+            session_id: "session-v5".to_string(),
             default_renderer_id: "rust-cpu-fontdue".to_string(),
             default_transport_id: "full-png".to_string(),
             modes,
+            unavailable_presentations,
             server_sequence: 7,
         };
-        let bytes = vox_phon::to_vec(&result).expect("encode V4 capabilities");
+        let bytes = vox_phon::to_vec(&result).expect("encode V5 capabilities");
         let decoded: TerminalPresentationCapabilitiesResult =
-            vox_phon::from_slice(&bytes).expect("decode V4 capabilities");
+            vox_phon::from_slice(&bytes).expect("decode V5 capabilities");
         assert_eq!(decoded, result);
-        assert_eq!(decoded.modes.len(), 6);
+        assert_eq!(decoded.modes.len(), 3);
         assert!(decoded.modes.iter().all(|mode| {
-            mode.rasterization_owner == TerminalRasterizationOwner::Server
+            mode.renderer_id == "rust-cpu-fontdue"
+                && mode.rasterization_owner == TerminalRasterizationOwner::Server
                 && mode.frame_contract_version == 1
         }));
-        for renderer_id in ["rust-cpu-fontdue", "rust-gpu-slug"] {
-            for transport_id in ["full-png", "full-raw-rgba", "dirty-raw-rgba"] {
-                assert!(decoded.modes.iter().any(|mode| {
-                    mode.renderer_id == renderer_id && mode.transport_id == transport_id
-                }));
-            }
+        assert!(decoded.modes.iter().any(|mode| {
+            mode.renderer_id == decoded.default_renderer_id
+                && mode.transport_id == decoded.default_transport_id
+        }));
+        assert_eq!(decoded.unavailable_presentations.len(), 3);
+        assert!(decoded.unavailable_presentations.iter().all(|unavailable| {
+            unavailable.renderer_id == "rust-gpu-slug"
+                && unavailable.rasterization_owner == TerminalRasterizationOwner::Server
+                && unavailable.transport_version == 1
+                && unavailable.error.code == TerminalErrorCode::UnsupportedCapability
+                && unavailable
+                    .error
+                    .message
+                    .contains("Vulkan 1.2 compute device")
+                && !unavailable.error.retryable
+                && unavailable.error.server_sequence == decoded.server_sequence
+                && !decoded.modes.iter().any(|mode| {
+                    mode.renderer_id == unavailable.renderer_id
+                        && mode.rasterization_owner == unavailable.rasterization_owner
+                        && mode.damage_mode_id == unavailable.damage_mode_id
+                        && mode.transport_id == unavailable.transport_id
+                        && mode.transport_version == unavailable.transport_version
+                })
+        }));
+        for transport_id in ["full-png", "full-raw-rgba", "dirty-raw-rgba"] {
+            assert!(decoded.modes.iter().any(|mode| {
+                mode.renderer_id == "rust-cpu-fontdue" && mode.transport_id == transport_id
+            }));
+            assert!(decoded.unavailable_presentations.iter().any(|unavailable| {
+                unavailable.renderer_id == "rust-gpu-slug"
+                    && unavailable.transport_id == transport_id
+            }));
         }
     }
 
@@ -1166,6 +1236,10 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../../test-fixtures/terminal/terminal-contract-v4.json"
         ));
+        let v5 = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test-fixtures/terminal/terminal-contract-v5.json"
+        ));
         let service = terminal_service_descriptor();
         assert_eq!(service.service_name, "Terminal");
         assert_eq!(service.methods.len(), 13);
@@ -1219,6 +1293,10 @@ mod tests {
                 v4.contains(&expected),
                 "v4 fixture is missing descriptor entry: {expected}"
             );
+            assert!(
+                v5.contains(&expected),
+                "v5 fixture is missing descriptor entry: {expected}"
+            );
         }
         assert!(v2.contains("\"role\": \"channel.arg.1.tx.element\""));
         assert!(v2.contains("\"producer_pending_bound\": 1"));
@@ -1245,5 +1323,22 @@ mod tests {
         assert!(v4.contains("\"sequence_scope\": \"presentation-generation\""));
         assert!(v4.contains("\"close\": \"terminates-bound-raster-subscriptions\""));
         assert!(v4.contains("\"replacement\": \"fresh-lane-on-same-connection\""));
+        assert!(v5.contains("\"version\": 5"));
+        assert!(v5.contains("\"selectable_collection\": \"modes\""));
+        assert!(v5.contains("\"unavailable_collection\": \"unavailable_presentations\""));
+        assert!(v5.contains("\"defaults_must_identify_selectable_mode\": true"));
+        assert_eq!(
+            v5.matches("\"renderer_id\": \"rust-cpu-fontdue\"").count(),
+            3
+        );
+        assert_eq!(v5.matches("\"renderer_id\": \"rust-gpu-slug\"").count(), 3);
+        assert_eq!(v5.matches("\"code\": \"UnsupportedCapability\"").count(), 3);
+        assert_eq!(
+            v5.matches("rust-gpu-slug unavailable: no Vulkan 1.2 compute device was found")
+                .count(),
+            3
+        );
+        assert!(v5.contains("\"modes_semantics\": \"valid-selectable-only\""));
+        assert!(v5.contains("\"selection\": \"reject-with-advertised-error-without-fallback\""));
     }
 }

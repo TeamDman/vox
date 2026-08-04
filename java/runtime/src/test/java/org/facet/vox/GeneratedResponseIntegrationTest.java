@@ -196,7 +196,16 @@ public final class GeneratedResponseIntegrationTest {
     }
 
     private static void largeRasterChannelItemUsesByteRunLimit() throws Exception {
-        byte[] pixels = new byte[1_100_000];
+        int channelFrameBytes = 18 * 1024 * 1024;
+        PhonLimits channelLimits = new PhonLimits(
+                channelFrameBytes,
+                PhonLimits.defaults().schemaBytes(),
+                PhonLimits.defaults().nestingDepth(),
+                PhonLimits.defaults().collectionEntries(),
+                channelFrameBytes,
+                PhonLimits.defaults().referencedSchemas(),
+                PhonLimits.defaults().planningWork());
+        byte[] pixels = new byte[17 * 1024 * 1024];
         for (int index = 0; index < pixels.length; index++) pixels[index] = (byte) (index * 31);
         TerminalRange emptyRange = new TerminalRange(0, 0, 0, 0);
         TerminalRasterFrame frame = new TerminalRasterFrame(
@@ -218,22 +227,29 @@ public final class GeneratedResponseIntegrationTest {
         TerminalRasterFrameEvent event = new TerminalRasterFrameEvent(
                 "session", "connection", "epoch", "presentation", 1, 1, 0, true,
                 "rust-gpu-slug", "full", "full-raw-rgba", 1, 1,
-                16L * 1024L * 1024L, 64, "large-raster", frame
+                channelFrameBytes, 64, "large-raster", frame
         );
-        byte[] payload = PhonCodec.encode(
-                TerminalRasterFrameEvent.ADAPTER, event, PhonLimits.defaults());
         SchemaClosure writer = SchemaClosure.fromBundleBytes(
                 TerminalRasterFrameEvent.ADAPTER.schema().bundleBytes(), PhonLimits.defaults());
+        byte[][] sent = new byte[1][];
         ChannelRuntime.Transport transport = new ChannelRuntime.Transport() {
-            public boolean item(long laneId, long channelId, byte[] bytes) { return true; }
+            public boolean item(long laneId, long channelId, byte[] bytes) {
+                sent[0] = bytes.clone();
+                return true;
+            }
             public boolean close(long laneId, long channelId) { return true; }
             public boolean reset(long laneId, long channelId) { return true; }
             public boolean grant(long laneId, long channelId, int additional) { return true; }
         };
+        ChannelRuntime.Sender<TerminalRasterFrameEvent> sender = new ChannelRuntime.Sender<>(
+                1, 2, TerminalRasterFrameEvent.ADAPTER, transport, 1, channelLimits);
         ChannelRuntime.Receiver<TerminalRasterFrameEvent> receiver = new ChannelRuntime.Receiver<>(
-                1, 2, TerminalRasterFrameEvent.ADAPTER, transport, 1);
+                1, 2, TerminalRasterFrameEvent.ADAPTER, transport, 1, channelLimits);
 
-        receiver.item(payload, writer);
+        sender.send(event);
+        check(sent[0] != null && sent[0].length > PhonLimits.defaults().inputBytes(),
+                "configured channel sender exceeds the default Phon input limit");
+        receiver.item(sent[0], writer);
         TerminalRasterFrameEvent decoded = receiver.receive(Duration.ZERO);
 
         check(decoded != null && Arrays.equals(pixels, decoded.frame().payload()),

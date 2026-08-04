@@ -75,15 +75,27 @@ final class ChannelRuntime {
         private final long laneId;
         private final long channelId;
         private final PhonAdapter<T> adapter;
+        private final PhonLimits limits;
         private final Transport transport;
         private int credit;
         private boolean closed;
         private VoxException failure;
 
         Sender(long laneId, long channelId, PhonAdapter<T> adapter, Transport transport, int credit) {
+            this(laneId, channelId, adapter, transport, credit, PhonLimits.defaults());
+        }
+
+        Sender(
+                long laneId,
+                long channelId,
+                PhonAdapter<T> adapter,
+                Transport transport,
+                int credit,
+                PhonLimits limits) {
             this.laneId = laneId;
             this.channelId = channelId;
             this.adapter = adapter;
+            this.limits = Objects.requireNonNull(limits, "limits");
             this.transport = transport;
             this.credit = credit;
         }
@@ -144,7 +156,7 @@ final class ChannelRuntime {
 
         private byte[] encode(T value) throws VoxException {
             try {
-                return PhonCodec.encode(adapter, value, PhonLimits.defaults());
+                return PhonCodec.encode(adapter, value, limits);
             } catch (PhonException failure) {
                 throw new VoxException("cannot encode channel item", failure);
             }
@@ -160,6 +172,7 @@ final class ChannelRuntime {
         private final long laneId;
         private final long channelId;
         private final PhonAdapter<T> adapter;
+        private final PhonLimits limits;
         private final Transport transport;
         private final int capacity;
         private final ArrayDeque<T> queue = new ArrayDeque<>();
@@ -168,9 +181,20 @@ final class ChannelRuntime {
         private boolean reset;
 
         Receiver(long laneId, long channelId, PhonAdapter<T> adapter, Transport transport, int capacity) {
+            this(laneId, channelId, adapter, transport, capacity, PhonLimits.defaults());
+        }
+
+        Receiver(
+                long laneId,
+                long channelId,
+                PhonAdapter<T> adapter,
+                Transport transport,
+                int capacity,
+                PhonLimits limits) {
             this.laneId = laneId;
             this.channelId = channelId;
             this.adapter = adapter;
+            this.limits = Objects.requireNonNull(limits, "limits");
             this.transport = transport;
             this.capacity = capacity;
         }
@@ -190,8 +214,8 @@ final class ChannelRuntime {
                 throw new VoxException("peer exceeded channel credit");
             }
             try {
-                byte[] local = PhonCodec.transcode(writer, adapter.schema(), payload, PhonLimits.defaults());
-                queue.addLast(PhonCodec.decode(adapter, local, PhonLimits.defaults()));
+                byte[] local = PhonCodec.transcode(writer, adapter.schema(), payload, limits);
+                queue.addLast(PhonCodec.decode(adapter, local, limits));
             } catch (PhonException decodeFailure) {
                 throw new VoxException("cannot decode channel item", decodeFailure);
             }

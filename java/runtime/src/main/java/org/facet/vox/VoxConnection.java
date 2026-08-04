@@ -22,6 +22,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import org.facet.vox.tcp.StreamFraming;
 import org.facet.vox.tcp.TransportPrologue;
+import org.facet.phon.PhonLimits;
 import org.facet.phon.SchemaClosure;
 import org.facet.phon.Value;
 
@@ -157,6 +158,7 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
     private final boolean initiator;
     private final ServiceRegistry services;
     private final ConnectionOptions options;
+    private final PhonLimits channelLimits;
     private final ArrayBlockingQueue<DriverCommand> commands;
     private final AtomicInteger queuedBytes = new AtomicInteger();
     private final AtomicBoolean driverOwned = new AtomicBoolean();
@@ -186,6 +188,7 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
         this.initiator = initiator;
         this.services = Objects.requireNonNull(services, "services");
         this.options = Objects.requireNonNull(options, "options");
+        channelLimits = WireCodec.limitsFor(options);
         commands = new ArrayBlockingQueue<>(options.maxQueuedOutboundMessages());
         // Match the Rust parity convention: the initiator starts with an odd lane id.
         nextLaneId = new AtomicLong(initiator ? 1 : 2);
@@ -851,14 +854,14 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
                 throw new VoxException("Tx descriptor received non-Tx endpoint");
             }
             receiver = new ChannelRuntime.Receiver<>(
-                    laneId, channelId, adapter, this, options.initialChannelCredit());
+                    laneId, channelId, adapter, this, options.initialChannelCredit(), channelLimits);
             ((VoxTx<T>) tx).core().bindReceiver(receiver);
         } else {
             if (!(endpoint instanceof VoxRx<?> rx)) {
                 throw new VoxException("Rx descriptor received non-Rx endpoint");
             }
             sender = new ChannelRuntime.Sender<>(
-                    laneId, channelId, adapter, this, call.peerInitialChannelCredit());
+                    laneId, channelId, adapter, this, call.peerInitialChannelCredit(), channelLimits);
             ((VoxRx<T>) rx).core().bindSender(sender);
         }
         String key = channelKey(laneId, channelId);
@@ -901,12 +904,12 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
         Object endpoint;
         if (descriptor.direction() == ChannelDescriptor.Direction.TX) {
             sender = new ChannelRuntime.Sender<>(
-                    laneId, channelId, adapter, this, peerInitialChannelCredit);
+                    laneId, channelId, adapter, this, peerInitialChannelCredit, channelLimits);
             core.bindSender(sender);
             endpoint = new VoxTx<>(core);
         } else {
             receiver = new ChannelRuntime.Receiver<>(
-                    laneId, channelId, adapter, this, options.initialChannelCredit());
+                    laneId, channelId, adapter, this, options.initialChannelCredit(), channelLimits);
             core.bindReceiver(receiver);
             endpoint = new VoxRx<>(core);
         }

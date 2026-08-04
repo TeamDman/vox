@@ -28,14 +28,7 @@ final class WireCodec {
 
     WireCodec(ConnectionOptions options) throws VoxException {
         initialChannelCredit = options.initialChannelCredit();
-        limits = new PhonLimits(
-                options.maxFrameBytes(),
-                options.maxSchemaBytes(),
-                128,
-                1_000_000,
-                options.maxFrameBytes(),
-                options.maxSchemas(),
-                1_000_000);
+        limits = limitsFor(options);
         try {
             handshakeSchema = SchemaClosure.fromCanonicalBytes(
                     SchemaId.fromLong(HandshakeWireSchemas.HANDSHAKE_MESSAGE_SCHEMA_ID),
@@ -48,6 +41,17 @@ final class WireCodec {
         } catch (PhonException failure) {
             throw new VoxException("generated Java wire schemas are invalid", failure);
         }
+    }
+
+    static PhonLimits limitsFor(ConnectionOptions options) {
+        return new PhonLimits(
+                options.maxFrameBytes(),
+                options.maxSchemaBytes(),
+                128,
+                1_000_000,
+                options.maxFrameBytes(),
+                options.maxSchemas(),
+                1_000_000);
     }
 
     byte[] localMessageSchemaBytes() throws VoxException {

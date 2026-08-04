@@ -1611,6 +1611,24 @@ fn java_default_expression(shape: &'static Shape) -> String {
                 .join(", ");
             format!("new {}({values})", java_type_name(name))
         }
+        ShapeKind::Enum(EnumInfo {
+            name: Some(name),
+            variants,
+        }) if variants
+            .iter()
+            .all(|variant| matches!(classify_variant(variant), VariantKind::Unit)) =>
+        {
+            variants.first().map_or_else(
+                || "null".to_string(),
+                |variant| {
+                    format!(
+                        "{}.{}",
+                        java_type_name(name),
+                        java_enum_constant(variant.name)
+                    )
+                },
+            )
+        }
         ShapeKind::Pointer { pointee } => java_default_expression(pointee),
         _ => "null".into(),
     }
@@ -1779,6 +1797,13 @@ mod tests {
         Zero = 0,
     }
 
+    #[derive(Clone, Debug, Facet)]
+    #[repr(u8)]
+    enum DefaultedMode {
+        Auto = 0,
+        Manual = 1,
+    }
+
     fn fixture_service() -> ServiceDescriptor {
         let echo = method_descriptor::<(String,), String>(
             "Review",
@@ -1901,6 +1926,14 @@ mod tests {
         assert!(file.source.contains(&format!(
             "new Schema.Field(\"optional_count\", {optional}, false)"
         )));
+    }
+
+    #[test]
+    fn java_default_expression_uses_first_unit_enum_variant() {
+        assert_eq!(
+            super::java_default_expression(DefaultedMode::SHAPE),
+            "DefaultedMode.AUTO"
+        );
     }
 
     #[test]

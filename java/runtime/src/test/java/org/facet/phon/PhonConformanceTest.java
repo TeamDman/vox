@@ -23,6 +23,7 @@ public final class PhonConformanceTest {
         valueCorpusRoundTrips(repository);
         typedCodecRoundTrips();
         byteRunsUseTheirOwnLimit();
+        byteListsUseByteRunLimitsDuringCompatibilityTranscoding();
         compatibilityPlansEagerly();
         malformedAndLimitsFail(repository);
         System.out.println("Phon Java conformance passed ("+assertions+" assertions)");
@@ -140,6 +141,22 @@ public final class PhonConformanceTest {
         check(encodeBound,"compact byte run still obeys byteRunLength when encoding");
         boolean decodeBound=false;try{PhonCodec.decode(bytes,compact,shortRun);}catch(PhonException e){decodeBound=e.kind()==PhonException.Kind.LIMIT;}
         check(decodeBound,"compact byte run still obeys byteRunLength when decoding");
+    }
+
+    private static void byteListsUseByteRunLimitsDuringCompatibilityTranscoding()throws Exception{
+        Schema u8=Schema.primitive(Schema.Primitive.U8);
+        Schema list=new Schema(SchemaId.fromLong(0xaa0667df4299d151L),List.of(),
+                new Schema.ListKind(Schema.Ref.concrete(u8.id())));
+        SchemaClosure byteList=new SchemaClosure(list,List.of(u8));
+        PhonLimits limits=new PhonLimits(1024,1024,8,2,64,8,64);
+        byte[]payload=new byte[32];for(int index=0;index<payload.length;index++)payload[index]=(byte)(index*11);
+        PhonEncoder encoder=new PhonEncoder(limits);encoder.writeBytes(payload);byte[]wire=encoder.finish();
+
+        Value decoded=PhonCodec.decodeValue(byteList,wire,limits);
+        check(decoded.type()==Value.Type.BYTES,"list<u8> compact values stay a bounded byte run");
+        same(payload,decoded.asBytes(),"list<u8> may exceed collectionEntries");
+        same(wire,PhonCodec.transcode(byteList,byteList,wire,limits),
+                "list<u8> compatibility transcode uses byteRunLength");
     }
 
     private static void compatibilityPlansEagerly()throws Exception{

@@ -659,6 +659,34 @@ async fn response_delivery_terminalizes_request_channels() {
     );
 }
 
+// r[verify rpc.request.scope.terminal]
+// r[verify rpc.channel.lifecycle]
+#[tokio::test]
+async fn response_delivery_wakes_associated_tx_closed() {
+    let (client_caller, _server_caller, _server_connection) =
+        captured_test_lane_pair(ImmediateReplyHandler).await;
+
+    let (input_tx, input_rx) = channel::<u32>();
+    let args = ReceiveArgs { input: input_rx };
+
+    client_caller
+        .caller
+        .call(RequestCall {
+            channels: Vec::new(),
+            method_id: MethodId(1),
+            args: Payload::outgoing(&args),
+            schemas: Default::default(),
+            metadata: Default::default(),
+        })
+        .await
+        .expect("call should receive response");
+
+    tokio::time::timeout(Duration::from_millis(500), input_tx.closed())
+        .await
+        .expect("response delivery should wake associated Tx::closed");
+    assert!(input_tx.is_closed());
+}
+
 // r[verify rpc.timeout.idle-progress]
 #[tokio::test]
 async fn request_idle_timeout_wakes_caller_with_timeout() {
@@ -2472,22 +2500,77 @@ async fn dropping_bound_rx_makes_peer_tx_send_fail() {
 
     drop(client_rx);
 
-    let mut observed_error = false;
-    for i in 0_u32..100 {
-        match tokio::time::timeout(Duration::from_millis(500), server_tx.send(i)).await {
-            Ok(Ok(())) => {}
-            Ok(Err(_)) => {
-                observed_error = true;
-                break;
-            }
-            Err(_) => panic!("send timed out instead of observing dropped Rx"),
-        }
-    }
-
+    tokio::time::timeout(Duration::from_millis(500), server_tx.closed())
+        .await
+        .expect("server Tx should observe dropped peer Rx without sending a probe");
+    assert!(server_tx.is_closed());
     assert!(
-        observed_error,
-        "server Tx should fail after peer Rx is dropped"
+        server_tx.send(2_u32).await.is_err(),
+        "server Tx should reject sends after peer Rx is dropped"
     );
+}
+
+// r[verify rpc.channel.lifecycle]
+// r[verify rpc.channel.close]
+#[tokio::test]
+async fn explicit_close_wakes_tx_closed_and_ends_peer_rx() {
+    let (client_caller, server_caller, _server_connection) = captured_test_lane_pair(()).await;
+    let (channel_id, sink) = server_caller.caller.driver().create_tx_channel();
+
+    let mut server_tx = Tx::<u32>::unbound();
+    let sink: Arc<dyn ChannelSink> = sink;
+    server_tx.bind(sink);
+    let server_tx = Arc::new(server_tx);
+
+    let mut client_rx: Rx<u32> =
+        vox_types::channel::with_channel_binder(client_caller.caller.driver(), || {
+            channel_id.try_into().expect("bind client rx")
+        });
+
+    let waiter_tx = Arc::clone(&server_tx);
+    let waiter = tokio::spawn(async move { waiter_tx.closed().await });
+    assert!(!waiter.is_finished());
+
+    server_tx
+        .close(Metadata::default())
+        .await
+        .expect("explicit channel close");
+
+    tokio::time::timeout(Duration::from_millis(500), waiter)
+        .await
+        .expect("Tx::closed waiter did not wake after explicit close")
+        .expect("Tx::closed waiter task panicked");
+    assert!(server_tx.is_closed());
+    assert!(
+        client_rx
+            .recv()
+            .await
+            .expect("explicit close should be graceful")
+            .is_none(),
+        "peer Rx should observe graceful EOF"
+    );
+}
+
+// r[verify rpc.channel.lifecycle]
+// r[verify rpc.channel.connection-closure]
+#[tokio::test]
+async fn tx_closed_wakes_when_in_memory_connection_closes() {
+    let (_client_caller, server_caller, server_connection) = captured_test_lane_pair(()).await;
+    let (_channel_id, sink) = server_caller.caller.driver().create_tx_channel();
+
+    let mut tx = Tx::<u32>::unbound();
+    let sink: Arc<dyn ChannelSink> = sink;
+    tx.bind(sink);
+    assert!(!tx.is_closed());
+
+    server_connection
+        .shutdown()
+        .expect("server connection shutdown request");
+
+    tokio::time::timeout(Duration::from_millis(500), tx.closed())
+        .await
+        .expect("Tx::closed should wake when its in-memory connection closes");
+    assert!(tx.is_closed());
 }
 
 #[tokio::test]

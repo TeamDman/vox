@@ -397,6 +397,44 @@ pub struct BoundChannelSink {
     pub sink: Arc<dyn ChannelSink>,
 }
 
+/// A race-free, one-shot notification that a logical channel is terminal.
+///
+/// This is public so Vox runtimes can back [`ChannelSink::closed`] with their
+/// driver state. Application code should normally use [`Tx::closed`] and
+/// [`Tx::is_closed`] instead.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct ChannelCloseSignal {
+    closed: Semaphore,
+}
+
+impl ChannelCloseSignal {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            closed: Semaphore::new(name, 0),
+        }
+    }
+
+    pub fn close(&self) {
+        self.closed.close();
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed.is_closed()
+    }
+
+    pub async fn closed(&self) {
+        if self.is_closed() {
+            return;
+        }
+
+        // A zero-permit semaphore can only complete this acquire after close.
+        // Semaphore closure is persistent, so a close between the state check
+        // and registration cannot be lost.
+        let _ = self.closed.acquire().await;
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChannelMailboxStats {
     pub len: usize,
@@ -634,6 +672,8 @@ pub struct ChannelCore {
     binding: Mutex<Option<ChannelBinding>>,
     logical_receiver: Mutex<Option<LogicalReceiverState>>,
     binding_changed: Notify,
+    tx_prebind_state_changed: ChannelCloseSignal,
+    paired_receiver_closed: ChannelCloseSignal,
     debug_context: ChannelDebugContext,
 }
 
@@ -643,6 +683,12 @@ impl ChannelCore {
             binding: Mutex::new(None),
             logical_receiver: Mutex::new(None),
             binding_changed: Notify::new("vox_types.channel.binding_changed"),
+            tx_prebind_state_changed: ChannelCloseSignal::new(
+                "vox_types.channel.tx_prebind_state_changed",
+            ),
+            paired_receiver_closed: ChannelCloseSignal::new(
+                "vox_types.channel.paired_receiver_closed",
+            ),
             debug_context,
         }
     }
@@ -651,7 +697,30 @@ impl ChannelCore {
     pub fn set_binding(&self, binding: ChannelBinding) {
         let mut guard = self.binding.lock().expect("channel core mutex poisoned");
         *guard = Some(binding);
+        self.tx_prebind_state_changed.close();
         self.binding_changed.notify_waiters();
+    }
+
+    fn mark_paired_receiver_dropped(&self) {
+        let transferred_to_runtime = {
+            let guard = self.binding.lock().expect("channel core mutex poisoned");
+            matches!(guard.as_ref(), Some(ChannelBinding::Sink(_)))
+        };
+        if transferred_to_runtime {
+            return;
+        }
+
+        self.paired_receiver_closed.close();
+        self.tx_prebind_state_changed.close();
+        self.binding_changed.notify_waiters();
+    }
+
+    fn is_paired_receiver_closed(&self) -> bool {
+        self.paired_receiver_closed.is_closed()
+    }
+
+    async fn tx_binding_or_receiver_closed(&self) {
+        self.tx_prebind_state_changed.closed().await;
     }
 
     /// Clone the sink from the core (for Tx reading the sink).
@@ -1099,6 +1168,21 @@ pub trait ChannelSink: crate::MaybeSend + crate::MaybeSync + 'static {
         Err(TrySendError::Full(()))
     }
 
+    /// Returns whether this logical channel is already terminal.
+    fn is_closed(&self) -> bool {
+        false
+    }
+
+    /// Waits until the logical receiver, request, lane, or connection makes
+    /// this channel terminal.
+    ///
+    /// Runtime-backed sinks override this with an event-driven driver signal.
+    /// The default never resolves because an arbitrary custom sink has no
+    /// closure-notification contract.
+    fn closed(&self) -> Pin<Box<dyn crate::MaybeSendFuture<Output = ()> + '_>> {
+        Box::pin(std::future::pending())
+    }
+
     fn close_channel(
         &self,
         metadata: Metadata,
@@ -1221,6 +1305,14 @@ impl<S: ChannelSink> ChannelSink for CreditSink<S> {
             }
             Err(err) => Err(err),
         }
+    }
+
+    fn is_closed(&self) -> bool {
+        self.inner.is_closed()
+    }
+
+    fn closed(&self) -> Pin<Box<dyn crate::MaybeSendFuture<Output = ()> + '_>> {
+        self.inner.closed()
     }
 
     fn close_channel(
@@ -1409,6 +1501,49 @@ impl<T> Tx<T> {
     /// Check if this Tx is part of a channel() pair (has a shared core).
     pub fn has_core(&self) -> bool {
         self.core.inner.is_some()
+    }
+
+    /// Returns whether this sender's logical channel is terminal.
+    // r[impl rpc.channel.lifecycle]
+    pub fn is_closed(&self) -> bool {
+        if self.closed.load(Ordering::Acquire) {
+            return true;
+        }
+        if self
+            .core
+            .inner
+            .as_ref()
+            .is_some_and(|core| core.is_paired_receiver_closed())
+        {
+            return true;
+        }
+        self.resolve_sink_now().is_some_and(|sink| sink.is_closed())
+    }
+
+    /// Waits until this sender's logical receiver or owning request, lane, or
+    /// connection closes.
+    ///
+    /// The wait is event-driven and does not send a probe item. Closure that
+    /// happens before or while this future is being registered is retained, so
+    /// callers cannot miss the wakeup.
+    // r[impl rpc.channel.lifecycle]
+    pub async fn closed(&self) {
+        loop {
+            if self.is_closed() {
+                return;
+            }
+
+            if let Some(sink) = self.resolve_sink_now() {
+                sink.closed().await;
+                return;
+            }
+
+            let Some(core) = &self.core.inner else {
+                std::future::pending::<()>().await;
+                unreachable!("pending future returned")
+            };
+            core.tx_binding_or_receiver_closed().await;
+        }
     }
 
     // r[impl rpc.channel.pair.tx-read]
@@ -1944,6 +2079,10 @@ impl<T> Drop for Rx<T> {
             return;
         }
 
+        if let Some(core) = &self.core.inner {
+            core.mark_paired_receiver_dropped();
+        }
+
         if self.replenisher.inner.is_none()
             && let Some(core) = &self.core.inner
         {
@@ -2279,10 +2418,48 @@ mod tests {
         tx.close(Metadata::default())
             .await
             .expect("close should succeed");
+        assert!(tx.is_closed());
+        tokio::time::timeout(std::time::Duration::from_millis(100), tx.closed())
+            .await
+            .expect("explicitly closed Tx should notify without waiting");
         drop(tx);
 
         assert_eq!(sink_impl.close_calls.load(Ordering::Acquire), 1);
         assert_eq!(sink_impl.close_on_drop_calls.load(Ordering::Acquire), 0);
+    }
+
+    // r[verify rpc.channel.lifecycle]
+    #[tokio::test]
+    async fn paired_tx_closed_wakes_when_rx_is_dropped() {
+        let (tx, rx) = channel::<u32>();
+        let wait = tx.closed();
+        tokio::pin!(wait);
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut wait)
+                .await
+                .is_err(),
+            "open local channel should keep Tx::closed pending"
+        );
+
+        drop(rx);
+
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut wait)
+            .await
+            .expect("dropping paired Rx should wake Tx::closed");
+        assert!(tx.is_closed());
+    }
+
+    // r[verify rpc.channel.lifecycle]
+    #[tokio::test]
+    async fn paired_tx_closed_observes_rx_drop_before_waiter_registration() {
+        let (tx, rx) = channel::<u32>();
+        drop(rx);
+
+        assert!(tx.is_closed());
+        tokio::time::timeout(std::time::Duration::from_millis(100), tx.closed())
+            .await
+            .expect("Tx::closed must retain an earlier receiver drop");
     }
 
     #[test]
@@ -2680,6 +2857,11 @@ mod tests {
         assert!(
             core.get_sink().is_some(),
             "core should have a Sink binding from create_tx()"
+        );
+        drop(args);
+        assert!(
+            !tx.is_closed(),
+            "dropping an Rx transferred into an RPC call must not close its paired Tx"
         );
     }
 

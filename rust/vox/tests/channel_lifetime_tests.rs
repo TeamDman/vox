@@ -1,6 +1,7 @@
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use vox::Rx;
+use vox::{Rx, Tx};
 
 #[derive(Clone, Debug, facet::Facet)]
 #[repr(u8)]
@@ -33,6 +34,26 @@ impl BulkChannelStash for BulkChannelDrainService {
             });
         }
         Ok(())
+    }
+}
+
+#[vox::service]
+trait ChannelClosureProbe {
+    async fn wait_for_receiver_close(&self, output: Tx<u32>) -> bool;
+}
+
+#[derive(Clone)]
+struct ChannelClosureProbeService {
+    started: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+}
+
+impl ChannelClosureProbe for ChannelClosureProbeService {
+    async fn wait_for_receiver_close(&self, output: Tx<u32>) -> bool {
+        if let Some(started) = self.started.lock().expect("started mutex poisoned").take() {
+            let _ = started.send(());
+        }
+        output.closed().await;
+        output.is_closed()
     }
 }
 
@@ -98,6 +119,58 @@ async fn memory_reliable_rx_argument_delivers_large_item_burst_before_response()
         .await
         .expect("attach did not complete after large-item burst")
         .expect("attach task panicked");
+
+    drop(client);
+    server.abort();
+}
+
+// r[verify rpc.channel.lifecycle]
+// r[verify rpc.channel.reset]
+#[tokio::test]
+async fn memory_rpc_tx_closed_wakes_when_peer_rx_is_dropped() {
+    let (client_link, server_link) = vox::memory_link_pair(16);
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let service = ChannelClosureProbeService {
+        started: Arc::new(Mutex::new(Some(started_tx))),
+    };
+
+    let server = tokio::spawn(async move {
+        let connection = vox::acceptor_on(server_link)
+            .channel_capacity(16)
+            .on_lane(ChannelClosureProbeDispatcher::new(service))
+            .establish_connection()
+            .await
+            .expect("server establish");
+        connection.closed().await;
+    });
+
+    let client = vox::initiator_on(client_link)
+        .channel_capacity(16)
+        .establish::<ChannelClosureProbeClient>()
+        .await
+        .expect("client establish");
+
+    let (tx, rx) = vox::channel::<u32>();
+    let probe_client = client.clone();
+    let call = tokio::spawn(async move { probe_client.wait_for_receiver_close(tx).await });
+
+    tokio::time::timeout(Duration::from_secs(1), started_rx)
+        .await
+        .expect("handler did not receive Tx")
+        .expect("handler start signal dropped");
+    assert!(
+        !call.is_finished(),
+        "Tx::closed should remain pending while the peer Rx is live"
+    );
+
+    drop(rx);
+
+    let closed = tokio::time::timeout(Duration::from_secs(1), call)
+        .await
+        .expect("callee Tx::closed did not observe dropped peer Rx")
+        .expect("probe call task panicked")
+        .expect("probe RPC failed");
+    assert!(closed, "callee should observe the channel as terminal");
 
     drop(client);
     server.abort();

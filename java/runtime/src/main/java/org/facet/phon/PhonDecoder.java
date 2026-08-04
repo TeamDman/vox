@@ -82,13 +82,19 @@ public final class PhonDecoder {
         return (int) value;
     }
     public int readCount() throws PhonException {
+        return readLength(limits.collectionEntries(), "count exceeds collectionEntries");
+    }
+    private int readByteRunLength() throws PhonException {
+        return readLength(limits.byteRunLength(), "byte run exceeds byteRunLength");
+    }
+    private int readLength(int maximum, String limitMessage) throws PhonException {
         need(4);
         long count = 0;
         for (int index = 0; index < 4; index++) {
             count |= (long) raw() << (8 * index);
         }
         count &= 0xffff_ffffL;
-        if (count > limits.collectionEntries()) throw limit("count exceeds collectionEntries");
+        if (count > maximum) throw limit(limitMessage);
         return (int) count;
     }
     public boolean readPresence() throws PhonException { return readBool(); }
@@ -165,8 +171,11 @@ public final class PhonDecoder {
         return count.intValue();
     }
     private byte[] dynamicBytes() throws PhonException {
-        int length = dynamicCount();
-        if (length > limits.byteRunLength()) throw limit("dynamic byte run exceeds byteRunLength");
+        BigInteger encodedLength = dynamicInteger(4, false);
+        if (encodedLength.compareTo(BigInteger.valueOf(limits.byteRunLength())) > 0) {
+            throw limit("dynamic byte run exceeds byteRunLength");
+        }
+        int length = encodedLength.intValue();
         need(length);
         byte[] result = new byte[length];
         System.arraycopy(bytes, position, result, 0, length);
@@ -203,8 +212,7 @@ public final class PhonDecoder {
         }
     }
     public byte[] readBytes() throws PhonException {
-        int length = readCount();
-        if (length > limits.byteRunLength()) throw limit("byte run exceeds byteRunLength");
+        int length = readByteRunLength();
         need(length); byte[] out = new byte[length]; System.arraycopy(bytes, position, out, 0, length); position += length; return out;
     }
     public <T> T readAdapted(PhonAdapter<T> adapter) throws PhonException {

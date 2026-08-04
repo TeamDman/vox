@@ -87,13 +87,17 @@ public final class PhonEncoder {
     public void writeBytes(byte[] value) throws PhonException { writeByteRun(value.clone()); }
     private void writeByteRun(byte[] bytes) throws PhonException {
         if (bytes.length > limits.byteRunLength()) throw limit("byte run exceeds byteRunLength");
-        writeCount(bytes.length); capacity(bytes.length); out.write(bytes, 0, bytes.length);
+        writeLength(bytes.length); capacity(bytes.length); out.write(bytes, 0, bytes.length);
     }
     public void writeCount(int count) throws PhonException {
         if (count < 0 || count > limits.collectionEntries()) throw limit("count exceeds collectionEntries");
+        writeLength(count);
+    }
+    private void writeLength(int length) throws PhonException {
+        if (length < 0) throw limit("negative length");
         capacity(4);
         for (int index = 0; index < 4; index++) {
-            out.write((count >>> (8 * index)) & 0xff);
+            out.write((length >>> (8 * index)) & 0xff);
         }
     }
     public void writePresence(boolean present) throws PhonException { writeBool(present); }

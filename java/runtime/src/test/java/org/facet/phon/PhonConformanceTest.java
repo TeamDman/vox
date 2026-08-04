@@ -22,6 +22,7 @@ public final class PhonConformanceTest {
         auxiliarySchemaBundlesRoundTripDeterministically();
         valueCorpusRoundTrips(repository);
         typedCodecRoundTrips();
+        byteRunsUseTheirOwnLimit();
         compatibilityPlansEagerly();
         malformedAndLimitsFail(repository);
         System.out.println("Phon Java conformance passed ("+assertions+" assertions)");
@@ -114,6 +115,31 @@ public final class PhonConformanceTest {
         };
         BigInteger max=BigInteger.ONE.shiftLeft(128).subtract(BigInteger.ONE);
         equal(max,PhonCodec.decode(u128,PhonCodec.encode(u128,max,PhonLimits.DEFAULT),PhonLimits.DEFAULT),"u128 boundary");
+    }
+
+    private static void byteRunsUseTheirOwnLimit()throws Exception{
+        PhonLimits limits=new PhonLimits(1024,1024,8,2,64,8,8);
+        byte[]payload=new byte[32];for(int index=0;index<payload.length;index++)payload[index]=(byte)(index*7);
+        PhonAdapter<byte[]>bytes=new PhonAdapter<>(){
+            private final SchemaClosure schema=closure(Schema.primitive(Schema.Primitive.BYTES));
+            public SchemaClosure schema(){return schema;}public void encode(PhonEncoder e,byte[]v)throws PhonException{e.writeBytes(v);}
+            public byte[]decode(PhonDecoder d)throws PhonException{return d.readBytes();}
+        };
+        byte[]compact=PhonCodec.encode(bytes,payload,limits);
+        same(payload,PhonCodec.decode(bytes,compact,limits),"compact byte run may exceed collectionEntries");
+
+        PhonEncoder dynamicEncoder=new PhonEncoder(limits);dynamicEncoder.writeDynamic(Value.bytes(payload));
+        Value dynamic=new PhonDecoder(dynamicEncoder.finish(),limits).readDynamic();
+        same(payload,dynamic.asBytes(),"dynamic byte run may exceed collectionEntries");
+
+        Value selfDescribing=ValueWire.decode(ValueWire.encode(Value.bytes(payload),limits),limits);
+        same(payload,selfDescribing.asBytes(),"self-describing byte run may exceed collectionEntries");
+
+        PhonLimits shortRun=new PhonLimits(1024,1024,8,64,16,8,8);
+        boolean encodeBound=false;try{PhonCodec.encode(bytes,payload,shortRun);}catch(PhonException e){encodeBound=e.kind()==PhonException.Kind.LIMIT;}
+        check(encodeBound,"compact byte run still obeys byteRunLength when encoding");
+        boolean decodeBound=false;try{PhonCodec.decode(bytes,compact,shortRun);}catch(PhonException e){decodeBound=e.kind()==PhonException.Kind.LIMIT;}
+        check(decodeBound,"compact byte run still obeys byteRunLength when decoding");
     }
 
     private static void compatibilityPlansEagerly()throws Exception{

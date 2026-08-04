@@ -1,6 +1,7 @@
 package org.facet.vox;
 
 import java.util.Arrays;
+import java.time.Duration;
 import org.facet.phon.CompatibilityPlan;
 import org.facet.phon.PhonCodec;
 import org.facet.phon.PhonException;
@@ -31,6 +32,12 @@ import org.facet.vox.generated.TerminalRasterFrameKind;
 import org.facet.vox.generated.TerminalRasterRendererTelemetry;
 import org.facet.vox.generated.TerminalRasterSubscribeRequest;
 import org.facet.vox.generated.TerminalRasterizationOwner;
+import org.facet.vox.generated.TerminalCursor;
+import org.facet.vox.generated.TerminalPromptMetadata;
+import org.facet.vox.generated.TerminalRange;
+import org.facet.vox.generated.TerminalRasterSnapshotTiming;
+import org.facet.vox.generated.TerminalSelection;
+import org.facet.vox.generated.TerminalSurfaceMetrics;
 import org.facet.vox.generated.TerminalSnapshot;
 import org.facet.vox.generated.TerminalSnapshotResponse;
 
@@ -75,6 +82,7 @@ public final class GeneratedResponseIntegrationTest {
         terminalRustApplicationErrorTranscodesThroughGeneratedResponseSchema();
         terminalRustSnapshotPayloadTranscodesThroughGeneratedResponseSchema();
         terminalFrameChannelElementSchemaIsTransitivelySelfContained();
+        largeRasterChannelItemUsesByteRunLimit();
         terminalPresentationV3FieldsRoundTripAndRejectUnknownOwner();
         System.out.println("GeneratedResponseIntegrationTest: PASS");
     }
@@ -185,6 +193,51 @@ public final class GeneratedResponseIntegrationTest {
                         schema.id().asLong() == 0xaa0667df4299d151L),
                 "terminal frame serialized closure carries nested byte payload schema");
         CompatibilityPlan.plan(writer, reader, PhonLimits.defaults());
+    }
+
+    private static void largeRasterChannelItemUsesByteRunLimit() throws Exception {
+        byte[] pixels = new byte[1_100_000];
+        for (int index = 0; index < pixels.length; index++) pixels[index] = (byte) (index * 31);
+        TerminalRange emptyRange = new TerminalRange(0, 0, 0, 0);
+        TerminalRasterFrame frame = new TerminalRasterFrame(
+                110, 50, 550, 500,
+                new TerminalSurfaceMetrics(110, 50, 550, 500, 5, 10, 8),
+                TerminalFrameEncoding.RGBA8,
+                TerminalRasterFrameKind.FULL,
+                2_200,
+                TerminalFrameOrigin.TOP_LEFT,
+                TerminalAlphaMode.STRAIGHT,
+                TerminalColorSpace.SRGB,
+                "test-font", "test-font-sha256", pixels, java.util.List.of(), true,
+                new TerminalCursor(0, 0, true),
+                false,
+                new TerminalSelection(0, 0, 0, 0),
+                new TerminalPromptMetadata(false, emptyRange, false, emptyRange, false, 0),
+                new TerminalRasterSnapshotTiming(0, 0, 0, 0, 0, 0, 0, 0)
+        );
+        TerminalRasterFrameEvent event = new TerminalRasterFrameEvent(
+                "session", "connection", "epoch", "presentation", 1, 1, 0, true,
+                "rust-gpu-slug", "full", "full-raw-rgba", 1, 1,
+                16L * 1024L * 1024L, 64, "large-raster", frame
+        );
+        byte[] payload = PhonCodec.encode(
+                TerminalRasterFrameEvent.ADAPTER, event, PhonLimits.defaults());
+        SchemaClosure writer = SchemaClosure.fromBundleBytes(
+                TerminalRasterFrameEvent.ADAPTER.schema().bundleBytes(), PhonLimits.defaults());
+        ChannelRuntime.Transport transport = new ChannelRuntime.Transport() {
+            public boolean item(long laneId, long channelId, byte[] bytes) { return true; }
+            public boolean close(long laneId, long channelId) { return true; }
+            public boolean reset(long laneId, long channelId) { return true; }
+            public boolean grant(long laneId, long channelId, int additional) { return true; }
+        };
+        ChannelRuntime.Receiver<TerminalRasterFrameEvent> receiver = new ChannelRuntime.Receiver<>(
+                1, 2, TerminalRasterFrameEvent.ADAPTER, transport, 1);
+
+        receiver.item(payload, writer);
+        TerminalRasterFrameEvent decoded = receiver.receive(Duration.ZERO);
+
+        check(decoded != null && Arrays.equals(pixels, decoded.frame().payload()),
+                "large generated raster survives the real channel compatibility path");
     }
 
     private static void terminalPresentationV3FieldsRoundTripAndRejectUnknownOwner()

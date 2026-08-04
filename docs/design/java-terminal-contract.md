@@ -106,6 +106,30 @@ control lane and independent sibling lanes remain usable; a fresh presentation
 lane may be opened on the same connection. Disconnecting the terminal session
 is a separate application operation.
 
+## Renderer evidence (terminal fixture V6)
+
+`TerminalRasterFrame.renderer` is a defaulted trailing record containing
+bounded evidence for the exact raster frame. It is deliberately not a third
+presentation selector: renderer and transport remain the independent user
+controls, and `TerminalRasterizationOwner` remains closed metadata on each
+advertised tuple. The enclosing event still supplies canonical renderer,
+damage-mode, transport, generation, epoch, and sequence identity.
+
+The evidence record exposes fixed timing and retained-resource counters for
+CPU and GPU implementations. GPU frames can additionally identify the Vulkan
+device and compiled shader source and report geometry construction, uploads,
+command recording, submission, completion wait, readback, packetization, and
+target/geometry-cache reuse. Explicit presence flags distinguish a measured
+zero from a stage that is not applicable to a CPU renderer or the selected
+transport. Identity strings are diagnostic and bounded by the enclosing Vox
+message limit; no handles, unbounded maps, or dynamically selected values
+cross the wire.
+
+V6 extends V5 without changing presentation selection or raster payload
+layout. Older peers decode the new trailing field as
+`TerminalRasterRendererTelemetry::default()`; generated Java retains the
+constructor that omits the defaulted record.
+
 ## Evidence
 
 - `vox/test-fixtures/terminal/terminal-contract-v1.json` remains the immutable
@@ -114,7 +138,9 @@ is a separate application operation.
   `terminal-contract-v3.json` records the first versioned raster transports,
   `terminal-contract-v4.json` records presentation contract V2, and
   `terminal-contract-v5.json` records typed negative presentation
-  capabilities in V3 without modifying V4.
+  capabilities in V3 without modifying V4. `terminal-contract-v6.json` adds
+  bounded per-frame renderer evidence without making it a selectable axis or
+  changing V5.
 - `spec-proto` tests round-trip selectable CPU modes and unavailable GPU
   tuples with actionable errors, all three pixel transports, both
   rasterization-owner values, subscribe/event presentation generations, and

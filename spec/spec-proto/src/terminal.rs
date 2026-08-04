@@ -561,6 +561,11 @@ pub struct TerminalRasterFrame {
     pub selection: TerminalSelection,
     pub prompt: TerminalPromptMetadata,
     pub timing: TerminalRasterSnapshotTiming,
+    /// Renderer-local stage, cache, and retained-resource evidence for this
+    /// exact frame. This is evidence, not another selectable presentation
+    /// axis; the selected renderer remains identified by the enclosing event.
+    #[facet(default)]
+    pub renderer: TerminalRasterRendererTelemetry,
 }
 
 /// One ordered, tightly bounded raw RGBA8 patch in a dirty frame. The payload
@@ -588,6 +593,74 @@ pub struct TerminalRasterSnapshotTiming {
     pub png_encode_us: i64,
     pub payload_pack_us: i64,
     pub total_us: i64,
+}
+
+/// Bounded renderer-local evidence associated with one raster frame.
+///
+/// Every field is a fixed scalar or bounded identity string. Presence flags
+/// distinguish a measured zero from a stage that does not apply to the
+/// selected renderer or transport. Older peers decode this trailing record as
+/// its default value.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Facet)]
+pub struct TerminalRasterRendererTelemetry {
+    /// Human-readable physical-device identity. Empty for CPU renderers.
+    pub device_identity: String,
+    /// Stable compiled shader/source identity. Empty for CPU renderers.
+    pub shader_identity: String,
+    /// True when the GPU-specific timing/resource fields were measured.
+    pub gpu_stages_present: bool,
+    pub full_rgba_pack_present: bool,
+    pub dirty_region_pack_present: bool,
+    pub raw_packet_pack_present: bool,
+    pub png_packet_pack_present: bool,
+    pub geometry_build_us: i64,
+    pub outline_extraction_us: i64,
+    pub directional_band_build_us: i64,
+    pub upload_bytes: i64,
+    pub upload_us: i64,
+    pub command_record_us: i64,
+    pub queue_submit_us: i64,
+    pub gpu_completion_wait_us: i64,
+    pub readback_map_copy_us: i64,
+    pub full_rgba_pack_us: i64,
+    pub dirty_region_pack_us: i64,
+    pub raw_packet_pack_us: i64,
+    pub png_packet_pack_us: i64,
+    pub requested_pixels: i64,
+    pub readback_bytes: i64,
+    pub target_allocation_id: i64,
+    pub geometry_hits: i64,
+    pub geometry_misses: i64,
+    pub geometry_evictions: i64,
+    pub retained_glyphs: i64,
+    pub glyph_capacity: i64,
+    pub buffer_allocations: i64,
+    pub target_capacity: i64,
+    pub retained_targets: i64,
+    pub target_allocations: i64,
+    pub target_reuses: i64,
+    pub target_evictions: i64,
+    pub target_destructions: i64,
+    pub font_catalog_acquisitions: i64,
+    pub process_font_catalog_loads: i64,
+    pub font_renderer_cache_hits: i64,
+    pub font_renderer_cache_misses: i64,
+    pub font_renderer_constructions: i64,
+    pub font_renderer_evictions: i64,
+    pub font_renderer_cache_len: i64,
+    pub font_renderer_cache_capacity: i64,
+    pub glyph_cache_hits: i64,
+    pub glyph_cache_misses: i64,
+    pub glyph_cache_evictions: i64,
+    pub cached_glyphs: i64,
+    pub glyph_cache_capacity: i64,
+    pub frame_buffer_grows: i64,
+    pub frame_buffer_reuses: i64,
+    pub frame_buffer_capacity_bytes: i64,
+    pub png_buffer_grows: i64,
+    pub png_buffer_reuses: i64,
+    pub png_buffer_capacity_bytes: i64,
+    pub transport_payload_copies: i64,
 }
 
 /// The visible terminal cursor associated with a snapshot.
@@ -1181,6 +1254,23 @@ mod tests {
                     command_status: 0,
                 },
                 timing: TerminalRasterSnapshotTiming::default(),
+                renderer: TerminalRasterRendererTelemetry {
+                    device_identity: "vendor=0x10de;device=0x2684;NVIDIA RTX".to_string(),
+                    shader_identity: "fnv1a64:0123456789abcdef".to_string(),
+                    gpu_stages_present: true,
+                    full_rgba_pack_present: false,
+                    dirty_region_pack_present: true,
+                    raw_packet_pack_present: true,
+                    geometry_build_us: 13,
+                    upload_bytes: 4096,
+                    requested_pixels: 2,
+                    readback_bytes: 8,
+                    target_allocation_id: 4,
+                    geometry_hits: 7,
+                    geometry_misses: 1,
+                    target_reuses: 2,
+                    ..TerminalRasterRendererTelemetry::default()
+                },
             },
             publication: TerminalPublicationTelemetry::default(),
         };
@@ -1240,6 +1330,10 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../../test-fixtures/terminal/terminal-contract-v5.json"
         ));
+        let v6 = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test-fixtures/terminal/terminal-contract-v6.json"
+        ));
         let service = terminal_service_descriptor();
         assert_eq!(service.service_name, "Terminal");
         assert_eq!(service.methods.len(), 13);
@@ -1297,6 +1391,10 @@ mod tests {
                 v5.contains(&expected),
                 "v5 fixture is missing descriptor entry: {expected}"
             );
+            assert!(
+                v6.contains(&expected),
+                "v6 fixture is missing descriptor entry: {expected}"
+            );
         }
         assert!(v2.contains("\"role\": \"channel.arg.1.tx.element\""));
         assert!(v2.contains("\"producer_pending_bound\": 1"));
@@ -1340,5 +1438,14 @@ mod tests {
         );
         assert!(v5.contains("\"modes_semantics\": \"valid-selectable-only\""));
         assert!(v5.contains("\"selection\": \"reject-with-advertised-error-without-fallback\""));
+        assert!(v6.contains("\"version\": 6"));
+        assert!(v6.contains("\"extends\": \"terminal-contract-v5.json\""));
+        assert!(v6.contains("\"scope\": \"per-raster-frame-evidence\""));
+        assert!(v6.contains("\"selection_axis\": false"));
+        assert!(v6.contains("\"compatibility\": \"defaulted-trailing-record\""));
+        assert!(v6.contains("\"not_applicable\": \"explicit-presence-flags\""));
+        assert!(v6.contains("\"gpu_completion_wait_us\""));
+        assert!(v6.contains("\"target_reuses\""));
+        assert!(v6.contains("\"font_renderer_cache_hits\""));
     }
 }

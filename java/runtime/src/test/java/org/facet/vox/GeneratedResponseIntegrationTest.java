@@ -25,8 +25,10 @@ import org.facet.vox.generated.TerminalGetContentResponse;
 import org.facet.vox.generated.TerminalPresentationCapabilitiesResult;
 import org.facet.vox.generated.TerminalPresentationMode;
 import org.facet.vox.generated.TerminalPresentationUnavailable;
+import org.facet.vox.generated.TerminalRasterFrame;
 import org.facet.vox.generated.TerminalRasterFrameEvent;
 import org.facet.vox.generated.TerminalRasterFrameKind;
+import org.facet.vox.generated.TerminalRasterRendererTelemetry;
 import org.facet.vox.generated.TerminalRasterSubscribeRequest;
 import org.facet.vox.generated.TerminalRasterizationOwner;
 import org.facet.vox.generated.TerminalSnapshot;
@@ -274,6 +276,15 @@ public final class GeneratedResponseIntegrationTest {
                         && !recordHasField(TerminalRasterFrameEvent.SCHEMA,
                                 "transport_generation"),
                 "generated current raster API omits transport_generation");
+        check(recordHasField(TerminalRasterFrame.SCHEMA, "renderer"),
+                "generated raster frame carries defaulted renderer evidence");
+        check(recordHasField(TerminalRasterRendererTelemetry.SCHEMA,
+                        "gpu_completion_wait_us")
+                        && recordHasField(TerminalRasterRendererTelemetry.SCHEMA,
+                                "target_reuses")
+                        && recordHasField(TerminalRasterRendererTelemetry.SCHEMA,
+                                "font_renderer_cache_hits"),
+                "generated renderer evidence carries GPU stages and retained cache counters");
 
         for (TerminalRasterizationOwner owner : TerminalRasterizationOwner.values()) {
             TerminalRasterizationOwner ownerBack = PhonCodec.decode(

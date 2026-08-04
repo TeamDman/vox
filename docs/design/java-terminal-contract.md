@@ -148,3 +148,33 @@ constructor that omits the defaulted record.
 - The Java generator test compiles both the existing Review fixture and this
   Terminal service with `javac --release 17`; the Java runtime gate also proves
   presentation-lane close, sibling/control-lane survival, and replacement.
+
+## Typed terminal tuning (terminal fixture V7)
+
+V7 separates sizing intent from effective renderer metrics. A
+`TerminalTuningRequest` independently marks the surface, font, and cell-grid
+axes as `Auto` or `Manual`. Auto surface values are the measured physical
+viewport, auto cell values come from the client-owned logical layout, and auto
+font chooses the largest fitting size. Manual values are exact: an impossible
+surface/font/grid combination is rejected instead of silently shrinking or
+clamping another manual axis.
+
+`TerminalTuningMetrics` records the accepted request, renderer-specific
+surface and cell metrics, native raster dimensions, unused remainder, named
+auto adjustments, and effective font size in milli-pixels. The existing
+`TerminalSurfaceMetrics` remains a rounded effective compatibility projection;
+clients must not treat its cell fields as authoritative request inputs.
+
+Connect and resize requests carry a defaulted tuning-presence flag and request.
+Their results, legacy snapshots, and raster frames carry defaulted accepted
+metrics. A raster frame's metrics apply to the renderer identified by its
+accepted tuning request and enclosing presentation event. Older peers decode
+these trailing records as absent defaults.
+
+Validation is transactional. The complete renderer/surface/font/grid request
+is resolved before PTY, terminal, sequence, or publication state changes. A
+rejected request returns a `TerminalTuningRejection` with a stable axis and
+reason through the defaulted fields on `TerminalError`; the last accepted
+configuration and frame remain valid and no mutation sequence is published.
+The Java generator supports the records and unit enums used by V7; payload
+enum variants remain intentionally unnecessary.

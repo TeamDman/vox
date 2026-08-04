@@ -111,6 +111,102 @@ pub struct TerminalSurfaceMetrics {
     pub font_pixel_size: u16,
 }
 
+/// Whether one terminal tuning axis follows its live layout input or uses an
+/// explicit user override. Manual font sizes are exact rather than fitting
+/// hints; a renderer must reject an impossible combination instead of silently
+/// changing another axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Facet)]
+#[repr(u8)]
+pub enum TerminalTuningMode {
+    #[default]
+    Auto,
+    Manual,
+}
+
+/// Typed requested terminal sizing intent.
+///
+/// In auto surface mode, `surface_width` and `surface_height` are the measured
+/// physical viewport. In auto cell mode, `columns` and `rows` are derived from
+/// the client-owned logical layout. Auto font mode requires
+/// `font_pixel_size == 0`; manual font mode requires a non-zero exact em size.
+/// `renderer_id` identifies the renderer whose metrics are used to validate
+/// the complete combination.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Facet)]
+pub struct TerminalTuningRequest {
+    pub renderer_id: String,
+    pub surface_mode: TerminalTuningMode,
+    pub surface_width: u16,
+    pub surface_height: u16,
+    pub font_mode: TerminalTuningMode,
+    pub font_pixel_size: u16,
+    pub cells_mode: TerminalTuningMode,
+    pub columns: u16,
+    pub rows: u16,
+}
+
+/// Named adjustments applied only to auto-derived values. Manual values are
+/// exact and are rejected when they violate a bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Facet)]
+pub struct TerminalTuningAdjustments {
+    pub surface_width_clamped: bool,
+    pub surface_height_clamped: bool,
+    pub font_clamped: bool,
+    pub columns_clamped: bool,
+    pub rows_clamped: bool,
+}
+
+/// Accepted request plus the renderer-specific metrics used by a frame.
+/// `effective_font_pixel_size_milli` preserves fractional auto-fit sizes while
+/// the legacy `TerminalSurfaceMetrics::font_pixel_size` remains rounded.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Facet)]
+pub struct TerminalTuningMetrics {
+    pub request: TerminalTuningRequest,
+    pub surface_width: u16,
+    pub surface_height: u16,
+    pub columns: u16,
+    pub rows: u16,
+    pub cell_width: u16,
+    pub cell_height: u16,
+    pub effective_font_pixel_size_milli: u32,
+    pub raster_width: u16,
+    pub raster_height: u16,
+    pub remainder_width: u16,
+    pub remainder_height: u16,
+    pub adjustments: TerminalTuningAdjustments,
+}
+
+/// Axis associated with a typed tuning rejection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Facet)]
+#[repr(u8)]
+pub enum TerminalTuningAxis {
+    Surface,
+    Font,
+    Cells,
+    Renderer,
+    #[default]
+    Combination,
+}
+
+/// Stable reason for rejecting a terminal tuning transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Facet)]
+#[repr(u8)]
+pub enum TerminalTuningRejectionReason {
+    #[default]
+    InvalidModeValue,
+    OutOfRange,
+    OverConstrained,
+    RendererUnavailable,
+}
+
+/// Structured tuning failure retained by the client while the server keeps
+/// the last accepted terminal configuration and presentation valid.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Facet)]
+pub struct TerminalTuningRejection {
+    pub axis: TerminalTuningAxis,
+    pub reason: TerminalTuningRejectionReason,
+    pub request: TerminalTuningRequest,
+}
+
 /// Negotiated feature and resource limits.  A peer must treat the maxima as
 /// hard bounds; it may advertise smaller values in its response.
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
@@ -212,6 +308,10 @@ pub struct TerminalConnectRequest {
     pub client_sequence: i64,
     #[facet(default)]
     pub correlation_id: String,
+    #[facet(default)]
+    pub tuning_present: bool,
+    #[facet(default)]
+    pub tuning: TerminalTuningRequest,
 }
 
 /// Successful session creation response.
@@ -225,6 +325,10 @@ pub struct TerminalConnectResult {
     pub state: TerminalState,
     #[facet(default)]
     pub correlation_id: String,
+    #[facet(default)]
+    pub tuning_present: bool,
+    #[facet(default)]
+    pub tuning: TerminalTuningMetrics,
 }
 
 /// Queries the negotiated capabilities for a session.
@@ -253,6 +357,10 @@ pub struct TerminalResizeRequest {
     pub client_sequence: i64,
     #[facet(default)]
     pub correlation_id: String,
+    #[facet(default)]
+    pub tuning_present: bool,
+    #[facet(default)]
+    pub tuning: TerminalTuningRequest,
 }
 
 /// Accepted logical dimensions and resulting sequence.
@@ -266,6 +374,10 @@ pub struct TerminalResizeResult {
     pub server_sequence: i64,
     #[facet(default)]
     pub correlation_id: String,
+    #[facet(default)]
+    pub tuning_present: bool,
+    #[facet(default)]
+    pub tuning: TerminalTuningMetrics,
 }
 
 /// Printable text input.  The server rejects a payload longer than the
@@ -483,6 +595,10 @@ pub struct TerminalSnapshot {
     pub prompt: TerminalPromptMetadata,
     #[facet(default)]
     pub timing: TerminalSnapshotTiming,
+    #[facet(default)]
+    pub tuning_present: bool,
+    #[facet(default)]
+    pub tuning: TerminalTuningMetrics,
 }
 
 /// Frame payload representation negotiated by the peers.
@@ -566,6 +682,10 @@ pub struct TerminalRasterFrame {
     /// axis; the selected renderer remains identified by the enclosing event.
     #[facet(default)]
     pub renderer: TerminalRasterRendererTelemetry,
+    #[facet(default)]
+    pub tuning_present: bool,
+    #[facet(default)]
+    pub tuning: TerminalTuningMetrics,
 }
 
 /// One ordered, tightly bounded raw RGBA8 patch in a dirty frame. The payload
@@ -760,6 +880,10 @@ pub struct TerminalError {
     pub message: String,
     pub retryable: bool,
     pub server_sequence: i64,
+    #[facet(default)]
+    pub tuning_rejection_present: bool,
+    #[facet(default)]
+    pub tuning_rejection: TerminalTuningRejection,
 }
 
 /// Stable terminal error categories for user-visible fallback behavior.
@@ -835,6 +959,8 @@ mod tests {
                 command_status: 0,
             },
             timing: TerminalSnapshotTiming::default(),
+            tuning_present: false,
+            tuning: TerminalTuningMetrics::default(),
         };
         let bytes = vox_phon::to_vec(&snapshot).expect("encode terminal snapshot");
         let decoded: TerminalSnapshot =
@@ -907,6 +1033,8 @@ mod tests {
                 png_encode_us: 5,
                 total_us: 15,
             },
+            tuning_present: false,
+            tuning: TerminalTuningMetrics::default(),
         };
         let payload = vox_phon::to_vec(&Ok::<_, vox::VoxError<TerminalError>>(snapshot))
             .expect("encode terminal snapshot response");
@@ -953,7 +1081,7 @@ mod tests {
 
         let schema_id = vox_phon::schema_id_for_shape(<WireResponse as Facet>::SHAPE)
             .expect("terminal content response wire schema id");
-        assert_eq!(schema_id.as_u64(), 0x0152_82f6_6494_f34c);
+        assert_eq!(schema_id.as_u64(), 0x3797_c299_da28_aebf);
         let schema = vox_phon::schema_bytes_for_shape(<WireResponse as Facet>::SHAPE)
             .expect("terminal content response wire schema bytes");
         assert!(!schema.is_empty(), "terminal content response schema bytes");
@@ -995,6 +1123,8 @@ mod tests {
             message: "pty output unavailable".to_string(),
             retryable: true,
             server_sequence: 8,
+            tuning_rejection_present: false,
+            tuning_rejection: TerminalTuningRejection::default(),
         })));
         let error_payload =
             vox_phon::to_vec(&error).expect("encode terminal content application error");
@@ -1054,6 +1184,8 @@ mod tests {
                 .to_string(),
             retryable: false,
             server_sequence: 7,
+            tuning_rejection_present: false,
+            tuning_rejection: TerminalTuningRejection::default(),
         };
         let unavailable_presentations = pixel_transports
             .iter()
@@ -1271,6 +1403,8 @@ mod tests {
                     target_reuses: 2,
                     ..TerminalRasterRendererTelemetry::default()
                 },
+                tuning_present: false,
+                tuning: TerminalTuningMetrics::default(),
             },
             publication: TerminalPublicationTelemetry::default(),
         };
@@ -1284,6 +1418,57 @@ mod tests {
         );
         assert_eq!(decoded.renderer_id, request.requested_renderer_id);
         assert_eq!(decoded.transport_id, request.requested_transport_id);
+    }
+
+    #[test]
+    fn terminal_v7_tuning_request_metrics_and_rejection_round_trip() {
+        let request = TerminalTuningRequest {
+            renderer_id: "rust-gpu-slug".to_string(),
+            surface_mode: TerminalTuningMode::Auto,
+            surface_width: 3_840,
+            surface_height: 2_054,
+            font_mode: TerminalTuningMode::Manual,
+            font_pixel_size: 24,
+            cells_mode: TerminalTuningMode::Manual,
+            columns: 120,
+            rows: 40,
+        };
+        let metrics = TerminalTuningMetrics {
+            request: request.clone(),
+            surface_width: 3_840,
+            surface_height: 2_054,
+            columns: 120,
+            rows: 40,
+            cell_width: 15,
+            cell_height: 29,
+            effective_font_pixel_size_milli: 24_000,
+            raster_width: 1_800,
+            raster_height: 1_160,
+            remainder_width: 2_040,
+            remainder_height: 894,
+            adjustments: TerminalTuningAdjustments::default(),
+        };
+        let metrics_bytes = vox_phon::to_vec(&metrics).expect("encode terminal tuning metrics");
+        let decoded_metrics: TerminalTuningMetrics =
+            vox_phon::from_slice(&metrics_bytes).expect("decode terminal tuning metrics");
+        assert_eq!(decoded_metrics, metrics);
+
+        let error = TerminalError {
+            code: TerminalErrorCode::InvalidRequest,
+            message: "exact font cannot fit the requested grid".to_string(),
+            retryable: false,
+            server_sequence: 19,
+            tuning_rejection_present: true,
+            tuning_rejection: TerminalTuningRejection {
+                axis: TerminalTuningAxis::Combination,
+                reason: TerminalTuningRejectionReason::OverConstrained,
+                request,
+            },
+        };
+        let error_bytes = vox_phon::to_vec(&error).expect("encode terminal tuning rejection");
+        let decoded_error: TerminalError =
+            vox_phon::from_slice(&error_bytes).expect("decode terminal tuning rejection");
+        assert_eq!(decoded_error, error);
     }
 
     #[test]
@@ -1333,6 +1518,10 @@ mod tests {
         let v6 = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../test-fixtures/terminal/terminal-contract-v6.json"
+        ));
+        let v7 = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test-fixtures/terminal/terminal-contract-v7.json"
         ));
         let service = terminal_service_descriptor();
         assert_eq!(service.service_name, "Terminal");
@@ -1395,6 +1584,10 @@ mod tests {
                 v6.contains(&expected),
                 "v6 fixture is missing descriptor entry: {expected}"
             );
+            assert!(
+                v7.contains(&expected),
+                "v7 fixture is missing descriptor entry: {expected}"
+            );
         }
         assert!(v2.contains("\"role\": \"channel.arg.1.tx.element\""));
         assert!(v2.contains("\"producer_pending_bound\": 1"));
@@ -1447,5 +1640,10 @@ mod tests {
         assert!(v6.contains("\"gpu_completion_wait_us\""));
         assert!(v6.contains("\"target_reuses\""));
         assert!(v6.contains("\"font_renderer_cache_hits\""));
+        assert!(v7.contains("\"version\": 7"));
+        assert!(v7.contains("\"extends\": \"terminal-contract-v6.json\""));
+        assert!(v7.contains("\"manual_font\": \"exact-or-reject\""));
+        assert!(v7.contains("\"rejection_retention\": \"last-accepted-state-unchanged\""));
+        assert!(v7.contains("\"font_precision\": \"milli-pixels\""));
     }
 }

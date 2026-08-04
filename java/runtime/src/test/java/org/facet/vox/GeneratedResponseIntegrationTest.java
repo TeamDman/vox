@@ -3,20 +3,31 @@ package org.facet.vox;
 import java.util.Arrays;
 import org.facet.phon.CompatibilityPlan;
 import org.facet.phon.PhonCodec;
+import org.facet.phon.PhonException;
 import org.facet.phon.PhonLimits;
+import org.facet.phon.Schema;
 import org.facet.phon.SchemaClosure;
 import org.facet.vox.generated.DivideByZero;
 import org.facet.vox.generated.DivideResponse;
 import org.facet.vox.generated.JavaFixtureDivideResponse;
 import org.facet.vox.generated.JavaFixtureEchoResponse;
+import org.facet.vox.generated.TerminalAlphaMode;
 import org.facet.vox.generated.TerminalCapabilities;
+import org.facet.vox.generated.TerminalColorSpace;
 import org.facet.vox.generated.TerminalConnectArgs;
 import org.facet.vox.generated.TerminalConnectRequest;
 import org.facet.vox.generated.TerminalError;
 import org.facet.vox.generated.TerminalErrorCode;
 import org.facet.vox.generated.TerminalFrameEncoding;
 import org.facet.vox.generated.TerminalFrameEvent;
+import org.facet.vox.generated.TerminalFrameOrigin;
 import org.facet.vox.generated.TerminalGetContentResponse;
+import org.facet.vox.generated.TerminalPresentationCapabilitiesResult;
+import org.facet.vox.generated.TerminalPresentationMode;
+import org.facet.vox.generated.TerminalRasterFrameEvent;
+import org.facet.vox.generated.TerminalRasterFrameKind;
+import org.facet.vox.generated.TerminalRasterSubscribeRequest;
+import org.facet.vox.generated.TerminalRasterizationOwner;
 import org.facet.vox.generated.TerminalSnapshot;
 import org.facet.vox.generated.TerminalSnapshotResponse;
 
@@ -61,6 +72,7 @@ public final class GeneratedResponseIntegrationTest {
         terminalRustApplicationErrorTranscodesThroughGeneratedResponseSchema();
         terminalRustSnapshotPayloadTranscodesThroughGeneratedResponseSchema();
         terminalFrameChannelElementSchemaIsTransitivelySelfContained();
+        terminalPresentationV2FieldsRoundTripAndRejectUnknownOwner();
         System.out.println("GeneratedResponseIntegrationTest: PASS");
     }
 
@@ -170,6 +182,107 @@ public final class GeneratedResponseIntegrationTest {
                         schema.id().asLong() == 0xaa0667df4299d151L),
                 "terminal frame serialized closure carries nested byte payload schema");
         CompatibilityPlan.plan(writer, reader, PhonLimits.defaults());
+    }
+
+    private static void terminalPresentationV2FieldsRoundTripAndRejectUnknownOwner()
+            throws Exception {
+        java.util.List<TerminalPresentationMode> modes = new java.util.ArrayList<>();
+        for (String rendererId : java.util.List.of("rust-cpu-fontdue", "rust-gpu-slug")) {
+            modes.add(terminalPresentationMode(rendererId, "full", "full-png",
+                    TerminalFrameEncoding.PNG, TerminalRasterFrameKind.FULL));
+            modes.add(terminalPresentationMode(rendererId, "full", "full-raw-rgba",
+                    TerminalFrameEncoding.RGBA8, TerminalRasterFrameKind.FULL));
+            modes.add(terminalPresentationMode(rendererId, "dirty", "dirty-raw-rgba",
+                    TerminalFrameEncoding.RGBA8, TerminalRasterFrameKind.DIRTY_REGIONS));
+        }
+        TerminalPresentationCapabilitiesResult capabilities =
+                new TerminalPresentationCapabilitiesResult(
+                        "session-v4", "rust-cpu-fontdue", "full-png", modes, 7L);
+        TerminalPresentationCapabilitiesResult capabilitiesBack = PhonCodec.decode(
+                TerminalPresentationCapabilitiesResult.ADAPTER,
+                PhonCodec.encode(TerminalPresentationCapabilitiesResult.ADAPTER,
+                        capabilities, PhonLimits.defaults()),
+                PhonLimits.defaults());
+        check(capabilities.equals(capabilitiesBack),
+                "presentation V2 capabilities roundtrip");
+        check(capabilitiesBack.defaultRendererId().equals("rust-cpu-fontdue")
+                        && capabilitiesBack.modes().size() == 6,
+                "presentation V2 defaults and six pixel tuples");
+
+        TerminalRasterSubscribeRequest request = new TerminalRasterSubscribeRequest(
+                "session-v4", "rust-gpu-slug", "dirty", "dirty-raw-rgba", 1,
+                "panel-2-presentation-3", 18L, 3L, 16L * 1024L * 1024L, 64,
+                20L, "subscribe-v4-3");
+        TerminalRasterSubscribeRequest requestBack = PhonCodec.decode(
+                TerminalRasterSubscribeRequest.ADAPTER,
+                PhonCodec.encode(TerminalRasterSubscribeRequest.ADAPTER,
+                        request, PhonLimits.defaults()),
+                PhonLimits.defaults());
+        check(request.equals(requestBack)
+                        && requestBack.presentationGeneration()
+                                .equals("panel-2-presentation-3"),
+                "presentation generation request roundtrip");
+        check(recordHasField(TerminalPresentationCapabilitiesResult.SCHEMA,
+                        "default_renderer_id"),
+                "generated capability result carries default_renderer_id");
+        check(recordHasField(TerminalPresentationMode.SCHEMA, "rasterization_owner"),
+                "generated capability mode carries rasterization_owner");
+        check(recordHasField(TerminalRasterSubscribeRequest.SCHEMA,
+                        "presentation_generation")
+                        && recordHasField(TerminalRasterFrameEvent.SCHEMA,
+                                "presentation_generation"),
+                "generated raster request and event carry presentation_generation");
+        check(!recordHasField(TerminalRasterSubscribeRequest.SCHEMA,
+                        "transport_generation")
+                        && !recordHasField(TerminalRasterFrameEvent.SCHEMA,
+                                "transport_generation"),
+                "generated current raster API omits transport_generation");
+
+        for (TerminalRasterizationOwner owner : TerminalRasterizationOwner.values()) {
+            TerminalRasterizationOwner ownerBack = PhonCodec.decode(
+                    TerminalRasterizationOwner.ADAPTER,
+                    PhonCodec.encode(TerminalRasterizationOwner.ADAPTER,
+                            owner, PhonLimits.defaults()),
+                    PhonLimits.defaults());
+            check(owner == ownerBack, "rasterization owner roundtrip " + owner);
+        }
+        boolean unknownOwnerRejected = false;
+        try {
+            PhonCodec.decode(TerminalRasterizationOwner.ADAPTER,
+                    new byte[] {2, 0, 0, 0}, PhonLimits.defaults());
+        } catch (PhonException expected) {
+            unknownOwnerRejected = true;
+        }
+        check(unknownOwnerRejected, "unknown rasterization owner rejected");
+    }
+
+    private static TerminalPresentationMode terminalPresentationMode(
+            String rendererId,
+            String damageModeId,
+            String transportId,
+            TerminalFrameEncoding encoding,
+            TerminalRasterFrameKind frameKind) {
+        return new TerminalPresentationMode(
+                rendererId,
+                TerminalRasterizationOwner.SERVER,
+                damageModeId,
+                transportId,
+                1,
+                encoding,
+                frameKind,
+                1,
+                TerminalFrameOrigin.TOP_LEFT,
+                TerminalAlphaMode.STRAIGHT,
+                TerminalColorSpace.SRGB,
+                4096,
+                4096,
+                16L * 1024L * 1024L,
+                64);
+    }
+
+    private static boolean recordHasField(Schema schema, String fieldName) {
+        if (!(schema.kind() instanceof Schema.RecordKind record)) return false;
+        return record.fields().stream().anyMatch(field -> field.name().equals(fieldName));
     }
 
     private static byte[] hexBytes(String hex) {

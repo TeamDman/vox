@@ -13,6 +13,14 @@ missing or disconnected Vox peer is represented as a normal capability/error
 state and must not prevent mounted editing or the in-game terminal from
 working.
 
+Rasterization ownership is explicit protocol data. Each advertised
+`TerminalPresentationMode` carries the closed `TerminalRasterizationOwner`
+value `Server` or `Client`; peers reject an unknown discriminant and never
+infer ownership from a renderer id prefix. The owner is metadata for the
+renderer, not a third user-selectable axis. Server-owned renderers rasterize
+before Vox and therefore pair with pixel transports. A later semantic-cell
+contract may advertise client-owned renderers that rasterize after Vox.
+
 ## Message shape
 
 Control operations remain unary and intentionally avoid file descriptors,
@@ -53,12 +61,47 @@ the frame payload remains a bounded byte run so Java can
 upload a texture or fall back to structured-cell rendering without a second
 wire contract.
 
+## Presentation contract V2 (terminal fixture V4)
+
+The current raster API uses `renderer_id` as its canonical renderer identity;
+the older `backend_id` field remains legacy snapshot vocabulary only. The
+capability response supplies independent `default_renderer_id` and
+`default_transport_id` values and enumerates every valid atomic tuple of
+`renderer_id`, `damage_mode_id`, `transport_id`, and `transport_version`.
+Clients select one advertised tuple rather than assembling unvalidated axes.
+
+`TerminalRasterSubscribeRequest` and every `TerminalRasterFrameEvent` carry a
+client-chosen opaque `presentation_generation`. It changes whenever any member
+of the selected tuple changes. Frame sequences are comparable only within one
+connection epoch, session epoch, and presentation generation. The first event
+of a fresh generation is a complete resynchronization; an event from a retired
+generation is stale even when its numeric sequence is newer. Unsupported tuples
+leave the current presentation active rather than silently selecting a
+different renderer or transport.
+
+The V4 fixture advertises `rust-cpu-fontdue` and `rust-gpu-slug`, both
+server-owned, across `full-png`, `full-raw-rgba`, and `dirty-raw-rgba`. The
+presentation-envelope contract version is 2. The unchanged RGBA/PNG payload
+layout remains `frame_contract_version` 1. V1 through V3 remain immutable
+historical fixtures, so there is no compatibility alias for the former
+`transport_generation` name in the current raster API.
+
+Raster subscriptions remain request-scoped typed channels on a nonzero service
+lane. Closing that presentation lane terminates its subscriptions while the
+control lane and independent sibling lanes remain usable; a fresh presentation
+lane may be opened on the same connection. Disconnecting the terminal session
+is a separate application operation.
+
 ## Evidence
 
 - `vox/test-fixtures/terminal/terminal-contract-v1.json` remains the immutable
   unary contract; `terminal-contract-v2.json` adds the typed subscription,
-  bounded coalescing invariants, epochs, and publication telemetry.
-- `spec-proto` tests round-trip a representative RGBA snapshot through Phon
-  and verify every fixture method id.
+  bounded coalescing invariants, epochs, and publication telemetry;
+  `terminal-contract-v3.json` records the first versioned raster transports;
+  and `terminal-contract-v4.json` records presentation contract V2.
+- `spec-proto` tests round-trip both renderer identities, all three pixel
+  transports, both rasterization-owner values, subscribe/event presentation
+  generations, and verify every fixture method id.
 - The Java generator test compiles both the existing Review fixture and this
-  Terminal service with `javac --release 17`.
+  Terminal service with `javac --release 17`; the Java runtime gate also proves
+  presentation-lane close, sibling/control-lane survival, and replacement.

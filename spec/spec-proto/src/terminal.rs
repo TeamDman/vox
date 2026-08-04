@@ -69,7 +69,7 @@ pub trait Terminal {
         frames: Tx<TerminalFrameEvent>,
     ) -> Result<TerminalOperationResult, TerminalError>;
 
-    /// Push V3 full or base-dependent raster frames for one explicitly
+    /// Push presentation-contract V2 full or base-dependent raster frames for one explicitly
     /// selected presentation mode.
     async fn subscribe_raster_frames(
         &self,
@@ -132,7 +132,7 @@ pub struct TerminalCapabilities {
     pub transport_id: String,
 }
 
-/// Queries the exact V3 presentation combinations for one established
+/// Queries the current presentation combinations for one established
 /// terminal session.
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct TerminalPresentationCapabilitiesRequest {
@@ -140,10 +140,11 @@ pub struct TerminalPresentationCapabilitiesRequest {
     pub client_sequence: i64,
 }
 
-/// V3 presentation capabilities accepted by both peers.
+/// Presentation-contract V2 capabilities accepted by both peers.
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct TerminalPresentationCapabilitiesResult {
     pub session_id: String,
+    pub default_renderer_id: String,
     pub default_transport_id: String,
     pub modes: Vec<TerminalPresentationMode>,
     pub server_sequence: i64,
@@ -153,6 +154,7 @@ pub struct TerminalPresentationCapabilitiesResult {
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct TerminalPresentationMode {
     pub renderer_id: String,
+    pub rasterization_owner: TerminalRasterizationOwner,
     pub damage_mode_id: String,
     pub transport_id: String,
     pub transport_version: u16,
@@ -166,6 +168,15 @@ pub struct TerminalPresentationMode {
     pub max_pixel_height: u16,
     pub max_frame_bytes: u32,
     pub max_regions: u16,
+}
+
+/// Process boundary that owns conversion of semantic terminal cells to pixels.
+/// This is closed protocol metadata, not a separately selectable axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum TerminalRasterizationOwner {
+    Server,
+    Client,
 }
 
 /// Creates a session and requests capabilities.
@@ -311,7 +322,7 @@ pub struct TerminalSubscribeRequest {
     pub correlation_id: String,
 }
 
-/// Opens one fresh V3 request-scoped raster subscription.
+/// Opens one fresh presentation-contract V2 request-scoped raster subscription.
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct TerminalRasterSubscribeRequest {
     pub session_id: String,
@@ -319,8 +330,8 @@ pub struct TerminalRasterSubscribeRequest {
     pub requested_damage_mode_id: String,
     pub requested_transport_id: String,
     pub requested_transport_version: u16,
-    /// Client-chosen opaque identity that changes for every transport switch.
-    pub transport_generation: String,
+    /// Client-chosen opaque identity that changes for every presentation switch.
+    pub presentation_generation: String,
     pub after_terminal_sequence: i64,
     pub after_frame_sequence: i64,
     pub max_frame_bytes: u32,
@@ -363,15 +374,15 @@ pub struct TerminalFrameEvent {
     pub publication: TerminalPublicationTelemetry,
 }
 
-/// One authoritative V3 raster publication. Frame sequence is monotonic only
-/// within `transport_generation`; a dirty event extends exactly
+/// One authoritative presentation-contract V2 publication. Frame sequence is monotonic only
+/// within `presentation_generation`; a dirty event extends exactly
 /// `base_frame_sequence` and otherwise requires a new full resynchronization.
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct TerminalRasterFrameEvent {
     pub session_id: String,
     pub connection_epoch: String,
     pub session_epoch: String,
-    pub transport_generation: String,
+    pub presentation_generation: String,
     pub terminal_sequence: i64,
     pub frame_sequence: i64,
     pub base_frame_sequence: i64,
@@ -471,7 +482,7 @@ pub enum TerminalFrameKind {
     DirtyTile,
 }
 
-/// V3 complete-versus-incremental raster semantics.
+/// Complete-versus-incremental raster semantics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
 #[repr(u8)]
 pub enum TerminalRasterFrameKind {
@@ -503,7 +514,7 @@ pub enum TerminalColorSpace {
     Srgb,
 }
 
-/// One complete or incremental V3 raster frame. Complete PNG/raw frames use
+/// One complete or incremental raster frame. Complete PNG/raw frames use
 /// `payload` directly and have no regions. Dirty RGBA8 frames pack every region
 /// into the single payload and address it with ordered descriptors.
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
@@ -544,7 +555,7 @@ pub struct TerminalRasterRegion {
     pub payload_length: u32,
 }
 
-/// Producer-local stages for a V3 raster publication. This remains separate
+/// Producer-local stages for a raster publication. This remains separate
 /// from the immutable V1/V2 snapshot timing record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Facet)]
 pub struct TerminalRasterSnapshotTiming {
@@ -902,53 +913,128 @@ mod tests {
     }
 
     #[test]
-    fn terminal_v3_presentation_capabilities_round_trip_through_phon() {
+    fn terminal_v4_presentation_capabilities_round_trip_all_pixel_tuples() {
+        let mut modes = Vec::new();
+        for renderer_id in ["rust-cpu-fontdue", "rust-gpu-slug"] {
+            for (damage_mode_id, transport_id, encoding, steady_frame_kind) in [
+                (
+                    "full",
+                    "full-png",
+                    TerminalFrameEncoding::Png,
+                    TerminalRasterFrameKind::Full,
+                ),
+                (
+                    "full",
+                    "full-raw-rgba",
+                    TerminalFrameEncoding::Rgba8,
+                    TerminalRasterFrameKind::Full,
+                ),
+                (
+                    "dirty",
+                    "dirty-raw-rgba",
+                    TerminalFrameEncoding::Rgba8,
+                    TerminalRasterFrameKind::DirtyRegions,
+                ),
+            ] {
+                modes.push(TerminalPresentationMode {
+                    renderer_id: renderer_id.to_string(),
+                    rasterization_owner: TerminalRasterizationOwner::Server,
+                    damage_mode_id: damage_mode_id.to_string(),
+                    transport_id: transport_id.to_string(),
+                    transport_version: 1,
+                    encoding,
+                    steady_frame_kind,
+                    frame_contract_version: 1,
+                    origin: TerminalFrameOrigin::TopLeft,
+                    alpha_mode: TerminalAlphaMode::Straight,
+                    color_space: TerminalColorSpace::Srgb,
+                    max_pixel_width: 4096,
+                    max_pixel_height: 4096,
+                    max_frame_bytes: 16 * 1024 * 1024,
+                    max_regions: 64,
+                });
+            }
+        }
         let result = TerminalPresentationCapabilitiesResult {
-            session_id: "session-v3".to_string(),
+            session_id: "session-v4".to_string(),
+            default_renderer_id: "rust-cpu-fontdue".to_string(),
             default_transport_id: "full-png".to_string(),
-            modes: vec![TerminalPresentationMode {
-                renderer_id: "rust-cpu-fontdue".to_string(),
-                damage_mode_id: "dirty".to_string(),
-                transport_id: "dirty-raw-rgba".to_string(),
-                transport_version: 1,
-                encoding: TerminalFrameEncoding::Rgba8,
-                steady_frame_kind: TerminalRasterFrameKind::DirtyRegions,
-                frame_contract_version: 1,
-                origin: TerminalFrameOrigin::TopLeft,
-                alpha_mode: TerminalAlphaMode::Straight,
-                color_space: TerminalColorSpace::Srgb,
-                max_pixel_width: 4096,
-                max_pixel_height: 4096,
-                max_frame_bytes: 16 * 1024 * 1024,
-                max_regions: 64,
-            }],
+            modes,
             server_sequence: 7,
         };
-        let bytes = vox_phon::to_vec(&result).expect("encode V3 capabilities");
+        let bytes = vox_phon::to_vec(&result).expect("encode V4 capabilities");
         let decoded: TerminalPresentationCapabilitiesResult =
-            vox_phon::from_slice(&bytes).expect("decode V3 capabilities");
+            vox_phon::from_slice(&bytes).expect("decode V4 capabilities");
         assert_eq!(decoded, result);
+        assert_eq!(decoded.modes.len(), 6);
+        assert!(decoded.modes.iter().all(|mode| {
+            mode.rasterization_owner == TerminalRasterizationOwner::Server
+                && mode.frame_contract_version == 1
+        }));
+        for renderer_id in ["rust-cpu-fontdue", "rust-gpu-slug"] {
+            for transport_id in ["full-png", "full-raw-rgba", "dirty-raw-rgba"] {
+                assert!(decoded.modes.iter().any(|mode| {
+                    mode.renderer_id == renderer_id && mode.transport_id == transport_id
+                }));
+            }
+        }
     }
 
     #[test]
-    fn terminal_v3_dirty_raster_event_round_trips_through_phon() {
+    fn terminal_rasterization_owner_is_closed_and_round_trips() {
+        for owner in [
+            TerminalRasterizationOwner::Server,
+            TerminalRasterizationOwner::Client,
+        ] {
+            let bytes = vox_phon::to_vec(&owner).expect("encode rasterization owner");
+            let decoded: TerminalRasterizationOwner =
+                vox_phon::from_slice(&bytes).expect("decode rasterization owner");
+            assert_eq!(decoded, owner);
+        }
+        assert!(
+            vox_phon::from_slice::<TerminalRasterizationOwner>(&[2, 0, 0, 0]).is_err(),
+            "unknown rasterization owner discriminants must be rejected"
+        );
+    }
+
+    #[test]
+    fn terminal_v4_presentation_request_and_event_generation_round_trip() {
+        let request = TerminalRasterSubscribeRequest {
+            session_id: "session-v4".to_string(),
+            requested_renderer_id: "rust-gpu-slug".to_string(),
+            requested_damage_mode_id: "dirty".to_string(),
+            requested_transport_id: "dirty-raw-rgba".to_string(),
+            requested_transport_version: 1,
+            presentation_generation: "panel-2-presentation-3".to_string(),
+            after_terminal_sequence: 18,
+            after_frame_sequence: 3,
+            max_frame_bytes: 16 * 1024 * 1024,
+            max_regions: 64,
+            client_sequence: 20,
+            correlation_id: "subscribe-v4-3".to_string(),
+        };
+        let request_bytes = vox_phon::to_vec(&request).expect("encode V4 raster request");
+        let decoded_request: TerminalRasterSubscribeRequest =
+            vox_phon::from_slice(&request_bytes).expect("decode V4 raster request");
+        assert_eq!(decoded_request, request);
+
         let event = TerminalRasterFrameEvent {
-            session_id: "session-v3".to_string(),
+            session_id: "session-v4".to_string(),
             connection_epoch: "connection-1".to_string(),
             session_epoch: "session-epoch-1".to_string(),
-            transport_generation: "panel-2-generation-3".to_string(),
+            presentation_generation: request.presentation_generation.clone(),
             terminal_sequence: 19,
             frame_sequence: 4,
             base_frame_sequence: 3,
             full_resync: false,
-            renderer_id: "rust-cpu-fontdue".to_string(),
+            renderer_id: request.requested_renderer_id.clone(),
             damage_mode_id: "dirty".to_string(),
             transport_id: "dirty-raw-rgba".to_string(),
             transport_version: 1,
             frame_contract_version: 1,
             max_frame_bytes: 16 * 1024 * 1024,
             max_regions: 64,
-            correlation_id: "frame-v3-4".to_string(),
+            correlation_id: "frame-v4-4".to_string(),
             frame: TerminalRasterFrame {
                 logical_columns: 2,
                 logical_rows: 1,
@@ -1028,10 +1114,16 @@ mod tests {
             },
             publication: TerminalPublicationTelemetry::default(),
         };
-        let bytes = vox_phon::to_vec(&event).expect("encode V3 raster event");
+        let bytes = vox_phon::to_vec(&event).expect("encode V4 raster event");
         let decoded: TerminalRasterFrameEvent =
-            vox_phon::from_slice(&bytes).expect("decode V3 raster event");
+            vox_phon::from_slice(&bytes).expect("decode V4 raster event");
         assert_eq!(decoded, event);
+        assert_eq!(
+            decoded.presentation_generation,
+            request.presentation_generation
+        );
+        assert_eq!(decoded.renderer_id, request.requested_renderer_id);
+        assert_eq!(decoded.transport_id, request.requested_transport_id);
     }
 
     #[test]
@@ -1069,6 +1161,10 @@ mod tests {
         let v3 = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../test-fixtures/terminal/terminal-contract-v3.json"
+        ));
+        let v4 = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test-fixtures/terminal/terminal-contract-v4.json"
         ));
         let service = terminal_service_descriptor();
         assert_eq!(service.service_name, "Terminal");
@@ -1119,6 +1215,10 @@ mod tests {
                 v3.contains(&expected),
                 "v3 fixture is missing descriptor entry: {expected}"
             );
+            assert!(
+                v4.contains(&expected),
+                "v4 fixture is missing descriptor entry: {expected}"
+            );
         }
         assert!(v2.contains("\"role\": \"channel.arg.1.tx.element\""));
         assert!(v2.contains("\"producer_pending_bound\": 1"));
@@ -1133,5 +1233,17 @@ mod tests {
         assert!(v3.contains("\"steady_frame_kind\": \"DirtyRegions\""));
         assert!(v3.contains("\"generation\": \"client-chosen-opaque\""));
         assert!(v3.contains("\"dirty_base\": \"exact-currently-composed-frame-sequence\""));
+        assert!(v4.contains("\"default_renderer_id\": \"rust-cpu-fontdue\""));
+        assert_eq!(
+            v4.matches("\"renderer_id\": \"rust-cpu-fontdue\"").count(),
+            3
+        );
+        assert_eq!(v4.matches("\"renderer_id\": \"rust-gpu-slug\"").count(), 3);
+        assert_eq!(v4.matches("\"rasterization_owner\": \"Server\"").count(), 6);
+        assert!(v4.contains("\"rasterization_owner_values\": [\"Server\", \"Client\"]"));
+        assert!(v4.contains("\"generation_field\": \"presentation_generation\""));
+        assert!(v4.contains("\"sequence_scope\": \"presentation-generation\""));
+        assert!(v4.contains("\"close\": \"terminates-bound-raster-subscriptions\""));
+        assert!(v4.contains("\"replacement\": \"fresh-lane-on-same-connection\""));
     }
 }

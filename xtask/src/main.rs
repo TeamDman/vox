@@ -739,7 +739,6 @@ fn assemble_java_jar(
     jar: &std::path::Path,
     classes: &std::path::Path,
     manifest: &std::path::Path,
-    class_files: &[std::path::PathBuf],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let jar_tool = java_tool("jar")?;
     let mut command = std::process::Command::new(jar_tool);
@@ -749,13 +748,13 @@ fn assemble_java_jar(
         .arg(jar)
         .arg("--manifest")
         .arg(manifest)
-        .arg("--date=1980-01-01T00:00:02Z");
-    for class_file in class_files {
-        command
-            .arg("-C")
-            .arg(classes)
-            .arg(class_file.strip_prefix(classes)?);
-    }
+        .arg("--date=1980-01-01T00:00:02Z")
+        // A repeated absolute `-C` argument for every class exceeds the
+        // Windows process command-line bound once the Terminal closure is
+        // included. The caller's class-set validation already vets this tree.
+        .arg("-C")
+        .arg(classes)
+        .arg(".");
     run_checked(&mut command, "deterministic jar assembly")
 }
 
@@ -810,9 +809,9 @@ fn package_java(workspace_root: &std::path::Path) -> Result<(), Box<dyn std::err
         )
         .into());
     }
-    assemble_java_jar(&artifact, &classes, &manifest, &class_files)?;
+    assemble_java_jar(&artifact, &classes, &manifest)?;
     let first = std::fs::read(&artifact)?;
-    assemble_java_jar(&artifact, &classes, &manifest, &class_files)?;
+    assemble_java_jar(&artifact, &classes, &manifest)?;
     if std::fs::read(&artifact)? != first {
         return Err("Java runtime JAR is not reproducible across consecutive assembly".into());
     }

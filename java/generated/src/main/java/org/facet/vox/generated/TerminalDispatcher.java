@@ -84,6 +84,26 @@ public final class TerminalDispatcher implements ServiceDispatcher {
           }
         });
       }
+      if (call.method().id() == TerminalServiceDescriptor.COPY_SELECTION.id()) {
+        TerminalCopySelectionArgs args = call.decodeArguments(TerminalCopySelectionArgs.ADAPTER);
+        return handler.copySelection(call.context(), args.request()).thenAccept(value -> {
+          try {
+            call.respond(PhonCodec.encode(TerminalCopySelectionResponse.ADAPTER, value, PhonLimits.defaults()));
+          } catch (PhonException error) {
+            throw new CompletionException(error);
+          }
+        });
+      }
+      if (call.method().id() == TerminalServiceDescriptor.PASTE.id()) {
+        TerminalPasteArgs args = call.decodeArguments(TerminalPasteArgs.ADAPTER);
+        return handler.paste(call.context(), args.request()).thenAccept(value -> {
+          try {
+            call.respond(PhonCodec.encode(TerminalPasteResponse.ADAPTER, value, PhonLimits.defaults()));
+          } catch (PhonException error) {
+            throw new CompletionException(error);
+          }
+        });
+      }
       if (call.method().id() == TerminalServiceDescriptor.SNAPSHOT.id()) {
         TerminalSnapshotArgs args = call.decodeArguments(TerminalSnapshotArgs.ADAPTER);
         return handler.snapshot(call.context(), args.request()).thenAccept(value -> {

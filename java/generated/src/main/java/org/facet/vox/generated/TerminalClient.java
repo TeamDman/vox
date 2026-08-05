@@ -130,6 +130,40 @@ public final class TerminalClient {
       return CompletableFuture.failedFuture(error);
     }
   }
+  public CompletableFuture<VoxResult<TerminalCopySelectionResult, TerminalError>> copySelection(TerminalCopySelectionRequest request) { return copySelection(request, CallOptions.defaults()); }
+  public CompletableFuture<VoxResult<TerminalCopySelectionResult, TerminalError>> copySelection(TerminalCopySelectionRequest request, CallOptions options) {
+    try {
+      byte[] encoded = PhonCodec.encode(TerminalCopySelectionArgs.ADAPTER, new TerminalCopySelectionArgs(request), PhonLimits.defaults());
+      return VoxFutures.mapCancellable(lane.call(TerminalServiceDescriptor.COPY_SELECTION, encoded, options, List.of()), bytes -> {
+        try {
+          VoxResult<TerminalCopySelectionResult, TerminalError> result = PhonCodec.decode(TerminalCopySelectionResponse.ADAPTER, bytes, PhonLimits.defaults());
+          if (result.isInfrastructureError()) throw remoteFailure(result);
+          return result;
+        } catch (PhonException error) {
+          throw new CompletionException(error);
+        }
+      });
+    } catch (PhonException error) {
+      return CompletableFuture.failedFuture(error);
+    }
+  }
+  public CompletableFuture<VoxResult<TerminalPasteResult, TerminalError>> paste(TerminalPasteRequest request) { return paste(request, CallOptions.defaults()); }
+  public CompletableFuture<VoxResult<TerminalPasteResult, TerminalError>> paste(TerminalPasteRequest request, CallOptions options) {
+    try {
+      byte[] encoded = PhonCodec.encode(TerminalPasteArgs.ADAPTER, new TerminalPasteArgs(request), PhonLimits.defaults());
+      return VoxFutures.mapCancellable(lane.call(TerminalServiceDescriptor.PASTE, encoded, options, List.of()), bytes -> {
+        try {
+          VoxResult<TerminalPasteResult, TerminalError> result = PhonCodec.decode(TerminalPasteResponse.ADAPTER, bytes, PhonLimits.defaults());
+          if (result.isInfrastructureError()) throw remoteFailure(result);
+          return result;
+        } catch (PhonException error) {
+          throw new CompletionException(error);
+        }
+      });
+    } catch (PhonException error) {
+      return CompletableFuture.failedFuture(error);
+    }
+  }
   public CompletableFuture<VoxResult<TerminalSnapshot, TerminalError>> snapshot(TerminalSnapshotRequest request) { return snapshot(request, CallOptions.defaults()); }
   public CompletableFuture<VoxResult<TerminalSnapshot, TerminalError>> snapshot(TerminalSnapshotRequest request, CallOptions options) {
     try {

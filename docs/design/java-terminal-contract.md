@@ -140,7 +140,8 @@ constructor that omits the defaulted record.
   `terminal-contract-v5.json` records typed negative presentation
   capabilities in V3 without modifying V4. `terminal-contract-v6.json` adds
   bounded per-frame renderer evidence without making it a selectable axis or
-  changing V5.
+  changing V5; V7 adds typed terminal tuning; and V8 adds collaborative
+  selection, copy, and guarded paste interactions.
 - `spec-proto` tests round-trip selectable CPU modes and unavailable GPU
   tuples with actionable errors, all three pixel transports, both
   rasterization-owner values, subscribe/event presentation generations, and
@@ -178,3 +179,29 @@ reason through the defaulted fields on `TerminalError`; the last accepted
 configuration and frame remain valid and no mutation sequence is published.
 The Java generator supports the records and unit enums used by V7; payload
 enum variants remain intentionally unnecessary.
+
+## Collaborative selection and guarded paste (terminal fixture V8)
+
+V8 keeps `TerminalSession` authoritative for visible-grid selection while
+allowing a Java presenter to render that state independently from Rust raster
+pixels. `TerminalInputResult` gains defaulted input disposition and selection
+fields. Ordinary left-button mouse input selects when the child has not enabled
+mouse reporting; mouse-aware applications continue to receive their reports.
+Full snapshots and raster frames retain the existing selection fields for
+resynchronization, while interactive responses make drag updates immediate.
+
+`copy_selection` returns either `Copied` with exact bounded text or the atomic
+`NoSelection` race outcome. Successful copy clears selection in the same
+authoritative mutation. `paste` keeps guard policy and clipboard source as
+independent enums. A remote or headless service never guesses a caller's
+clipboard: the invoking UI resolves automatic clipboard ownership and sends a
+bounded `Supplied` body.
+
+Guarded text containing either CR or LF returns `ConfirmationRequired`, a
+separately bounded preview, and a content identity without writing PTY bytes.
+The bypass request must bind to the exact approved body identity and may write
+that body once. Clipboard bodies are not echoed in results, logged, or placed
+in ordinary evidence artifacts. Rust pixel transports use selection-free base
+rasters so selection-only mouse motion does not force glyph rasterization,
+PNG encoding, GPU readback, transport, or Java texture upload; Java applies the
+selection overlay from the typed range.

@@ -55,6 +55,20 @@ pub trait Terminal {
         request: TerminalMouseInput,
     ) -> Result<TerminalInputResult, TerminalError>;
 
+    /// Copy and clear the current Rust-authoritative selection, returning a
+    /// typed no-selection outcome when the caller raced a state update.
+    async fn copy_selection(
+        &self,
+        request: TerminalCopySelectionRequest,
+    ) -> Result<TerminalCopySelectionResult, TerminalError>;
+
+    /// Paste caller-owned clipboard text, optionally stopping before PTY
+    /// mutation when multiline confirmation is required.
+    async fn paste(
+        &self,
+        request: TerminalPasteRequest,
+    ) -> Result<TerminalPasteResult, TerminalError>;
+
     /// Request the latest bounded frame, optionally after a known sequence.
     async fn snapshot(
         &self,
@@ -431,6 +445,108 @@ pub struct TerminalInputResult {
     pub frame_sequence: i64,
     #[facet(default)]
     pub correlation_id: String,
+    #[facet(default)]
+    pub disposition: TerminalInputDisposition,
+    #[facet(default)]
+    pub selection_present: bool,
+    #[facet(default)]
+    pub selection: TerminalSelection,
+}
+
+/// Observable effect of one text, key, or mouse input operation. Older peers
+/// decode the default as ordinary PTY forwarding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Facet)]
+#[repr(u8)]
+pub enum TerminalInputDisposition {
+    #[default]
+    Forwarded,
+    SelectionChanged,
+    NoChange,
+}
+
+/// Requests an atomic selected-text read followed by selection clearing.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalCopySelectionRequest {
+    pub session_id: String,
+    pub client_sequence: i64,
+    #[facet(default)]
+    pub correlation_id: String,
+}
+
+/// Whether selected text was available at the authoritative mutation point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum TerminalCopySelectionDisposition {
+    Copied,
+    NoSelection,
+}
+
+/// Atomic copy result. `text` is empty for `NoSelection`; a successful copy
+/// always returns the post-copy cleared selection state.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalCopySelectionResult {
+    pub session_id: String,
+    pub disposition: TerminalCopySelectionDisposition,
+    pub text: String,
+    pub server_sequence: i64,
+    pub frame_sequence: i64,
+    pub selection_present: bool,
+    pub selection: TerminalSelection,
+    #[facet(default)]
+    pub correlation_id: String,
+}
+
+/// Whether the service may write immediately or must guard multiline text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum TerminalPastePolicy {
+    GuardMultiline,
+    BypassGuard,
+}
+
+/// Clipboard owner for one paste. A remote/headless service rejects
+/// `AutomaticCallerClipboard`; the invoking UI resolves it and supplies text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum TerminalPasteSource {
+    Supplied,
+    AutomaticCallerClipboard,
+}
+
+/// Guard outcome. `ConfirmationRequired` guarantees no PTY write occurred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum TerminalPasteDisposition {
+    Pasted,
+    ConfirmationRequired,
+}
+
+/// One bounded paste request. `approved_content_id` is empty for guarded
+/// requests and must match the supplied body's identity for a bypass request.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalPasteRequest {
+    pub session_id: String,
+    pub policy: TerminalPastePolicy,
+    pub source: TerminalPasteSource,
+    pub supplied_text: String,
+    pub approved_content_id: String,
+    pub client_sequence: i64,
+    #[facet(default)]
+    pub correlation_id: String,
+}
+
+/// Result of guarded or bypass paste. Preview and identity are populated only
+/// for `ConfirmationRequired`; clipboard bodies are never echoed.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalPasteResult {
+    pub session_id: String,
+    pub disposition: TerminalPasteDisposition,
+    pub server_sequence: i64,
+    pub frame_sequence: i64,
+    pub preview: String,
+    pub content_id: String,
+    #[facet(default)]
+    pub correlation_id: String,
 }
 
 /// Requests a frame no larger than `max_frame_bytes`.
@@ -792,7 +908,7 @@ pub struct TerminalCursor {
 }
 
 /// A linear visible-grid selection associated with a snapshot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Facet)]
 pub struct TerminalSelection {
     pub anchor_x: u16,
     pub anchor_y: u16,
@@ -1494,6 +1610,57 @@ mod tests {
     }
 
     #[test]
+    fn terminal_selection_copy_and_paste_round_trip_through_phon() {
+        let input_result = TerminalInputResult {
+            session_id: "session-01".to_string(),
+            server_sequence: 8,
+            frame_sequence: 5,
+            correlation_id: "mouse-01".to_string(),
+            disposition: TerminalInputDisposition::SelectionChanged,
+            selection_present: true,
+            selection: TerminalSelection {
+                anchor_x: 2,
+                anchor_y: 3,
+                focus_x: 7,
+                focus_y: 4,
+            },
+        };
+        let bytes = vox_phon::to_vec(&input_result).expect("encode terminal input result");
+        let decoded: TerminalInputResult =
+            vox_phon::from_slice(&bytes).expect("decode terminal input result");
+        assert_eq!(decoded, input_result);
+
+        let copy = TerminalCopySelectionResult {
+            session_id: "session-01".to_string(),
+            disposition: TerminalCopySelectionDisposition::Copied,
+            text: "99\n100".to_string(),
+            server_sequence: 9,
+            frame_sequence: 5,
+            selection_present: false,
+            selection: TerminalSelection::default(),
+            correlation_id: "copy-01".to_string(),
+        };
+        let bytes = vox_phon::to_vec(&copy).expect("encode terminal copy result");
+        let decoded: TerminalCopySelectionResult =
+            vox_phon::from_slice(&bytes).expect("decode terminal copy result");
+        assert_eq!(decoded, copy);
+
+        let paste = TerminalPasteRequest {
+            session_id: "session-01".to_string(),
+            policy: TerminalPastePolicy::GuardMultiline,
+            source: TerminalPasteSource::Supplied,
+            supplied_text: "99\n100".to_string(),
+            approved_content_id: String::new(),
+            client_sequence: 10,
+            correlation_id: "paste-01".to_string(),
+        };
+        let bytes = vox_phon::to_vec(&paste).expect("encode terminal paste request");
+        let decoded: TerminalPasteRequest =
+            vox_phon::from_slice(&bytes).expect("decode terminal paste request");
+        assert_eq!(decoded, paste);
+    }
+
+    #[test]
     fn terminal_contract_fixture_matches_method_ids_and_bounds() {
         let v1 = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -1523,9 +1690,13 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../../test-fixtures/terminal/terminal-contract-v7.json"
         ));
+        let v8 = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test-fixtures/terminal/terminal-contract-v8.json"
+        ));
         let service = terminal_service_descriptor();
         assert_eq!(service.service_name, "Terminal");
-        assert_eq!(service.methods.len(), 13);
+        assert_eq!(service.methods.len(), 15);
         let v1_methods = [
             "connect",
             "capabilities",
@@ -1568,25 +1739,31 @@ mod tests {
                     "v2 fixture is missing immutable descriptor entry: {expected}"
                 );
             }
+            if !matches!(method.method_name, "copy_selection" | "paste") {
+                assert!(
+                    v3.contains(&expected),
+                    "v3 fixture is missing descriptor entry: {expected}"
+                );
+                assert!(
+                    v4.contains(&expected),
+                    "v4 fixture is missing descriptor entry: {expected}"
+                );
+                assert!(
+                    v5.contains(&expected),
+                    "v5 fixture is missing descriptor entry: {expected}"
+                );
+                assert!(
+                    v6.contains(&expected),
+                    "v6 fixture is missing descriptor entry: {expected}"
+                );
+                assert!(
+                    v7.contains(&expected),
+                    "v7 fixture is missing descriptor entry: {expected}"
+                );
+            }
             assert!(
-                v3.contains(&expected),
-                "v3 fixture is missing descriptor entry: {expected}"
-            );
-            assert!(
-                v4.contains(&expected),
-                "v4 fixture is missing descriptor entry: {expected}"
-            );
-            assert!(
-                v5.contains(&expected),
-                "v5 fixture is missing descriptor entry: {expected}"
-            );
-            assert!(
-                v6.contains(&expected),
-                "v6 fixture is missing descriptor entry: {expected}"
-            );
-            assert!(
-                v7.contains(&expected),
-                "v7 fixture is missing descriptor entry: {expected}"
+                v8.contains(&expected),
+                "v8 fixture is missing descriptor entry: {expected}"
             );
         }
         assert!(v2.contains("\"role\": \"channel.arg.1.tx.element\""));
@@ -1645,5 +1822,13 @@ mod tests {
         assert!(v7.contains("\"manual_font\": \"exact-or-reject\""));
         assert!(v7.contains("\"rejection_retention\": \"last-accepted-state-unchanged\""));
         assert!(v7.contains("\"font_precision\": \"milli-pixels\""));
+        assert!(v8.contains("\"version\": 8"));
+        assert!(v8.contains("\"extends\": \"terminal-contract-v7.json\""));
+        assert!(v8.contains("\"guard_trigger\": \"contains-cr-or-lf\""));
+        assert!(v8.contains("\"guard_no_write\": true"));
+        assert!(v8.contains("\"remote_clipboard\": \"caller-resolves-auto-and-sends-supplied\""));
+        assert!(v8.contains(
+            "\"remote_raster_selection\": \"base-pixels-selection-free-client-overlay\""
+        ));
     }
 }

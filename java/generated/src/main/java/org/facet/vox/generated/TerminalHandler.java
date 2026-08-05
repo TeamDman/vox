@@ -13,6 +13,8 @@ public interface TerminalHandler {
   CompletableFuture<VoxResult<TerminalInputResult, TerminalError>> sendText(CallContext context, TerminalTextInput request);
   CompletableFuture<VoxResult<TerminalInputResult, TerminalError>> sendKey(CallContext context, TerminalKeyInput request);
   CompletableFuture<VoxResult<TerminalInputResult, TerminalError>> sendMouse(CallContext context, TerminalMouseInput request);
+  CompletableFuture<VoxResult<TerminalCopySelectionResult, TerminalError>> copySelection(CallContext context, TerminalCopySelectionRequest request);
+  CompletableFuture<VoxResult<TerminalPasteResult, TerminalError>> paste(CallContext context, TerminalPasteRequest request);
   CompletableFuture<VoxResult<TerminalSnapshot, TerminalError>> snapshot(CallContext context, TerminalSnapshotRequest request);
   CompletableFuture<VoxResult<TerminalOperationResult, TerminalError>> subscribeFrames(CallContext context, TerminalSubscribeRequest request, VoxTx<TerminalFrameEvent> frames);
   CompletableFuture<VoxResult<TerminalOperationResult, TerminalError>> subscribeRasterFrames(CallContext context, TerminalRasterSubscribeRequest request, VoxTx<TerminalRasterFrameEvent> frames);

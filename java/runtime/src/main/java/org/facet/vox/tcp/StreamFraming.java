@@ -12,8 +12,12 @@ public final class StreamFraming {
     private final InputStream input;
     private final OutputStream output;
     private final int maxFrameBytes;
+    private final byte[] frameHeader = new byte[4];
     private boolean linkReady;
     private boolean eof;
+    private int frameHeaderRead;
+    private byte[] frameBody;
+    private int frameBodyRead;
 
     public StreamFraming(InputStream input, OutputStream output, int maxFrameBytes) {
         if (maxFrameBytes <= 0) {
@@ -66,22 +70,47 @@ public final class StreamFraming {
     public byte[] readFrame() throws IOException, VoxException {
         if (!linkReady) throw new IllegalStateException("link prologue not exchanged");
         if (eof) return null;
-        byte[] prefix = readExactly(4, "frame header", true);
-        if (prefix == null) {
-            eof = true;
-            return null;
+        while (frameHeaderRead < frameHeader.length) {
+            int count = input.read(
+                    frameHeader, frameHeaderRead, frameHeader.length - frameHeaderRead);
+            if (count < 0) {
+                if (frameHeaderRead == 0) {
+                    eof = true;
+                    return null;
+                }
+                throw new EOFException("stream ended after " + frameHeaderRead
+                        + " of 4 frame header bytes");
+            }
+            frameHeaderRead += count;
         }
-        long length = Integer.toUnsignedLong(
-                Byte.toUnsignedInt(prefix[0])
-                        | Byte.toUnsignedInt(prefix[1]) << 8
-                        | Byte.toUnsignedInt(prefix[2]) << 16
-                        | Byte.toUnsignedInt(prefix[3]) << 24);
-        if (length > maxFrameBytes) {
-            throw new VoxException(
-                    "frame length " + length + " exceeds bound " + maxFrameBytes);
+        if (frameBody == null) {
+            long length = Integer.toUnsignedLong(
+                    Byte.toUnsignedInt(frameHeader[0])
+                            | Byte.toUnsignedInt(frameHeader[1]) << 8
+                            | Byte.toUnsignedInt(frameHeader[2]) << 16
+                            | Byte.toUnsignedInt(frameHeader[3]) << 24);
+            if (length > maxFrameBytes) {
+                throw new VoxException(
+                        "frame length " + length + " exceeds bound " + maxFrameBytes);
+            }
+            // The bound is checked before this allocation. Header/body progress lives
+            // on the framing object so a recoverable SocketTimeoutException cannot
+            // discard bytes already consumed from the stream.
+            frameBody = new byte[(int) length];
         }
-        // The bound is checked before this allocation.
-        return readExactly((int) length, "frame body", false);
+        while (frameBodyRead < frameBody.length) {
+            int count = input.read(frameBody, frameBodyRead, frameBody.length - frameBodyRead);
+            if (count < 0) {
+                throw new EOFException("stream ended after " + frameBodyRead
+                        + " of " + frameBody.length + " frame body bytes");
+            }
+            frameBodyRead += count;
+        }
+        byte[] result = frameBody;
+        frameHeaderRead = 0;
+        frameBody = null;
+        frameBodyRead = 0;
+        return result;
     }
 
     private byte[] readExactly(int length, String part, boolean cleanEofAllowed)

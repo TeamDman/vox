@@ -3,6 +3,9 @@ package org.facet.vox.tcp;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.SocketTimeoutException;
 import java.util.Arrays;
 import org.facet.vox.VoxException;
 
@@ -11,6 +14,7 @@ public final class StreamFramingTest {
         exactLinkAndFrameBytes();
         oversizedFrameRejectedBeforeAllocation();
         truncatedHeaderAndBodyAreDistinct();
+        partialFramesSurviveSocketTimeouts();
         transportVectors();
         System.out.println("StreamFramingTest: PASS");
     }
@@ -47,6 +51,23 @@ public final class StreamFramingTest {
         StreamFraming body = framingWith(new byte[] {4, 0, 0, 0, 1});
         EOFException bodyFailure = expectThrows(EOFException.class, body::readFrame);
         check(bodyFailure.getMessage().contains("frame body"), "body truncation");
+    }
+
+    private static void partialFramesSurviveSocketTimeouts() throws Exception {
+        byte[] payload = new byte[] {11, 12, 13, 14, 5, 0, 0, 0, 1, 2, 3, 4, 5};
+        assertFrameSurvivesTimeout(payload, link().length + 2, "partial header");
+        assertFrameSurvivesTimeout(payload, link().length + 4 + 3, "partial body");
+    }
+
+    private static void assertFrameSurvivesTimeout(
+            byte[] payload, int timeoutAt, String description) throws Exception {
+        StreamFraming framing = new StreamFraming(
+                new TimeoutOnceInputStream(concat(link(), framed(payload)), timeoutAt),
+                new ByteArrayOutputStream(), 64);
+        framing.exchangeLinkPrologue();
+        expectThrows(SocketTimeoutException.class, framing::readFrame);
+        check(Arrays.equals(framing.readFrame(), payload), description + " resumed exactly");
+        check(framing.readFrame() == null, description + " consumed one frame");
     }
 
     private static void transportVectors() throws Exception {
@@ -116,5 +137,36 @@ public final class StreamFramingTest {
 
     private interface ThrowingRunnable {
         void run() throws Exception;
+    }
+
+    private static final class TimeoutOnceInputStream extends InputStream {
+        private final byte[] bytes;
+        private final int timeoutAt;
+        private int position;
+        private boolean timedOut;
+
+        private TimeoutOnceInputStream(byte[] bytes, int timeoutAt) {
+            this.bytes = bytes;
+            this.timeoutAt = timeoutAt;
+        }
+
+        @Override public int read() throws IOException {
+            byte[] one = new byte[1];
+            int count = read(one, 0, 1);
+            return count < 0 ? -1 : Byte.toUnsignedInt(one[0]);
+        }
+
+        @Override public int read(byte[] target, int offset, int length) throws IOException {
+            if (!timedOut && position >= timeoutAt) {
+                timedOut = true;
+                throw new SocketTimeoutException("deterministic framing timeout");
+            }
+            if (position >= bytes.length) return -1;
+            int count = Math.min(length, bytes.length - position);
+            if (!timedOut) count = Math.min(count, timeoutAt - position);
+            System.arraycopy(bytes, position, target, offset, count);
+            position += count;
+            return count;
+        }
     }
 }

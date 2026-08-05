@@ -132,8 +132,25 @@ final class WireCodec {
             Value writer = PhonCodec.decodeValue(peerMessageSchema, frame, limits);
             return peerMessagePlan.translate(writer);
         } catch (PhonException failure) {
-            throw new VoxException("cannot decode compact Message", failure);
+            throw new VoxException(
+                    "cannot decode compact Message (frame_bytes=" + frame.length
+                            + ", byte_offset=" + failure.byteOffset()
+                            + ", nearby_hex=" + nearbyHex(frame, failure.byteOffset()) + ")",
+                    failure);
         }
+    }
+
+    private static String nearbyHex(byte[] frame, int byteOffset) {
+        int center = byteOffset < 0 ? 0 : Math.min(byteOffset, frame.length);
+        int start = Math.max(0, center - 12);
+        int end = Math.min(frame.length, center + 12);
+        StringBuilder result = new StringBuilder();
+        for (int index = start; index < end; index++) {
+            if (index > start) result.append(' ');
+            result.append(Character.forDigit((frame[index] >>> 4) & 0xf, 16));
+            result.append(Character.forDigit(frame[index] & 0xf, 16));
+        }
+        return result.toString();
     }
 
     Value laneOpen(String service, Map<String, String> configuredMetadata) {

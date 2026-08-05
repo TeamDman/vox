@@ -46,6 +46,7 @@ public final class VoxRuntimeTest {
     public static void main(String[] args) throws Exception {
         boundsAreFiniteAndPositive();
         registryRejectsDuplicates();
+        compactMessageFailuresExposeBoundedWireContext();
         pendingAndOutboundBoundsFailClosed();
         laneCorrelatesAndDiscardsLateResponses();
         requestIdsFollowNegotiatedParity();
@@ -55,6 +56,28 @@ public final class VoxRuntimeTest {
         connectionDriverOwnershipAndHandshake();
         generatedChannelRoundTripHonorsCreditAndCancellation();
         System.out.println("VoxRuntimeTest: PASS");
+    }
+
+    private static void compactMessageFailuresExposeBoundedWireContext() throws Exception {
+        ConnectionOptions options = ConnectionOptions.defaults();
+        try {
+            WireCodec codec = new WireCodec(options);
+            codec.bindPeerMessageSchema(codec.localMessageSchemaBytes());
+            byte[] malformed = new byte[] {
+                    0, 0, 0, 0, 0, 0, 0, 0,
+                    0, (byte) 0xff, 0, 0
+            };
+            VoxException failure = expectThrows(
+                    VoxException.class, () -> codec.decodeMessage(malformed));
+            check(failure.getMessage().contains("frame_bytes=12"),
+                    "compact failure frame length");
+            check(failure.getMessage().contains("byte_offset=12"),
+                    "compact failure byte offset");
+            check(failure.getMessage().contains("00 ff 00 00"),
+                    "compact failure nearby bytes");
+        } finally {
+            options.closeOwnedResources();
+        }
     }
 
     private static void generatedChannelRoundTripHonorsCreditAndCancellation()

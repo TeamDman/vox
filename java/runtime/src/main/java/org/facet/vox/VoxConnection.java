@@ -925,7 +925,19 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
         long channelId = WireCodec.unsignedLong(WireCodec.required(channel, "id"));
         Value body = WireCodec.required(channel, "body");
         String variant = WireCodec.variant(body);
+        long additional = 0;
+        if ("GrantCredit".equals(variant)) {
+            additional = WireCodec.unsignedLong(
+                    WireCodec.required(WireCodec.variantPayload(body), "additional"));
+            if (additional == 0 || additional > Integer.MAX_VALUE) {
+                throw new VoxException("invalid channel credit " + additional);
+            }
+        }
         ActiveChannel active = activeChannels.get(channelKey(laneId, channelId));
+        // Receiver credit can cross a local Close or request termination. Like
+        // the Rust driver, discard valid credit when no sender remains to use it.
+        if (active == null && channelId != 0 && "GrantCredit".equals(variant)
+                && (inboundLanes.containsKey(laneId) || hasOpenOutboundLane(laneId))) return;
         if (active == null && locallyClosedLanes.contains(laneId)) return;
         if (active == null) {
             throw new VoxException("message for unknown channel "
@@ -972,11 +984,6 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
             case "GrantCredit" -> {
                 if (active.sender == null) {
                     throw new VoxException("peer granted credit to locally-receiving channel");
-                }
-                long additional = WireCodec.unsignedLong(
-                        WireCodec.required(WireCodec.variantPayload(body), "additional"));
-                if (additional == 0 || additional > Integer.MAX_VALUE) {
-                    throw new VoxException("invalid channel credit " + additional);
                 }
                 active.sender.grant((int) additional);
             }
@@ -1122,6 +1129,15 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
             lanes.removeIf(lane -> lane.id() == laneId);
         }
         clearLaneBindings(laneId);
+    }
+
+    private boolean hasOpenOutboundLane(long laneId) {
+        synchronized (lanes) {
+            for (ServiceLane lane : lanes) {
+                if (lane.id() == laneId) return lane.state() == LaneState.OPEN;
+            }
+            return false;
+        }
     }
 
     private boolean hasOutboundLane(long laneId) {

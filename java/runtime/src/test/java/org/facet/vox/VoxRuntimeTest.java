@@ -54,6 +54,7 @@ public final class VoxRuntimeTest {
         controlQueueFailureTerminatesLane();
         inboundCallIsExactlyOnce();
         connectionDriverOwnershipAndHandshake();
+        ChannelCreditRetirementTest.runAll();
         generatedChannelRoundTripHonorsCreditAndCancellation();
         System.out.println("VoxRuntimeTest: PASS");
     }

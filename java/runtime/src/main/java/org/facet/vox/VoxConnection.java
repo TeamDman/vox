@@ -927,6 +927,17 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
         String variant = WireCodec.variant(body);
         ActiveChannel active = activeChannels.get(channelKey(laneId, channelId));
         if (active == null && locallyClosedLanes.contains(laneId)) return;
+        // r[impl rpc.flow-control.credit.grant]
+        // Credit can cross a local Close (or request completion) on the wire.
+        // Match the Rust driver: validate it, then discard it if no sender
+        // remains. No channel tombstones or new state are needed.
+        if (active == null && variant.equals("GrantCredit")) {
+            if (!inboundLanes.containsKey(laneId) && !hasOutboundLane(laneId)) {
+                throw new VoxException("message for unknown lane " + Long.toUnsignedString(laneId));
+            }
+            channelCredit(body);
+            return;
+        }
         if (active == null) {
             throw new VoxException("message for unknown channel "
                     + Long.toUnsignedString(laneId) + ":" + Long.toUnsignedString(channelId));
@@ -973,15 +984,19 @@ public final class VoxConnection implements AutoCloseable, ServiceLane.DriverCom
                 if (active.sender == null) {
                     throw new VoxException("peer granted credit to locally-receiving channel");
                 }
-                long additional = WireCodec.unsignedLong(
-                        WireCodec.required(WireCodec.variantPayload(body), "additional"));
-                if (additional == 0 || additional > Integer.MAX_VALUE) {
-                    throw new VoxException("invalid channel credit " + additional);
-                }
-                active.sender.grant((int) additional);
+                active.sender.grant(channelCredit(body));
             }
             default -> throw new VoxException("unsupported channel message " + variant);
         }
+    }
+
+    private static int channelCredit(Value body) throws VoxException {
+        long additional = WireCodec.unsignedLong(
+                WireCodec.required(WireCodec.variantPayload(body), "additional"));
+        if (additional == 0 || additional > Integer.MAX_VALUE) {
+            throw new VoxException("invalid channel credit " + additional);
+        }
+        return (int) additional;
     }
 
     @SuppressWarnings("unchecked")

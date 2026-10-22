@@ -44,6 +44,7 @@ public final class VoxRuntimeTest {
     };
 
     public static void main(String[] args) throws Exception {
+        lateCreditAfterChannelRetirementIsHarmless();
         boundsAreFiniteAndPositive();
         registryRejectsDuplicates();
         compactMessageFailuresExposeBoundedWireContext();
@@ -56,6 +57,50 @@ public final class VoxRuntimeTest {
         connectionDriverOwnershipAndHandshake();
         generatedChannelRoundTripHonorsCreditAndCancellation();
         System.out.println("VoxRuntimeTest: PASS");
+    }
+
+    // Reproduce the driver state after local Close removed the sender. Calling the
+    // handler directly makes the cross-direction credit race deterministic.
+    @SuppressWarnings("unchecked")
+    private static void lateCreditAfterChannelRetirementIsHarmless() throws Exception {
+        ConnectionOptions options = ConnectionOptions.defaults();
+        try (Socket socket = new Socket()) {
+            VoxConnection connection = VoxConnection.accept(socket, new ServiceRegistry(), options);
+            var lanesField = VoxConnection.class.getDeclaredField("lanes");
+            lanesField.setAccessible(true);
+            ((List<ServiceLane>) lanesField.get(connection)).add(new ServiceLane(
+                    1L, JavaFixtureServiceDescriptor.INSTANCE, connection, options,
+                    LaneOptions.defaults(), LaneState.OPEN, 1L, 16, 16));
+            WireCodec codec = new WireCodec(options);
+            var inbound = VoxConnection.class.getDeclaredMethod(
+                    "processInboundChannel", long.class, org.facet.phon.Value.class);
+            inbound.setAccessible(true);
+            for (int i = 0; i < 1000; i++) {
+                inbound.invoke(connection, 1L, WireCodec.variantPayload(codec.channelGrant(1L, 1)));
+            }
+            var unknownLane = expectThrows(java.lang.reflect.InvocationTargetException.class,
+                    () -> inbound.invoke(connection, 99L,
+                            WireCodec.variantPayload(codec.channelGrant(1L, 1))));
+            check(unknownLane.getCause() instanceof VoxException
+                            && unknownLane.getCause().getMessage().contains("unknown lane"),
+                    "unknown lane credit still fails closed");
+            for (int invalid : new int[] {0, -1}) {
+                var failure = expectThrows(java.lang.reflect.InvocationTargetException.class,
+                        () -> inbound.invoke(connection, 1L,
+                                WireCodec.variantPayload(codec.channelGrant(1L, invalid))));
+                check(failure.getCause() instanceof VoxException
+                                && failure.getCause().getMessage().contains("invalid channel credit"),
+                        "retired channel still validates credit");
+            }
+            var failure = expectThrows(java.lang.reflect.InvocationTargetException.class,
+                    () -> inbound.invoke(connection, 1L,
+                            WireCodec.variantPayload(codec.channelItem(1L, new byte[0]))));
+            check(failure.getCause() instanceof VoxException
+                            && failure.getCause().getMessage().contains("unknown channel"),
+                    "unknown channel data still fails closed");
+        } finally {
+            options.closeOwnedResources();
+        }
     }
 
     private static void compactMessageFailuresExposeBoundedWireContext() throws Exception {

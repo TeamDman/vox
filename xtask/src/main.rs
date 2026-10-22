@@ -759,6 +759,23 @@ fn assemble_java_jar(
 }
 
 fn package_java(workspace_root: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    // A source-build lock can pin the SDK without embedding a machine-local path.
+    // --release controls the class target, not compiler byte-for-byte identity.
+    if let Ok(expected) = std::env::var("VOX_JAVA_BUILD_JDK") {
+        let home = std::env::var_os("JAVA_HOME")
+            .ok_or("VOX_JAVA_BUILD_JDK requires JAVA_HOME")?;
+        let release = std::fs::read_to_string(std::path::Path::new(&home).join("release"))?;
+        let property = |name: &str| -> Result<String, Box<dyn std::error::Error>> {
+            release.lines().find_map(|line| {
+                line.strip_prefix(&format!("{name}=\""))
+                    .and_then(|value| value.strip_suffix('"')).map(str::to_owned)
+            }).ok_or_else(|| format!("JDK release file lacks {name}").into())
+        };
+        let actual = format!("{}|{}", property("IMPLEMENTOR")?, property("JAVA_RUNTIME_VERSION")?);
+        if actual != expected {
+            return Err(format!("Java package SDK mismatch: expected {expected}, found {actual}").into());
+        }
+    }
     test_java(workspace_root)?;
     let javac = java_tool("javac")?;
     ensure_java_17(&javac)?;
@@ -773,7 +790,7 @@ fn package_java(workspace_root: &std::path::Path) -> Result<(), Box<dyn std::err
     let manifest = target.join("runtime-manifest.mf");
     std::fs::write(
         &manifest,
-        "Manifest-Version: 1.0\r\nAutomatic-Module-Name: org.facet.vox\r\n\r\n",
+        "Manifest-Version: 1.0\r\nAutomatic-Module-Name: org.facet.vox\r\nCreated-By: vox-xtask\r\n\r\n",
     )?;
     let version = vox_java_version(workspace_root)?;
     let artifact = target.join(format!("vox-java-{version}.jar"));

@@ -6,7 +6,7 @@ import java.util.List;
 import org.facet.phon.*;
 
 public enum TerminalTuningRejectionReason { INVALID_MODE_VALUE, OUT_OF_RANGE, OVER_CONSTRAINED, RENDERER_UNAVAILABLE;
-  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0xb946d897ee7aec98L), List.of(), new Schema.EnumKind("TerminalTuningRejectionReason", List.of(new Schema.Variant("InvalidModeValue", 0, Schema.Payload.unit()), new Schema.Variant("OutOfRange", 1, Schema.Payload.unit()), new Schema.Variant("OverConstrained", 2, Schema.Payload.unit()), new Schema.Variant("RendererUnavailable", 3, Schema.Payload.unit()))));
+  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0xf751caf5b996888fL), List.of(), new Schema.EnumKind("TerminalTuningRejectionReason", List.of(new Schema.Variant("InvalidModeValue", 0, Schema.Payload.unit()), new Schema.Variant("OutOfRange", 1, Schema.Payload.unit()), new Schema.Variant("OverConstrained", 2, Schema.Payload.unit()), new Schema.Variant("RendererUnavailable", 3, Schema.Payload.unit()))));
   public static final PhonAdapter<TerminalTuningRejectionReason> ADAPTER = new PhonAdapter<>() {
     @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA); }
     @Override public void encode(PhonEncoder encoder, TerminalTuningRejectionReason value) throws PhonException { encoder.writeU32Unaligned(value.ordinal()); }

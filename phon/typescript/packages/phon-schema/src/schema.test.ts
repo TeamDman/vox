@@ -2,7 +2,15 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { PRIMITIVES, Registry, primitiveId, resolveIds, schemaFromBytes, validateSchemaBundle } from "./schema.ts";
+import {
+  PRIMITIVES,
+  Registry,
+  parseSchemaBundle,
+  primitiveId,
+  resolveIds,
+  schemaFromBytes,
+  validateSchemaBundle,
+} from "./schema.ts";
 import type { Field, Primitive, Schema, SchemaKind, SchemaRef, VariantPayload } from "./schema.ts";
 import { ZST_COUNT_CAP, hexToBytes } from "./wire.ts";
 
@@ -93,8 +101,43 @@ function collectKind(kind: SchemaKind, kinds: Set<string>, refs: Set<string>, pa
     case "external":
       if (kind.metadata) collectRef(kind.metadata, refs);
       return;
+    case "semantic":
+      kind.args.forEach((arg) => collectRef(arg, refs));
+      collectRef(kind.representation, refs);
+      return;
   }
 }
+
+describe("parseSchemaBundle against the Rust golden", () => {
+  const golden = new Uint8Array(readFileSync(fileURLToPath(
+    new URL("../../../../rust/phon-schema/testdata/schema-bundle-point-v1.phon", import.meta.url),
+  )));
+
+  it("admits the canonical PHONSCM1 bundle", () => {
+    const schemas = parseSchemaBundle(golden);
+    expect(schemas).toHaveLength(1);
+    expect(schemas[0]?.kind).toMatchObject({ kind: "struct", name: "Point" });
+    expect(() => validateSchemaBundle(schemas)).not.toThrow();
+  });
+
+  it("rejects every truncation", () => {
+    for (let end = 0; end < golden.length; end++) {
+      expect(() => parseSchemaBundle(golden.subarray(0, end))).toThrow();
+    }
+  });
+});
+
+describe("legacy single-schema semantic parsing", () => {
+  it("parses a Semantic schema emitted by the Rust self-describing codec", () => {
+    const bytes = new Uint8Array(readFileSync(fileURLToPath(
+      new URL("../../../../rust/phon-schema/testdata/schema-semantic-region-ref-v1.phon", import.meta.url),
+    )));
+    expect(schemaFromBytes(bytes).kind).toMatchObject({
+      kind: "semantic",
+      name: "org.bearcove.phon.region-ref-v1",
+    });
+  });
+});
 
 describe("schemaFromBytes against the Rust corpus", () => {
   const corpus = loadCorpus();

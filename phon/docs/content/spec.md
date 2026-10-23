@@ -216,6 +216,11 @@ pub enum SchemaKind {
     Tensor { element: SchemaRef, rank: Option<u32> },
     Option { element: SchemaRef },
     Channel { direction: ChannelDirection, element: SchemaRef },
+    Semantic {
+        name: QualifiedName,
+        args: Vec<SchemaRef>,
+        representation: SchemaRef,
+    },
     Dynamic,
     External { kind: String, metadata: Option<SchemaRef> },
 }
@@ -227,8 +232,8 @@ pub enum ChannelDirection {
 ```
 
 `Struct`, `Enum`, `Tuple`, `List`, `Set`, `Map`, and `Option` are the shapes
-you'd expect. `Array`, `Tensor`, `Channel`, `Dynamic`, and `External` deserve a
-note:
+you'd expect. `Array`, `Tensor`, `Channel`, `Semantic`, `Dynamic`, and
+`External` deserve a note:
 
 > r[type-system.array]
 >
@@ -265,6 +270,28 @@ note:
 > into one and back — is a descriptor-model detail, covered in [Language
 > implementations](#language-implementations), not part of this wire contract.)
 
+> r[type-system.semantic]
+>
+> `Semantic` gives a schema-known value a fully-qualified, permanently versioned
+> meaning while delegating all wire bytes to `representation`. `name` is a
+> canonical `QualifiedName`; `args` are the semantic type arguments presented to the
+> registered handler; `representation` is the ordinary PHON schema that alone
+> determines encoded length, alignment, and byte grammar. The handler may
+> validate, translate, or resolve that representation, but may not change its
+> bytes. Unknown semantics remain structurally inspectable through their
+> representation. Typed planning or semantic resolution requires an explicitly
+> registered handler and otherwise fails with `MissingSemanticHandler`; a file
+> naming a semantic never causes code to be downloaded or loaded automatically.
+> A handler declares whether its immutable qualified-name contract is valid for messages,
+> durable files, or both, and executes under the same depth, work, allocation,
+> and package-boundary limits as the surrounding engine. `Semantic` is compact
+> only: it has no self-describing tag and cannot appear inside `Dynamic`.
+>
+> `org.bearcove.phon.region-ref-v1<T>` is the durable region semantic. Its representation is
+> `u32`, and its handler turns an owner-scoped builder or `FileView` reference
+> into that file-local number and back. The number is never a pointer, byte
+> offset, process-global identifier, or freely constructible standalone value.
+
 > r[type-system.dynamic]
 >
 > A `Dynamic` value carries any phon value, encoded in self-describing form,
@@ -290,6 +317,44 @@ note:
 > self-describing form, because without the schema there is no `kind` and no
 > metadata type. See [External attachments](#external-attachments) for the
 > transport boundary.
+
+## Qualified names
+
+```rust
+pub struct QualifiedName(taxon::SemanticName);
+```
+
+`QualifiedName` is PHON's validated schema/control-plane identifier, distinct
+from the dynamic `QName` primitive and `facet_value::VQName`. Its revision-1
+canonical grammar is algorithmic:
+
+- the complete value is ASCII and 1 through 255 bytes;
+- it contains at least two non-empty labels separated by single `.` bytes;
+- each label's first byte is `a` through `z`;
+- later label bytes are `a` through `z`, `0` through `9`, or `-`;
+- `-` is neither consecutive nor the last byte of a label;
+- no case folding, Unicode normalization, escaping, or other normalization is
+  performed: a non-canonical input is rejected rather than rewritten.
+
+PHON reserves the `phon.` and `org.bearcove.phon.` prefixes. Core schema,
+feature, Aux, and digest declarations use an explicit trusted-authority
+constructor; application-created names reject either prefix. Meanings are
+immutable once published. The canonical built-ins in this revision use the
+fully qualified `org.bearcove.phon.*` namespace.
+
+The compact, identity-hash, and control-plane body is a `u32` little-endian byte
+length followed by canonical UTF-8 bytes. The self-describing form is the
+ordinary `STRING` tag (`0x0f`) followed by that body. Decoders validate the
+grammar, bound, and namespace authority before exposing a `QualifiedName` or a
+schema containing one. Taxon owns only the non-empty, `u32`-bounded
+`SemanticName` identity carrier and generic `Semantic` shape; Taxon does not
+own PHON grammar, namespace, or wire policy.
+
+> r[type-system.qualified-name]
+>
+> Semantic, feature, Aux, and algorithm identifiers use canonical PHON
+> `QualifiedName` values. They never use the dynamic `QName` primitive or a
+> `facet_value` runtime type.
 
 
 ## Schema references
@@ -411,8 +476,8 @@ use only:
 - Plain `enum` and `struct` declarations with owned data
 - The specific generic containers `Vec<T>` and `Option<T>`
 - Primitive types `String`, `u32`, `u64`
-- The phon-defined types `SchemaId`, `SchemaRef`, `Schema`, `SchemaKind`,
-  `Primitive`, `Field`, `Variant`, `VariantPayload`
+- The phon-defined types `QualifiedName`, `SchemaId`, `SchemaRef`, `Schema`,
+  `SchemaKind`, `Primitive`, `Field`, `Variant`, `VariantPayload`
 
 > r[type-system.rust-subset]
 >
@@ -536,19 +601,22 @@ decoded.
 > *string* is a `u32` LE byte length then its UTF-8 bytes; a `bool` is one byte,
 > `0` or `1`. A schema's `id` field is never fed into its own hash.
 >
-> A schema's kind is its tag string followed by its body:
+> Before every schema kind, encode its type-parameter list as the string marker
+> `type-params`, a `u32` count, and each parameter name, omitting the entire
+> prefix only when the list is empty. This rule applies uniformly to every
+> schema kind. The schema kind then follows as its tag string and body:
 >
 > - **primitive**: the primitive tag — one of `bool`, `u8`, `u16`, `u32`, `u64`,
 >   `u128`, `i8`, `i16`, `i32`, `i64`, `i128`, `f32`, `f64`, `char`, `string`,
 >   `bytes`, `datetime`, `uuid`, `qname`, `unit`, `never`.
-> - **struct**: `struct`; the name; the type-parameter list (a `u32` count then
->   each parameter name); a `u32` field count; then per field, in declaration
->   order: the field name, the `required` bool, the field's reference.
-> - **enum**: `enum`; the name; the type-parameter list; a `u32` variant count;
->   then per variant, in declaration order: the variant name, its index (`u32`),
->   and its payload — `unit`; or `newtype` then a reference; or `tuple` then a
->   `u32` count then references; or `struct` then a `u32` field count then fields
->   encoded as above.
+> - **struct**: `struct`; the name; a `u32` field count; then per field, in
+>   declaration order: the field name, the `required` bool, and the field's
+>   reference.
+> - **enum**: `enum`; the name; a `u32` variant count; then per variant, in
+>   declaration order: the variant name, its index (`u32`), and its payload —
+>   `unit`; or `newtype` then a reference; or `tuple` then a `u32` count then
+>   references; or `struct` then a `u32` field count then fields encoded as
+>   above.
 > - **tuple**: `tuple`; a `u32` element count; then each element reference.
 > - **list** / **set** / **option**: the tag (`list` / `set` / `option`) then
 >   the element reference.
@@ -562,21 +630,24 @@ decoded.
 > - **dynamic**: `dynamic`.
 > - **external**: `external`; the `kind` string; then the `metadata` — one byte
 >   `0` for `None`, or `1` then the metadata reference.
+> - **semantic**: `semantic`; the canonical `QualifiedName` string; a `u32`
+>   argument count then each argument reference; then the representation reference.
 >
 > A *reference* is encoded as `concrete` then the referenced `SchemaId` (8 bytes
 > LE) then a `u32` argument count then each argument reference; or, for a type
 > parameter, `var` then the parameter name. The argument count is always written
 > — zero for a non-generic concrete reference — with no conditional marker.
 >
-> Every tag and marker token above — the kind tags, the primitive tags, the
-> variant-payload tags (`unit`/`newtype`/`tuple`/`struct`), the channel direction
-> tags (`tx`/`rx`), and the reference markers (`concrete`/`var`/`inline`/
-> `backref`) — is fed to the hash as a *string* by the building-block rule (a
-> `u32` LE length then its UTF-8 bytes), never as a bare byte, so token framing
-> is unambiguous and identical across implementations.
+> Every tag and marker token above — `type-params`, the kind tags, the primitive
+> tags, the variant-payload tags (`unit`/`newtype`/`tuple`/`struct`), the channel
+> direction tags (`tx`/`rx`), and the reference markers (`concrete`/`var`/
+> `inline`/`backref`) — is fed to the hash as a *string* by the building-block
+> rule (a `u32` LE length then its UTF-8 bytes), never as a bare byte, so token
+> framing is unambiguous and identical across implementations.
 
-Everything structural is in the hash; there is nothing non-structural in a
-phon schema to leave out (no doc comments, no annotations travel on the wire).
+Everything affecting structure or semantics is in the hash. Documentation and
+other descriptive annotations are carried separately and never affect a
+`SchemaId`.
 
 Names are part of identity on purpose. phon matches struct fields and enum
 variants by name when translating between two schema versions — that's how a field
@@ -720,12 +791,12 @@ A few things worth calling out:
 
 > r[self-describing.no-extra-kinds]
 >
-> `Dynamic`, `Channel`, and `External` have no self-describing tags. A `Dynamic`
-> value simply *is* a self-describing value — it carries whatever tag its actual
-> kind calls for, so it needs no tag of its own. `Channel` and `External` have no
-> self-describing form at all: both require the schema to interpret (a channel's
-> element type, an external's `kind` and metadata type), so they appear only in
-> compact mode and never inside a `Dynamic`.
+> `Dynamic`, `Channel`, `Semantic`, and `External` have no self-describing tags.
+> A `Dynamic` value simply *is* a self-describing value — it carries whatever
+> tag its actual structural kind calls for, so it needs no tag of its own.
+> `Channel`, `Semantic`, and `External` have no self-describing form at all:
+> each requires a schema and application-owned interpretation, so they appear
+> only in compact mode and never inside a `Dynamic`.
 
 > r[self-describing.bootstraps-schemas]
 >
@@ -837,6 +908,10 @@ but not how many:
   `Some` — the metadata value encoded compact against that metadata schema;
   nothing follows the handle if `metadata` is `None` (see
   `r[type-system.external]`). The payload itself is out of band.
+- `semantic`: exactly the compact bytes of its `representation`; an available
+  semantic handler may validate, translate, or resolve the represented value but
+  cannot alter its length, alignment, or wire grammar (see
+  `r[type-system.semantic]`)
 - `dynamic`: a complete self-describing value (tag-led, per [Self-describing
   mode](#self-describing-mode)). It is self-delimiting — the tags and embedded
   lengths bound it — so no extra length prefix wraps it; the compact decoder
@@ -884,6 +959,456 @@ lay out a C struct: declare wider fields before narrower ones. phon does not do
 this for you — declaration order is your lever, and it is also part of the
 schema's identity, so two field orderings are two different (but mutually
 compatible) schemas.
+
+# Durable compact files
+
+Compact values are the representation this chapter uses for general-purpose
+long-term storage of arbitrary schema-driven values. This is independent of the
+fixed-shape `phon-storage` aligned and dense profiles, which trade general value
+graphs for stable node or row layouts and specialized random access. Those are
+separate file formats with their own magic, versions, and admission rules; this
+chapter neither supersedes them nor changes their bytes.
+
+The first revision preserves ordinary compact bytes, carries the exact concrete
+writer schemas needed to decode them, permits separately addressable values,
+and validates untrusted structure before exposing borrowed views. It does not
+define mutable files, append journals, signatures, or encrypted payloads.
+
+## Semantic region references and authoring
+
+Separate placement is explicit in the application schema. `RegionRef<T>` is the
+binding spelling for the semantic type `org.bearcove.phon.region-ref-v1<T>`, whose structural
+representation is `u32`:
+
+```rust
+struct InlineModule { rows: Vec<Row> }
+struct RegionalModule<'build> { rows: RegionRef<'build, Vec<Row>> }
+```
+
+`InlineModule` writes the list inside the root. `RegionalModule` writes one
+file-local region number in the root and the same ordinary compact `Vec<Row>`
+bytes in a region extent. No attribute, threshold, index request, or build plan
+converts one schema into the other.
+
+The language-neutral builder state machine is reserve/register, set one root,
+freeze a plan, count, then write. Reserving before filling permits self- and
+mutually-referential region graphs:
+
+```rust
+let mut builder = phon::file::Builder::new();
+let rows = builder.region(&rows_value)?;
+let loop_node = builder.reserve_region::<Node>()?;
+builder.fill_region(loop_node, &Node { next: loop_node })?;
+let root = RegionalModule { rows };
+let file = builder.plan().region(rows).region(loop_node).freeze(&root)?;
+file.write_to(output)?;
+```
+
+Builder handles are opaque, owner-scoped identities, not wire numbers. A handle
+cannot be publicly constructed from an integer or used with another builder.
+Each reserved region is filled exactly once before freeze. Freeze rejects
+dangling references, unfilled regions, unreachable registered regions, invalid
+auxiliary requests, and incompatible semantics before output is touched. Cycles
+and repeated references are valid; admission checks reference bounds without
+recursively resolving the graph.
+
+The builder retains a transitive immutable snapshot of every root and region
+value through counting and writing. A merely shared reference, shallow freeze,
+or top-level version counter is insufficient when reachable state can mutate.
+Bindings may use immutable value graphs, copy-on-write snapshots, or transitive
+version tokens. Custom encoders additionally contribute their canonical bytes
+to a counting-pass BLAKE3 transcript; the writing pass hashes emitted bytes and
+must match that transcript. Equal byte length alone is not repeatability.
+
+Swift and TypeScript expose equivalent owner identity, snapshot, freeze, and
+typed failure semantics. Every binding returns explicit errors for foreign
+handles, double fill, post-freeze registration, missing semantic handlers, and
+write-pass non-repeatability rather than null or default values.
+
+> r[compact.file.explicit-regions]
+>
+> Separate placement is represented by the explicit semantic type
+> `org.bearcove.phon.region-ref-v1<T>`. Existing schemas and compact values do not acquire
+> file-only behavior from annotations or writer policy.
+
+## File layout and permanent bootstrap
+
+A durable compact file is:
+
+```text
++------------------------------+  offset 0
+| self-describing FileEnvelope |
++------------------------------+
+| zero padding                 |
++------------------------------+
+| schema bundle extent         |
++------------------------------+
+| compact root extent          |
++------------------------------+
+| compact region extents       |
++------------------------------+
+| named auxiliary extents      |
++------------------------------+
+```
+
+The outer envelope shape is permanent across every file revision:
+
+```text
+FileEnvelope {
+    format: u32,
+    body: Dynamic,
+}
+```
+
+`format` is always the first field with exactly this name and width. `body` is
+one self-describing value whose exact type is selected by `format`. Revision 1
+uses `FilePreludeV1`; an unknown `format` is rejected as unsupported after the
+outer envelope, without guessing the body shape.
+
+```text
+FilePreludeV1 {
+    file_len: u64,
+    required_features: list<QualifiedName>,
+    optional_features: list<QualifiedName>,
+    extents: list<ExtentV1>,
+}
+
+ExtentV1 {
+    role: ExtentRoleV1,
+    offset: u64,
+    len: u64,
+    schema: option<SchemaRef>,
+    alignment: u32,
+    digest: option<DigestV1>,
+}
+
+DigestV1 {
+    algorithm: QualifiedName,
+    bytes: bytes,
+}
+
+ExtentRoleV1 =
+    Schemas
+  | Root
+  | Region { number: u32 }
+  | Aux {
+        feature: QualifiedName,
+        name: QualifiedName,
+        number: u32,
+    }
+```
+
+The first extent is `Schemas`; the second is `Root`. Region numbers are
+contiguous from zero and appear next in plan order. Aux extents follow, sorted
+by `(feature UTF-8 bytes, name UTF-8 bytes, number)`, with numbers contiguous
+from zero per `(feature, name)`. An unaware reader can therefore associate every
+Aux with its listed feature without knowing that feature's specification.
+Descriptors are in physical offset order. Zero-length extents may share an
+offset; role/feature/name/number order is the canonical tie-breaker.
+
+Revision 1 uses `alignment = 16` for every extent. Placement is minimal:
+`Schemas.offset = align_up(encoded_envelope_len, 16)`; each later extent offset
+is `align_up(previous.offset + previous.len, 16)`; and `file_len` is exactly the
+last extent's end. Writers emit zero padding only for those alignments. Readers
+reject any other declared alignment, non-minimal offset, nonzero padding,
+overlap, trailing bytes, or undeclared gap.
+
+Per-role schema invariants are canonical:
+
+| role | `schema` |
+|---|---|
+| `Schemas` | `None` |
+| `Root` | `Some(closed concrete SchemaRef)`; the sole root type authority |
+| `Region` | `Some(closed concrete SchemaRef)` |
+| compact PHON `Aux` | `Some(closed concrete SchemaRef)` |
+| raw feature-defined `Aux` | `None`; its feature defines all bytes |
+
+A closed concrete reference is `SchemaRef::Concrete` with exactly the target
+definition's declared argument count and no reachable unbound `Var`. Bare
+`SchemaId` never identifies an encoded value because it would erase generic
+arguments.
+
+> r[compact.file.bootstrap]
+>
+> A durable reader decodes the permanent `FileEnvelope`, selects the typed body
+> from `format`, requires `file_len` to equal the supplied byte length exactly,
+> and validates every descriptor before reading an extent. Both shorter and
+> longer buffers are invalid.
+
+## Features and auxiliary extents
+
+Feature names and Aux feature/name fields are canonical PHON `QualifiedName`
+values whose meanings are immutable. Both feature lists are sorted by canonical
+name bytes, contain no duplicates, and are disjoint.
+
+An optional feature is, by definition, universally safe for an implementation
+that does not recognize it to ignore without changing the root value. Anything
+else is required. Unknown required features reject admission. Every Aux embeds
+its owning `feature`; that feature MUST appear in exactly one feature list. An
+unknown optional feature leaves its Aux extents structurally visible but
+semantically uninterpreted. An Aux naming an absent feature is invalid.
+
+Each known feature specification defines its Aux `name` values, required counts,
+logical-target uniqueness, payload schema/raw grammar, and identity role.
+Merely listing a feature does not satisfy it. At most one Aux `(feature, name,
+logical target)` exists unless that feature explicitly defines multiplicity and
+selection. Format revisions change `FileEnvelope.body`; features use only the
+existing `Aux` boundary and never add a hidden fifth role.
+
+> r[compact.file.format-version]
+>
+> `FileEnvelope` is permanent. Revision 1 readers recognize only `format = 1`
+> and reject another value with `UnsupportedFormat` before interpreting `body`.
+
+## Schema bundle
+
+The Schemas extent contains a permanent envelope:
+
+```text
+SchemaBundleEnvelope {
+    magic: bytes[8] = "PHONSCM1",
+    format: u32,
+    body: Dynamic,
+}
+SchemaBundleV1 {
+    strings: list<string>,
+    schemas: list<InternedSchemaV1>,
+}
+```
+
+The outer envelope is shared by durable files, protocol schema exchange, and
+codegen-emitted schema constants. `strings` contains every non-empty string
+occurring in the encoded schemas: type parameters, struct/field/variant names,
+External kinds, Semantic names, and `Var` names. It is sorted by raw UTF-8 bytes
+and contains no duplicates. An `InternedSchemaV1` is the ordinary
+self-describing `Schema` shape except each such string value is replaced by a
+self-describing `u32` index into `strings`. Closed grammar tokens such as struct
+field labels, SchemaRef variant names, and primitive tags are not interned.
+
+`schemas` is the exact non-primitive closure reachable from every Root, Region,
+and compact Aux `SchemaRef`, sorted by ascending `SchemaId`. Format 1 is
+uncompressed. Admission reconstructs each ordinary `Schema`, recomputes IDs,
+validates generic arity and closure, and rejects noncanonical table order,
+duplicate/unused/out-of-range strings, duplicate/missing/mismatched/unreachable
+schemas, or trailing bytes. A single-schema codegen constant is a one-member
+bundle, not a bare `Schema` value.
+
+`Channel` and `External` schemas are invalid anywhere reachable from Root,
+Region, or Aux in revision 1: their transport-assigned handles are not durable.
+
+## Structural and executable admission
+
+Admission has two explicit states. `StructuralFileView` proves common framing,
+schema closure, compact grammars, reference integrity, and records per-extent
+integrity status. It may retain unknown optional Aux names and unknown Semantic
+qualified names as inspectable representations. It is not executable.
+
+The failure boundary is exact:
+
+| failure | optional Aux | required Aux |
+|---|---|---|
+| envelope/range/overlap/order/alignment/padding | reject file | reject file |
+| descriptor schema or common closure invalid | reject file | reject file |
+| feature-local payload or derived cursor invalid | discard Aux + diagnostic | reject file |
+| declared known digest mismatch | reject file | reject file |
+| unknown digest algorithm | retain as unverified, subject to caller policy | reject when the feature requires verification |
+
+Typed root/region access upgrades the required path to executable status by
+resolving every semantic handler and compatibility plan before consuming bytes.
+Compatibility between Semantic values requires the same qualified name and its
+handler; representation compatibility alone is insufficient.
+
+Before exposing borrowed values, admission bounds all nesting/count/string/
+allocation/decompression work; charges aggregate visits and handler/index work;
+uses checked arithmetic; validates canonical descriptor and zero-length order;
+validates exact schema closure and concrete references; requires every Region
+to be reachable from Root; and, for each
+`org.bearcove.phon.region-ref-v1<T>`, requires the referenced Region descriptor's
+closed writer `SchemaRef` to equal resolved `T` exactly, not merely be
+compatible. It then validates region bounds, complete value consumption, and
+ordinary compact hostile-input rules.
+
+A borrowed view retains immutable bytes whose contents and mapped length cannot
+change: owned immutable memory or a platform snapshot, seal, or exclusive lease
+preventing writes, hole punches, resize, and truncation. Read-only mappings,
+descriptors, permissions, advisory intent, or metadata checks alone are not
+sufficient. Otherwise the implementation copies or rejects borrowed admission.
+
+Before constructing a native pointer/reference/slice, an accessor checks the
+actual retained-allocation address and range, host count conversion, element-size
+product, host maximum slice size, one-allocation containment, alignment, and
+initialized host representation. File-relative alignment alone never
+authorizes a native cast.
+
+> r[compact.file.admission]
+>
+> Parsing the envelope grants no dereference authority. Borrowed access requires
+> structural admission tied to immutable retained bytes; semantic execution
+> additionally requires every handler and compatibility plan needed by the
+> accessed path.
+
+## Direct construction and publication
+
+The reference writer freezes and validates the complete plan, then performs one
+count-and-hash pass over every schema, root, region, and Aux payload with the
+ordinary lowered program. That pass determines every payload length and
+expected digest. It encodes the final envelopes to determine their exact size,
+assigns the minimal aligned ranges above, computes `file_len`, and writes the
+final envelope, padding, and extents forward exactly once. No digest or length
+backpatch is required, so the reference algorithm supports a forward-only sink.
+
+During final emission the writing sink hashes actual bytes and compares every
+length and digest with the count-and-hash transcript. Same-length mutation is
+`NonRepeatable`. Implementations may use private seekable storage or additional
+passes but MUST produce identical bytes and MUST NOT silently materialize a
+dynamic value tree or temporary encoded extent merely to discover size.
+Freeze-time errors occur before output; I/O and repeatability errors may occur
+after a raw destination was modified, and such output is unusable.
+
+> r[compact.file.direct-write]
+>
+> Durable writing uses the ordinary lowered compact program for counting and
+> final output. Repeatability means byte equality, not merely equal length.
+
+A durable snapshot is published atomically: complete in a private location,
+flush contents, atomically replace/rename, and flush the containing directory
+where required. Per-extent digests provide local byte integrity only; they do
+not make a mixed generation transactionally consistent and are never an
+alternative to atomic publication.
+
+## Named list-offset auxiliary extent
+
+`org.bearcove.phon.list-offsets-v1` is an optional feature. Its Aux name is the
+same qualified name, and its compact payload uses these exact canonical schemas:
+
+```text
+ListTargetV1 =
+    Root = 0
+  | Region = 1 (newtype u32)
+
+ListOffsetsV1 {
+    target: ListTargetV1, // required
+    offsets: list<u64>,   // required
+}
+```
+
+The exact schema names are `org.bearcove.phon.ListTargetV1` and
+`org.bearcove.phon.ListOffsetsV1`; field/variant spelling, order, required flags,
+indices, and payload shapes above are identity input. The schema bundle carries
+their computed canonical `SchemaId`s. Aux numbers are Root first (zero), then
+Regions in ascending region number, so numbering is independent of registration
+order.
+
+The target's closed concrete writer schema must resolve to `List<T>`; the
+element schema is derived and is not repeated. There is at most one list-offset
+Aux per logical target. Listing the feature with no valid payload does not
+satisfy it. Each entry is the extent-relative compact decoder cursor immediately
+before its element. There is exactly one entry per element. Offsets are
+non-decreasing and `0 <= offset <= target.len`; equal offsets and `offset == len`
+are valid for zero-sized elements. Admission walks the list once and compares
+every cursor. An invalid optional index is discarded with a diagnostic; an
+invalid required index rejects the file. Sequential iteration remains available.
+## Integrity and identity
+
+Revision 1 defines `org.bearcove.phon.blake3-256-v1`: 32 digest bytes over exactly the
+physical extent bytes. An extent digest proves byte equality only, not role,
+schema, feature target, authorization, or whole-file snapshot identity. Caches
+include semantic context, length, and digest and still perform admission.
+
+Three identities are distinct:
+
+- `SchemaId` covers structural and semantic schema meaning, excluding docs;
+- an application/module executable identity covers Root/Region and explicitly
+  semantic Aux content, excluding strippable docs/debug Aux;
+- an optional package/file identity may cover every physical byte.
+
+## Documentation and inspection
+
+Revision 1 reserves the namespace `org.bearcove.phon.schema-docs` but assigns
+no versioned documentation feature or Aux name. An unassigned name MUST NOT
+appear in a revision-1 file. A future specification may assign a versioned
+name and payload without changing framing. Documentation targets are:
+
+```text
+DocTargetV1 =
+    Definition { schema_id: u64, path: SchemaPathV1 }
+  | Instantiation { schema: SchemaRef, path: SchemaPathV1 }
+
+SchemaPathStepV1 =
+    Field { name: string }
+  | Variant { name: string }
+  | VariantField { name: string }
+  | TupleElement { index: u32 }
+  | TypeParameter { name: string }
+```
+
+Documentation, units, invariants, deprecation text, and source links are
+strippable and excluded from `SchemaId` and executable identity. Editing or
+removing them may change physical/package identity only.
+
+A generic inspector can report envelope and feature versions, extent layout,
+digests, schemas and compatibility, named root/region values, unknown semantic
+qualified names with their representations, Aux inventory, reference graphs, and index
+status. Application plugins may add semantics such as Weavy instruction
+disassembly without changing the generic file model.
+
+## Determinism and conformance gate
+
+Given identical immutable values, schema closure, frozen plan, canonical feature
+sets, Aux payloads, schema-bundle encoding choice, and digest choices, a writer
+emits identical bytes. Set/map iteration order is part of the typed input and
+must be stable. Compression is deterministic only if its exact codec revision,
+parameters, dictionary identity, and physical output contract are fixed by the
+schema-bundle format.
+
+### Initial schema-bundle measurements
+
+The current checked-in Weavy format-1 fixture is 2,848 bytes. Its schema
+section is 1,951 bytes (68.5% of the file), despite carrying only a small test
+module. Using each codec's fastest/default-low setting on exactly those schema
+bytes produced:
+
+| representation | bytes | reduction |
+|---|---:|---:|
+| current schema bytes | 1,951 | — |
+| zstd level 1 | 445 | 77.2% |
+| gzip level 1 | 480 | 75.4% |
+| Brotli quality 1 | 490 | 74.9% |
+| LZ4 level 1 | 554 | 71.6% |
+
+The full 2,848-byte fixture similarly became 757 bytes with zstd, 802 with
+gzip, 809 with Brotli, and 994 with LZ4. External-process microbenchmarks on
+this tiny corpus are dominated by startup (roughly 1–2 ms) and do not establish
+in-process decode cost, but the size result is decisive: schema repetition is a
+first-order cost, not a hypothetical optimization.
+
+A printable-string inventory of the schema section found 154 occurrences but
+only 29 unique strings; repeated schema meta-vocabulary (`Concrete`, `Field`,
+`schema`, `required`, and similar names) dominates. A simple canonical string
+table therefore has substantial low-complexity opportunity, but the approximate
+unique-string-plus-u32-reference footprint (797 bytes before table framing) is
+still materially above zstd's 445 bytes. Revision 1 should define deterministic
+interning in schema-bundle format 1 and evaluate a small self-contained entropy
+codec against zstd before freezing bytes. The acceptance report must include
+implementation/code footprint, peak decode memory and work limits, exact output
+determinism, and the burden on tiny/embedded readers—not size alone.
+
+Revision 1 is not stable until at least two independent implementations consume
+the same golden files. Positive vectors cover primitive and concrete-generic
+roots, generic and cyclic regions, repeated references, zero-sized list indexes,
+optional/required Aux, structurally admitted unknown Semantic, stripped docs,
+and digested/undigested files. Negative vectors cover malformed generic arity,
+unbound `Var`, closure errors, region/schema mismatch, invalid region numbers,
+overlap/padding/alignment/order errors, duplicate Aux targets, unsatisfied or
+unknown required features, malformed optional Aux, false list cursors, digest
+mismatch, unavailable durable capabilities, and mixed/torn publication.
+
+## Relationship to message framing
+
+Durable compact files do not replace transport framing. A transport still owns
+message boundaries, multiplexing, fragmentation, and operational size policy.
+The durable prelude is used only when the caller explicitly asks PHON to create
+or open a long-lived file.
 
 ## Why both modes share almost everything
 
@@ -1018,20 +1543,24 @@ The compatibility algorithm is:
 >
 > Matched fields are compatible only when a rule says so. The same primitive is
 > compatible with itself. The same container kind (list, set, map, option) is
-> compatible when its element types are compatible. A tuple is compatible with a
-> tuple of the same arity and pairwise-compatible elements. An array is
-> compatible with an array of compatible element type and identical
-> `dimensions` (shape is part of an array's contract). A tensor is compatible
-> with a tensor of compatible element type and identical `rank` — the dimension
-> sizes are runtime, so they are not a schema-compatibility question (a decoder
-> may still validate them per value). Channel and external roots are transport
-> capabilities, not normal self-contained payload values in the core compat
-> executor: the bridge checks their capability shape, while Phon compatibility is
-> applied to channel item schemas and external metadata schemas at the point
-> those values are decoded. A struct is compatible when its field plan builds.
-> Numeric widening is not implicit: `u32` and `u64` are different types, and a
-> value written as one is not readable as the other unless a future rule adds an
-> explicit conversion.
+> compatible when its element types are compatible. Two `Semantic` values are
+> compatible only when they have the same canonical qualified name and their registered
+> handler builds a semantic compatibility plan; compatible structural
+> representations alone are insufficient. `T` and a semantic wrapping `T` are
+> different types unless that semantic handler explicitly defines a conversion.
+> A tuple is compatible with a tuple of the same arity and pairwise-compatible
+> elements. An array is compatible with an array of
+> compatible element type and identical `dimensions` (shape is part of an
+> array's contract). A tensor is compatible with a tensor of compatible element
+> type and identical `rank` — the dimension sizes are runtime, so they are not a
+> schema-compatibility question (a decoder may still validate them per value).
+> Channel and external roots are transport capabilities, not normal
+> self-contained payload values in the core compat executor: the bridge checks
+> their capability shape, while Phon compatibility is applied to channel item
+> schemas and external metadata schemas at the point those values are decoded.
+> A struct is compatible when its field plan builds. Numeric widening is not
+> implicit: `u32` and `u64` are different types, and a value written as one is
+> not readable as the other unless a future rule adds an explicit conversion.
 > These rules nest: `Option<Option<T>>` is compatible with `Option<Option<U>>`
 > exactly when `T` and `U` are. `Dynamic` is compatible only with `Dynamic` —
 > its bytes are self-describing, a form a compact reader of a concrete type
@@ -1152,42 +1681,35 @@ all of them.
 One safety contract stated elsewhere is part of this discipline:
 `r[descriptors.borrowed]` (a borrowed value's lifetime is bound to the input
 buffer). The borrow contract is a hard requirement, not advice: an
-implementation must tie a borrowed value's lifetime to the buffer it points into
-— in a language without lifetimes, by copying instead of borrowing — so a freed
-buffer can never leave a dangling view.
+implementation must tie a borrowed value's lifetime to the buffer it points
+into—or copy instead—so a freed buffer can never leave a dangling view.
 
 # Codegen
 
 phon schemas come from Rust types via facet (see [Base concepts](#base-concepts)).
-Codegen turns those schemas into source for the other languages a system
-speaks.
+Codegen turns those schemas into source for the other languages a system speaks.
 
 > r[codegen.emits]
 >
-> For each target language, codegen emits two things per schema: the type
-> definitions a programmer writes against, and the schema itself as a constant
-> — the self-describing phon bytes of the `Schema` value, which the peer's own
-> phon implementation parses into a `Schema` at startup or on first use. The
-> peer ships with its schemas baked in and never derives or fetches them at
-> runtime.
+> For each target language, codegen emits the type definitions a programmer
+> writes against and one `SchemaBundleEnvelope { format: 1, body:
+> SchemaBundleV1 }` constant containing that generated surface's complete schema
+> closure. A one-schema surface still uses a one-member bundle. The peer parses
+> and admits the bundle at startup or first use; it never derives or fetches
+> schemas at runtime.
 
 > r[codegen.schema-is-source-of-truth]
 >
-> A non-Rust peer never re-derives a schema from its generated types. The
-> schema bytes emitted from the Rust-side schema are the source of truth; the
-> generated types exist for the programmer's convenience. This guarantees the
-> peer's `SchemaId` matches the Rust origin exactly — a peer that re-derived
-> from, say, TypeScript types might hash to something different, because the
-> mapping from phon types to a given language is not always one-to-one.
+> A non-Rust peer never re-derives a schema from its generated types. The bundle
+> bytes emitted from the Rust-side schemas are authoritative, so every peer uses
+> exactly the originating `SchemaId`s.
 
 # Crates and packages
 
-This section is implementation organization, not wire contract — like the
-language sections below, it's how each implementation is built, and two
-implementations packaged differently still interoperate. It's in the spec
-because the boundaries are load-bearing: a package with no dependency on a
-language's reflection *cannot* leak that reflection into the engine, which is
-how phon keeps execution backend-blind structurally rather than by discipline.
+This section is implementation organization, not wire contract—like the
+language sections below, it describes how each implementation is built. The
+boundaries are load-bearing: package dependency edges prevent the engine from
+reaching language reflection or derive machinery.
 
 Every implementation separates the same four concerns, and each boundary is a
 real package, not merely a module:
@@ -1358,6 +1880,14 @@ memory; Swift has its own describing Swift memory. They never cross — like the
 `Schema` type, the *shape* is shared and documented once, here, but each
 implementation has its own. TypeScript has no descriptors at all; its values are
 objects accessed by property, with no offsets to describe.
+
+`Semantic` descriptors use opaque handler access rather than exposing their
+representation as the application value. For `org.bearcove.phon.region-ref-v1<T>`, encoding
+asks the active builder to map the branded handle to its frozen `u32`; decoding
+asks the admitted `FileView` to construct a file-scoped handle carrying the
+inner descriptor. Rust, Swift, and generated TypeScript accessors preserve this
+owner identity. Unknown semantics remain structural representations only and
+never materialize through a coarse dynamic tree.
 
 Every node carries its facts in one of two forms:
 
@@ -1673,6 +2203,9 @@ The linear ops, each a stencil-able unit:
   like an external handle.
 - **external** — read/write the transport handle; then, if the schema's
   `metadata` is `Some`, the metadata value as a nested compact sub-program.
+- **semantic** — execute the ordinary sub-program for the representation, then
+  invoke the registered semantic handler for validation/translation/resolution;
+  missing handlers are plan-build errors, not dynamic fallback.
 - **skip** (decode only) — decode and discard a writer field by its
   writer-schema sub-program.
 - **default** (decode only) — write a reader default, no wire read.

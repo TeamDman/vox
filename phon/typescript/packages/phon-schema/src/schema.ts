@@ -112,8 +112,8 @@ export type SchemaKind =
   | { readonly kind: "option"; readonly element: SchemaRef }
   | { readonly kind: "channel"; readonly direction: ChannelDirection; readonly element: SchemaRef }
   | { readonly kind: "dynamic" }
-  | { readonly kind: "external"; readonly external: string; readonly metadata: SchemaRef | null };
-
+  | { readonly kind: "external"; readonly external: string; readonly metadata: SchemaRef | null }
+  | { readonly kind: "semantic"; readonly name: string; readonly args: SchemaRef[]; readonly representation: SchemaRef };
 export interface Schema {
   readonly id: bigint;
   readonly typeParams: string[];
@@ -176,9 +176,11 @@ function isZeroSizedKind(reg: Registry, kind: SchemaKind, depth: number): boolea
     case "struct":
       return kind.fields.every((f) => isZeroSizedRef(reg, f.schema, depth + 1));
     case "tuple":
-      return kind.elements.every((e) => isZeroSizedRef(reg, e, depth + 1));
+      return kind.elements.every((element) => isZeroSizedRef(reg, element, depth + 1));
     case "array":
       return isZeroSizedRef(reg, kind.element, depth + 1);
+    case "semantic":
+      return isZeroSizedRef(reg, kind.representation, depth + 1);
     default:
       return false;
   }
@@ -200,6 +202,8 @@ function hashWith(write: (out: ByteSink) => void): bigint {
 }
 
 function writeTypeParams(out: ByteSink, params: readonly string[]): void {
+  if (params.length === 0) return;
+  out.str("type-params");
   out.u32(params.length);
   for (const param of params) out.str(param);
 }
@@ -243,6 +247,10 @@ function visitKindTargets(kind: SchemaKind, f: (id: bigint) => void): void {
       return;
     case "external":
       if (kind.metadata) visitRefTargets(kind.metadata, f);
+      return;
+    case "semantic":
+      kind.args.forEach((arg) => visitRefTargets(arg, f));
+      visitRefTargets(kind.representation, f);
       return;
   }
 }
@@ -344,6 +352,7 @@ class IdentityWalk {
   // r[impl schema-identity.canonical-encoding]
   schema(idx: number, path: readonly number[], out: ByteSink): void {
     const schema = this.batch[idx]!;
+    writeTypeParams(out, schema.typeParams);
     switch (schema.kind.kind) {
       case "primitive":
         out.str(schema.kind.primitive);
@@ -351,14 +360,12 @@ class IdentityWalk {
       case "struct":
         out.str("struct");
         out.str(schema.kind.name);
-        writeTypeParams(out, schema.typeParams);
         out.u32(schema.kind.fields.length);
         schema.kind.fields.forEach((field) => this.field(field, path, out));
         return;
       case "enum":
         out.str("enum");
         out.str(schema.kind.name);
-        writeTypeParams(out, schema.typeParams);
         out.u32(schema.kind.variants.length);
         for (const variant of schema.kind.variants) {
           out.str(variant.name);
@@ -421,6 +428,13 @@ class IdentityWalk {
           out.u8(1);
           this.reference(schema.kind.metadata, path, out);
         }
+        return;
+      case "semantic":
+        out.str("semantic");
+        out.str(schema.kind.name);
+        out.u32(schema.kind.args.length);
+        schema.kind.args.forEach((arg) => this.reference(arg, path, out));
+        this.reference(schema.kind.representation, path, out);
         return;
     }
   }
@@ -551,6 +565,13 @@ function remapKind(kind: SchemaKind, map: ReadonlyMap<bigint, bigint>): SchemaKi
         kind: "external",
         external: kind.external,
         metadata: kind.metadata === null ? null : remapRef(kind.metadata, map),
+      };
+    case "semantic":
+      return {
+        kind: "semantic",
+        name: kind.name,
+        args: kind.args.map((arg) => remapRef(arg, map)),
+        representation: remapRef(kind.representation, map),
       };
   }
 }
@@ -708,6 +729,10 @@ function validateKindRefs(kind: SchemaKind, provided: ReadonlySet<bigint>, primi
     case "external":
       if (kind.metadata) validateRef(kind.metadata, provided, primitives);
       return;
+    case "semantic":
+      kind.args.forEach((arg) => validateRef(arg, provided, primitives));
+      validateRef(kind.representation, provided, primitives);
+      return;
   }
 }
 
@@ -783,6 +808,10 @@ function validateFixedArrayCaps(kind: SchemaKind, reg: Registry): void {
     }
     case "external":
       if (kind.metadata) validateFixedArrayRef(kind.metadata);
+      return;
+    case "semantic":
+      kind.args.forEach((arg) => validateFixedArrayRef(arg));
+      validateFixedArrayRef(kind.representation);
       return;
   }
 }
@@ -892,12 +921,316 @@ function substituteKind(kind: SchemaKind, params: string[], args: SchemaRef[]): 
         external: kind.external,
         metadata: kind.metadata ? substituteRef(kind.metadata, params, args) : null,
       };
+    case "semantic":
+      return {
+        kind: "semantic",
+        name: kind.name,
+        args: kind.args.map((arg) => substituteRef(arg, params, args)),
+        representation: substituteRef(kind.representation, params, args),
+      };
   }
 }
 
 // ============================================================================
 // Self-describing schema parser (port of selfdescribing.rs dec_schema/...)
 // ============================================================================
+const SCHEMA_BUNDLE_MAGIC = new Uint8Array([0x50, 0x48, 0x4f, 0x4e, 0x53, 0x43, 0x4d, 0x31]);
+const SCHEMA_BUNDLE_VERSION = 1;
+
+/// Parse and admit a canonical `SchemaBundleEnvelope` (`PHONSCM1`, format 1).
+// r[impl validate.bundles]
+export function parseSchemaBundle(bytes: Uint8Array): Schema[] {
+  const r = new Reader(bytes);
+  const magic = r.readSlice(SCHEMA_BUNDLE_MAGIC.length);
+  if (!magic.every((byte, index) => byte === SCHEMA_BUNDLE_MAGIC[index])) {
+    throw new DecodeError("schema bundle magic");
+  }
+  if (r.readU32raw() !== SCHEMA_BUNDLE_VERSION) throw new DecodeError("schema bundle version");
+  bundleStruct(r, "SchemaBundleV1", 2);
+  bundleField(r, "strings");
+  const strings = bundleList(r, 1, (reader) => bundleString(reader));
+  for (let index = 0; index < strings.length; index++) {
+    const current = strings[index]!;
+    if (current.length === 0) throw new DecodeError("schema bundle string table");
+    if (index > 0 && utf8Compare(strings[index - 1]!, current) >= 0) {
+      throw new DecodeError("schema bundle string table");
+    }
+  }
+  const used = new Set<number>();
+  bundleField(r, "schemas");
+  const schemas = bundleList(r, 1, (reader) => bundleSchema(reader, strings, used, 0));
+  if (r.remaining() !== 0) throw new DecodeError(`${r.remaining()} trailing schema bundle bytes`);
+  if (used.size !== strings.length) throw new DecodeError("unused schema bundle string");
+  for (let index = 1; index < schemas.length; index++) {
+    if (schemas[index - 1]!.id >= schemas[index]!.id) throw new DecodeError("schema bundle schema order");
+  }
+  validateSchemaBundle(schemas);
+  return schemas;
+}
+
+function utf8Compare(left: string, right: string): number {
+  const a = new TextEncoder().encode(left);
+  const b = new TextEncoder().encode(right);
+  const count = Math.min(a.length, b.length);
+  for (let index = 0; index < count; index++) {
+    if (a[index] !== b[index]) return a[index]! - b[index]!;
+  }
+  return a.length - b.length;
+}
+
+function bundleExpect(r: Reader, tag: number, what: string): void {
+  const actual = r.readU8();
+  if (actual !== tag) throw new DecodeError(`expected ${what}, got tag 0x${actual.toString(16)}`);
+}
+
+function bundleStruct(r: Reader, name: string, fields: number): void {
+  bundleExpect(r, Tag.STRUCT, "struct");
+  if (r.readStr() !== name || r.readU32raw() !== fields) throw new DecodeError("schema bundle struct shape");
+}
+
+function bundleField(r: Reader, name: string): void {
+  if (r.readStr() !== name) throw new DecodeError("schema bundle field name");
+}
+
+function bundleList<T>(r: Reader, minElementSize: number, read: (reader: Reader) => T): T[] {
+  bundleExpect(r, Tag.LIST, "list");
+  const count = r.readLen(minElementSize);
+  const values: T[] = [];
+  for (let index = 0; index < count; index++) values.push(read(r));
+  return values;
+}
+
+function bundleString(r: Reader): string {
+  bundleExpect(r, Tag.STRING, "string");
+  return r.readStr();
+}
+
+function bundleU32(r: Reader): number {
+  bundleExpect(r, Tag.U32, "u32");
+  return r.readU32raw();
+}
+
+function bundleU64(r: Reader): bigint {
+  bundleExpect(r, Tag.U64, "u64");
+  return r.readU64();
+}
+
+function bundleBool(r: Reader): boolean {
+  bundleExpect(r, Tag.BOOL, "bool");
+  return r.readBool();
+}
+
+function bundleUnit(r: Reader): void {
+  bundleExpect(r, Tag.UNIT, "unit");
+}
+
+function bundleIndex(r: Reader, strings: readonly string[], used: Set<number>): string {
+  const index = bundleU32(r);
+  const value = strings[index];
+  if (value === undefined) throw new DecodeError("schema bundle string index");
+  used.add(index);
+  return value;
+}
+
+function bundleSchema(r: Reader, strings: readonly string[], used: Set<number>, depth: number): Schema {
+  checkDepth(depth);
+  bundleStruct(r, "Schema", 3);
+  bundleField(r, "id");
+  const id = bundleU64(r);
+  bundleField(r, "type_params");
+  const typeParams = bundleList(r, 1, (reader) => bundleIndex(reader, strings, used));
+  bundleField(r, "kind");
+  return { id, typeParams, kind: bundleKind(r, strings, used, depth + 1) };
+}
+
+function bundleKind(r: Reader, strings: readonly string[], used: Set<number>, depth: number): SchemaKind {
+  checkDepth(depth);
+  bundleExpect(r, Tag.ENUM, "enum");
+  const variant = r.readStr();
+  switch (variant) {
+    case "Primitive":
+      bundleExpect(r, Tag.ENUM, "enum");
+      return { kind: "primitive", primitive: bundlePrimitive(r) };
+    case "Struct": {
+      bundleStruct(r, "Struct", 2);
+      bundleField(r, "name");
+      const name = bundleIndex(r, strings, used);
+      bundleField(r, "fields");
+      return { kind: "struct", name, fields: bundleFields(r, strings, used, depth + 1) };
+    }
+    case "Enum": {
+      bundleStruct(r, "Enum", 2);
+      bundleField(r, "name");
+      const name = bundleIndex(r, strings, used);
+      bundleField(r, "variants");
+      return { kind: "enum", name, variants: bundleList(r, 1, (reader) => bundleVariant(reader, strings, used, depth + 1)) };
+    }
+    case "Tuple":
+      return { kind: "tuple", elements: bundleOneRefs(r, "Tuple", "elements", strings, used, depth + 1) };
+    case "List":
+      return { kind: "list", element: bundleOneRef(r, "List", "element", strings, used, depth + 1) };
+    case "Set":
+      return { kind: "set", element: bundleOneRef(r, "Set", "element", strings, used, depth + 1) };
+    case "Option":
+      return { kind: "option", element: bundleOneRef(r, "Option", "element", strings, used, depth + 1) };
+    case "Map": {
+      bundleStruct(r, "Map", 2);
+      bundleField(r, "key");
+      const key = bundleRef(r, strings, used, depth + 1);
+      bundleField(r, "value");
+      return { kind: "map", key, value: bundleRef(r, strings, used, depth + 1) };
+    }
+    case "Array": {
+      bundleStruct(r, "Array", 2);
+      bundleField(r, "element");
+      const element = bundleRef(r, strings, used, depth + 1);
+      bundleField(r, "dimensions");
+      return { kind: "array", element, dimensions: bundleList(r, 1, bundleU64) };
+    }
+    case "Tensor": {
+      bundleStruct(r, "Tensor", 2);
+      bundleField(r, "element");
+      const element = bundleRef(r, strings, used, depth + 1);
+      bundleField(r, "rank");
+      const tag = r.readU8();
+      if (tag === Tag.OPTION_NONE) return { kind: "tensor", element, rank: null };
+      if (tag === Tag.OPTION_SOME) return { kind: "tensor", element, rank: bundleU32(r) };
+      throw new DecodeError("schema bundle tensor rank");
+    }
+    case "Channel": {
+      bundleStruct(r, "Channel", 2);
+      bundleField(r, "direction");
+      bundleExpect(r, Tag.ENUM, "enum");
+      const direction = r.readStr();
+      bundleUnit(r);
+      if (direction !== "tx" && direction !== "rx") throw new DecodeError("schema bundle channel direction");
+      bundleField(r, "element");
+      return { kind: "channel", direction, element: bundleRef(r, strings, used, depth + 1) };
+    }
+    case "Dynamic":
+      bundleUnit(r);
+      return { kind: "dynamic" };
+    case "External": {
+      bundleStruct(r, "External", 2);
+      bundleField(r, "kind");
+      const external = bundleIndex(r, strings, used);
+      bundleField(r, "metadata");
+      const tag = r.readU8();
+      if (tag === Tag.OPTION_NONE) return { kind: "external", external, metadata: null };
+      if (tag === Tag.OPTION_SOME) return { kind: "external", external, metadata: bundleRef(r, strings, used, depth + 1) };
+      throw new DecodeError("schema bundle external metadata");
+    }
+    case "Semantic": {
+      bundleStruct(r, "Semantic", 3);
+      bundleField(r, "name");
+      const name = bundleIndex(r, strings, used);
+      bundleField(r, "args");
+      const args = bundleRefs(r, strings, used, depth + 1);
+      bundleField(r, "representation");
+      return { kind: "semantic", name, args, representation: bundleRef(r, strings, used, depth + 1) };
+    }
+    default:
+      throw new DecodeError(`unknown schema bundle kind '${variant}'`);
+  }
+}
+
+function bundlePrimitive(r: Reader): Primitive {
+  const name = r.readStr();
+  bundleUnit(r);
+  return asPrimitive(name);
+}
+
+function bundleOneRef(
+  r: Reader,
+  structName: string,
+  fieldName: string,
+  strings: readonly string[],
+  used: Set<number>,
+  depth: number,
+): SchemaRef {
+  bundleStruct(r, structName, 1);
+  bundleField(r, fieldName);
+  return bundleRef(r, strings, used, depth);
+}
+
+function bundleOneRefs(
+  r: Reader,
+  structName: string,
+  fieldName: string,
+  strings: readonly string[],
+  used: Set<number>,
+  depth: number,
+): SchemaRef[] {
+  bundleStruct(r, structName, 1);
+  bundleField(r, fieldName);
+  return bundleRefs(r, strings, used, depth);
+}
+
+function bundleRefs(r: Reader, strings: readonly string[], used: Set<number>, depth: number): SchemaRef[] {
+  return bundleList(r, 1, (reader) => bundleRef(reader, strings, used, depth));
+}
+
+function bundleRef(r: Reader, strings: readonly string[], used: Set<number>, depth: number): SchemaRef {
+  checkDepth(depth);
+  bundleExpect(r, Tag.ENUM, "enum");
+  const variant = r.readStr();
+  if (variant === "Concrete") {
+    bundleStruct(r, "Concrete", 2);
+    bundleField(r, "id");
+    const id = bundleU64(r);
+    bundleField(r, "args");
+    return { kind: "concrete", id, args: bundleRefs(r, strings, used, depth + 1) };
+  }
+  if (variant === "Var") {
+    bundleStruct(r, "Var", 1);
+    bundleField(r, "name");
+    return { kind: "var", name: bundleIndex(r, strings, used) };
+  }
+  throw new DecodeError(`unknown schema bundle ref '${variant}'`);
+}
+
+function bundleFields(r: Reader, strings: readonly string[], used: Set<number>, depth: number): Field[] {
+  return bundleList(r, 1, (reader) => {
+    bundleStruct(reader, "Field", 3);
+    bundleField(reader, "name");
+    const name = bundleIndex(reader, strings, used);
+    bundleField(reader, "schema");
+    const schema = bundleRef(reader, strings, used, depth);
+    bundleField(reader, "required");
+    return { name, schema, required: bundleBool(reader) };
+  });
+}
+
+function bundleVariant(r: Reader, strings: readonly string[], used: Set<number>, depth: number): Variant {
+  bundleStruct(r, "Variant", 3);
+  bundleField(r, "name");
+  const name = bundleIndex(r, strings, used);
+  bundleField(r, "index");
+  const index = bundleU32(r);
+  bundleField(r, "payload");
+  bundleExpect(r, Tag.ENUM, "enum");
+  const variant = r.readStr();
+  let payload: VariantPayload;
+  switch (variant) {
+    case "Unit":
+      bundleUnit(r);
+      payload = { kind: "unit" };
+      break;
+    case "Newtype":
+      payload = { kind: "newtype", ref: bundleRef(r, strings, used, depth) };
+      break;
+    case "Tuple":
+      payload = { kind: "tuple", refs: bundleRefs(r, strings, used, depth) };
+      break;
+    case "Struct":
+      payload = { kind: "struct", fields: bundleFields(r, strings, used, depth) };
+      break;
+    default:
+      throw new DecodeError(`unknown schema bundle payload '${variant}'`);
+  }
+  return { name, index, payload };
+}
+
 
 /// Parse a `Schema` from self-describing bytes (the bytes Rust `schema_to_bytes`
 /// produces). Rejects trailing bytes. Throws `DecodeError` on malformed input.
@@ -1079,6 +1412,16 @@ function decKind(r: Reader, depth: number): SchemaKind {
       else if (t === Tag.OPTION_SOME) metadata = decRef(r, depth + 1);
       else throw new DecodeError(`expected option, got tag 0x${t.toString(16)}`);
       return { kind: "external", external, metadata };
+    }
+    case "Semantic": {
+      stBegin(r, 3);
+      fname(r);
+      const name = dStr(r);
+      fname(r);
+      const args = decRefList(r, depth + 1);
+      fname(r);
+      const representation = decRef(r, depth + 1);
+      return { kind: "semantic", name, args, representation };
     }
     default:
       throw new DecodeError(`unknown SchemaKind variant '${variant}'`);

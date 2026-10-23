@@ -1,0 +1,38 @@
+{
+  "checkpoint_date": "2026-10-23",
+  "status": "incomplete; Java gate fails compilation; consumers unchanged",
+  "checks": [
+    {
+      "name": "root and nested cargo metadata",
+      "status": "passed",
+      "taxon": "registry taxon 0.2.0-rc.5; no teamy-taxon"
+    },
+    {
+      "name": "Java code generation and drift check",
+      "status": "passed"
+    },
+    {
+      "name": "Java gate",
+      "status": "failed",
+      "failure": "5 javac errors: one oversized generated method; four old schema constant references",
+      "log_sha256": "38bc2f5e0979085a78cd727e5e8f35535c4eefcb35440d33e9b42e6e388ceb45"
+    },
+    {
+      "name": "Rust oracle fixture creation and roundtrip",
+      "status": "passed",
+      "cases": 7,
+      "golden_update_enabled": true,
+      "log_sha256": "6602fdc87e73adb35e50b8f2e9092c2886e6efd85ba88b375922d0bc74fbe88c"
+    }
+  ],
+  "unrun": [
+    "Java execution",
+    "new malformed-input tests",
+    "current-protocol Rust/Java RPC",
+    "current-protocol channel regressions",
+    "current-protocol reproducible JAR",
+    "consumer checks",
+    "Tracey",
+    "TypeScript checks"
+  ]
+}

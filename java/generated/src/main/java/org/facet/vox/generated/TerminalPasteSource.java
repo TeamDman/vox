@@ -6,7 +6,7 @@ import java.util.List;
 import org.facet.phon.*;
 
 public enum TerminalPasteSource { SUPPLIED, AUTOMATIC_CALLER_CLIPBOARD;
-  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0xd05c899a1b1b78aaL), List.of(), new Schema.EnumKind("TerminalPasteSource", List.of(new Schema.Variant("Supplied", 0, Schema.Payload.unit()), new Schema.Variant("AutomaticCallerClipboard", 1, Schema.Payload.unit()))));
+  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x9d61c197a8480a02L), List.of(), new Schema.EnumKind("TerminalPasteSource", List.of(new Schema.Variant("Supplied", 0, Schema.Payload.unit()), new Schema.Variant("AutomaticCallerClipboard", 1, Schema.Payload.unit()))));
   public static final PhonAdapter<TerminalPasteSource> ADAPTER = new PhonAdapter<>() {
     @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA); }
     @Override public void encode(PhonEncoder encoder, TerminalPasteSource value) throws PhonException { encoder.writeU32Unaligned(value.ordinal()); }

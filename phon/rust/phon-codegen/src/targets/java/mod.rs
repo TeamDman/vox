@@ -5,7 +5,7 @@
 
 use std::fmt::Write;
 
-use phon_schema::schema_to_bytes;
+use phon_schema::schema_bundle_to_bytes;
 
 use crate::Module;
 
@@ -23,16 +23,13 @@ pub fn render_schema_table(module: &Module, package: &str, class_name: &str) -> 
             root.id.as_u64()
         );
     }
-    out.push_str("  public static final byte[][] CANONICAL_SCHEMAS = {\n");
-    for schema in &module.schemas {
-        let bytes = schema_to_bytes(schema)
-            .iter()
-            .map(|byte| format!("(byte)0x{byte:02x}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let _ = writeln!(out, "    new byte[] {{{bytes}}},");
-    }
-    out.push_str("  };\n");
+    let bytes = schema_bundle_to_bytes(&module.schemas)
+        .expect("validated codegen schema bundle")
+        .iter()
+        .map(|byte| format!("(byte)0x{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let _ = writeln!(out, "  public static final byte[] SCHEMA_BUNDLE = new byte[] {{{bytes}}};");
     let _ = writeln!(out, "  private {class_name}() {{}}");
     out.push_str("}\n");
     out

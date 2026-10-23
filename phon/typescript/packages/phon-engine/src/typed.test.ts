@@ -14,7 +14,14 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { Registry, bytesToHex, hexToBytes, schemaFromBytes } from "@bearcove/phon-schema";
 import type { Primitive, Schema, SchemaRef } from "@bearcove/phon-schema";
-import { buildPlan, compiledTypedDecoderSource, compiledTypedEncoderSource, decodeTyped, encodeTyped } from "./index.ts";
+import {
+  buildPlan,
+  compiledTypedDecoderSource,
+  compiledTypedEncoderSource,
+  decodeTyped,
+  encodeTyped,
+  MissingSemanticHandler,
+} from "./index.ts";
 import type { Typed, TypedEnum } from "./typed.ts";
 
 interface Case {
@@ -68,6 +75,32 @@ function typedRoundTrip(c: Case): Typed {
   expect(bytesToHex(encodeTyped(typedJit, readerRoot, reg, { jit: false }))).toBe(c.reader_hex);
   return typedJit;
 }
+
+// r[verify type-system.semantic]
+describe("typed semantic schemas require handlers", () => {
+  const semanticId = 0x9000_0000_0000_2000n;
+  const semanticRegistry = new Registry(
+    [{
+      id: semanticId,
+      typeParams: [],
+      kind: {
+        kind: "semantic",
+        name: "org.example.semantic-v1",
+        args: [],
+        representation: { kind: "concrete", id: primitiveId("u32"), args: [] },
+      },
+    }],
+    corpus.primitives.map((p) => ({ id: BigInt(`0x${p.id}`), tag: p.tag as Primitive })),
+  );
+  const wire = Uint8Array.of(7, 0, 0, 0);
+
+  for (const jit of [false, true]) {
+    it(`rejects typed encode and decode without a handler (jit=${jit})`, () => {
+      expect(() => encodeTyped(7, semanticId, semanticRegistry, { jit })).toThrow(MissingSemanticHandler);
+      expect(() => decodeTyped(wire, semanticId, semanticId, semanticRegistry, { jit })).toThrow(MissingSemanticHandler);
+    });
+  }
+});
 
 describe("typed front door — round-trips through the Rust oracle", () => {
   for (const c of corpus.cases) {

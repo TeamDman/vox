@@ -41,8 +41,19 @@ export {
 } from "./value.ts";
 export type { Value, PhonChar, PhonUuid, PhonQName, PhonDateTime } from "./value.ts";
 
-// The schema model + self-describing schema parser + alignment analysis.
+export { parseDurableFile, validateDurableFeatures } from "./durable.ts";
+export type {
+  DurableAux,
+  DurableExtent,
+  DurableFile,
+  FeatureValidator,
+  RegionReference,
+} from "./durable.ts";
+
+// The schema model, durable schema-bundle admission, self-describing schema
+// parser, and alignment analysis.
 export {
+  parseSchemaBundle,
   schemaFromBytes,
   Registry,
   alignment,

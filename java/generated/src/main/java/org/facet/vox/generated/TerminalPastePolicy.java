@@ -6,7 +6,7 @@ import java.util.List;
 import org.facet.phon.*;
 
 public enum TerminalPastePolicy { GUARD_MULTILINE, BYPASS_GUARD;
-  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x5fa628e9841d541eL), List.of(), new Schema.EnumKind("TerminalPastePolicy", List.of(new Schema.Variant("GuardMultiline", 0, Schema.Payload.unit()), new Schema.Variant("BypassGuard", 1, Schema.Payload.unit()))));
+  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x2a23279fd4afb8ccL), List.of(), new Schema.EnumKind("TerminalPastePolicy", List.of(new Schema.Variant("GuardMultiline", 0, Schema.Payload.unit()), new Schema.Variant("BypassGuard", 1, Schema.Payload.unit()))));
   public static final PhonAdapter<TerminalPastePolicy> ADAPTER = new PhonAdapter<>() {
     @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA); }
     @Override public void encode(PhonEncoder encoder, TerminalPastePolicy value) throws PhonException { encoder.writeU32Unaligned(value.ordinal()); }

@@ -6,7 +6,7 @@ import java.util.List;
 import org.facet.phon.*;
 
 public enum TerminalFrameOrigin { TOP_LEFT;
-  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x1d361f689893d124L), List.of(), new Schema.EnumKind("TerminalFrameOrigin", List.of(new Schema.Variant("TopLeft", 0, Schema.Payload.unit()))));
+  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x2e48d990b119e6e3L), List.of(), new Schema.EnumKind("TerminalFrameOrigin", List.of(new Schema.Variant("TopLeft", 0, Schema.Payload.unit()))));
   public static final PhonAdapter<TerminalFrameOrigin> ADAPTER = new PhonAdapter<>() {
     @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA); }
     @Override public void encode(PhonEncoder encoder, TerminalFrameOrigin value) throws PhonException { encoder.writeU32Unaligned(value.ordinal()); }

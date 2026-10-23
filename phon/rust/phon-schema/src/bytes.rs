@@ -149,6 +149,10 @@ pub enum DecodeError {
     Malformed(&'static str),
     /// Bytes remained after a value that should have consumed the whole input.
     TrailingBytes(usize),
+    /// Decoding would retain more owned bytes than the caller permits.
+    OwnedBytesLimitExceeded { configured: usize, attempted: usize },
+    /// The allocator rejected a fallible reservation while decoding.
+    AllocationFailed,
 }
 
 impl fmt::Display for DecodeError {
@@ -183,6 +187,14 @@ impl fmt::Display for DecodeError {
             DecodeError::BadVariantIndex(i) => write!(f, "enum variant index {i} out of range"),
             DecodeError::Malformed(what) => write!(f, "malformed value: {what}"),
             DecodeError::TrailingBytes(n) => write!(f, "{n} trailing bytes after value"),
+            DecodeError::OwnedBytesLimitExceeded {
+                configured,
+                attempted,
+            } => write!(
+                f,
+                "decoded owned bytes {attempted} exceed configured limit {configured}"
+            ),
+            DecodeError::AllocationFailed => write!(f, "allocation failed while decoding"),
         }
     }
 }

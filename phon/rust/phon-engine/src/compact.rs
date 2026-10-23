@@ -227,6 +227,15 @@ fn validate_kind_refs(
             }
             Ok(())
         }
+        SchemaKind::Semantic {
+            args,
+            representation,
+            ..
+        } => {
+            args.iter()
+                .try_for_each(|arg| validate_ref(arg, provided, primitives))?;
+            validate_ref(representation, provided, primitives)
+        }
     }
 }
 
@@ -303,6 +312,14 @@ fn validate_fixed_array_caps(kind: &SchemaKind, reg: &Registry) -> Result<()> {
                 validate_fixed_array_ref(metadata)?;
             }
             Ok(())
+        }
+        SchemaKind::Semantic {
+            args,
+            representation,
+            ..
+        } => {
+            args.iter().try_for_each(validate_fixed_array_ref)?;
+            validate_fixed_array_ref(representation)
         }
     }
 }
@@ -439,6 +456,9 @@ fn is_zero_sized_kind(reg: &Registry, kind: &SchemaKind, depth: usize) -> bool {
             .all(|e| is_zero_sized_ref(reg, e, depth + 1)),
         // A fixed array is zero-sized iff its element is (regardless of dims).
         SchemaKind::Array { element, .. } => is_zero_sized_ref(reg, element, depth + 1),
+        SchemaKind::Semantic { representation, .. } => {
+            is_zero_sized_ref(reg, representation, depth + 1)
+        }
         // Everything else carries at least one wire byte: a list/set/map writes a
         // u32 count; an option a presence byte; an enum a u32 tag; dynamic a tag;
         // strings/bytes a length. None are zero-sized.
@@ -685,6 +705,7 @@ fn encode_kind(value: &Value, kind: &SchemaKind, reg: &Registry, out: &mut Vec<u
         SchemaKind::Tensor { .. } => Err(CompactError::Unsupported("tensor")),
         SchemaKind::Channel { .. } => Err(CompactError::Unsupported("channel")),
         SchemaKind::External { .. } => Err(CompactError::Unsupported("external")),
+        SchemaKind::Semantic { representation, .. } => encode_ref(value, representation, reg, out),
     }
 }
 
@@ -868,6 +889,18 @@ fn substitute_kind(kind: &SchemaKind, params: &[String], args: &[SchemaRef]) -> 
             kind: kind.clone(),
             metadata: metadata.as_ref().map(|r| substitute_ref(r, params, args)),
         },
+        SchemaKind::Semantic {
+            name,
+            args: semantic_args,
+            representation,
+        } => SchemaKind::Semantic {
+            name: name.clone(),
+            args: semantic_args
+                .iter()
+                .map(|r| substitute_ref(r, params, args))
+                .collect(),
+            representation: substitute_ref(representation, params, args),
+        },
     }
 }
 
@@ -1029,6 +1062,7 @@ fn decode_kind(r: &mut Reader, kind: &SchemaKind, reg: &Registry, depth: usize) 
         SchemaKind::Tensor { .. } => Err(CompactError::Unsupported("tensor")),
         SchemaKind::Channel { .. } => Err(CompactError::Unsupported("channel")),
         SchemaKind::External { .. } => Err(CompactError::Unsupported("external")),
+        SchemaKind::Semantic { representation, .. } => decode_ref(r, representation, reg, depth),
     }
 }
 
@@ -1144,6 +1178,25 @@ mod tests {
             }
             _ => panic!("expected unknown schema error"),
         }
+    }
+    #[test]
+    fn semantic_schema_uses_its_wire_representation() {
+        let semantic = schema(
+            1,
+            SchemaKind::Semantic {
+                name: "org.example.counter".try_into().unwrap(),
+                args: Vec::new(),
+                representation: prim(Primitive::U32),
+            },
+        );
+        let reg = Registry::new([semantic]);
+        let value = Value::from(42u32);
+
+        assert_eq!(
+            to_bytes(&value, SchemaId::from_raw(1), &reg).unwrap().len(),
+            4
+        );
+        rt(value, SchemaId::from_raw(1), &reg);
     }
 
     #[test]

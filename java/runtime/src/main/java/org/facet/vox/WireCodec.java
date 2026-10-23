@@ -30,13 +30,13 @@ final class WireCodec {
         initialChannelCredit = options.initialChannelCredit();
         limits = limitsFor(options);
         try {
-            handshakeSchema = SchemaClosure.fromCanonicalBytes(
+            handshakeSchema = SchemaClosure.fromSchemaBundleBytes(
                     SchemaId.fromLong(HandshakeWireSchemas.HANDSHAKE_MESSAGE_SCHEMA_ID),
-                    HandshakeWireSchemas.CANONICAL_SCHEMAS,
+                    HandshakeWireSchemas.SCHEMA_BUNDLE,
                     limits);
-            messageSchema = SchemaClosure.fromCanonicalBytes(
+            messageSchema = SchemaClosure.fromSchemaBundleBytes(
                     SchemaId.fromLong(MessageWireSchemas.MESSAGE_SCHEMA_ID),
-                    MessageWireSchemas.CANONICAL_SCHEMAS,
+                    MessageWireSchemas.SCHEMA_BUNDLE,
                     limits);
         } catch (PhonException failure) {
             throw new VoxException("generated Java wire schemas are invalid", failure);

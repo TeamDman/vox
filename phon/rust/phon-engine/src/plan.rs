@@ -562,6 +562,16 @@ fn ref_targets(kind: &SchemaKind) -> Vec<SchemaId> {
                 add_ref_targets(r, &mut out);
             }
         }
+        SchemaKind::Semantic {
+            args,
+            representation,
+            ..
+        } => {
+            for argument in args {
+                add_ref_targets(argument, &mut out);
+            }
+            add_ref_targets(representation, &mut out);
+        }
         SchemaKind::Primitive(_) | SchemaKind::Dynamic => {}
     }
     out

@@ -1,5 +1,10 @@
 # Standalone Teamy Vox migration
 
+**Current branch:** the in-progress full protocol cutover and cloud continuation
+instructions are in [cutover-handoff.md](cutover-handoff.md). The validation and
+legacy compatibility discussion below describe the earlier preserved checkpoint,
+not successful validation of the new protocol.
+
 This branch preserves the owned Java and terminal work from the former Facet
 monorepo and joins it to the current standalone Vox history. It is a review
 checkpoint, not a package release or a consumer upgrade.

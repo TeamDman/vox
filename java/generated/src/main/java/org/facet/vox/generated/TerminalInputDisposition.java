@@ -6,7 +6,7 @@ import java.util.List;
 import org.facet.phon.*;
 
 public enum TerminalInputDisposition { FORWARDED, SELECTION_CHANGED, NO_CHANGE;
-  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x8c6d6a8da49e1577L), List.of(), new Schema.EnumKind("TerminalInputDisposition", List.of(new Schema.Variant("Forwarded", 0, Schema.Payload.unit()), new Schema.Variant("SelectionChanged", 1, Schema.Payload.unit()), new Schema.Variant("NoChange", 2, Schema.Payload.unit()))));
+  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x0fbb4e8945c6fd5bL), List.of(), new Schema.EnumKind("TerminalInputDisposition", List.of(new Schema.Variant("Forwarded", 0, Schema.Payload.unit()), new Schema.Variant("SelectionChanged", 1, Schema.Payload.unit()), new Schema.Variant("NoChange", 2, Schema.Payload.unit()))));
   public static final PhonAdapter<TerminalInputDisposition> ADAPTER = new PhonAdapter<>() {
     @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA); }
     @Override public void encode(PhonEncoder encoder, TerminalInputDisposition value) throws PhonException { encoder.writeU32Unaligned(value.ordinal()); }

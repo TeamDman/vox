@@ -4245,7 +4245,7 @@ dependencies = [
 
 [[package]]
 name = "teamy-phon"
-version = "0.2.0-rc.5"
+version = "0.2.0-rc.7"
 dependencies = [
  "teamy-facet",
  "teamy-facet-value",
@@ -4257,7 +4257,7 @@ dependencies = [
 
 [[package]]
 name = "teamy-phon-codegen"
-version = "0.2.0-rc.5"
+version = "0.2.0-rc.7"
 dependencies = [
  "teamy-facet",
  "teamy-phon",
@@ -4266,7 +4266,7 @@ dependencies = [
 
 [[package]]
 name = "teamy-phon-engine"
-version = "0.2.0-rc.5"
+version = "0.2.0-rc.7"
 dependencies = [
  "teamy-facet-value",
  "teamy-phon-ir",
@@ -4276,7 +4276,7 @@ dependencies = [
 
 [[package]]
 name = "teamy-phon-ir"
-version = "0.2.0-rc.5"
+version = "0.2.0-rc.7"
 dependencies = [
  "teamy-phon-schema",
  "weavy",
@@ -4284,7 +4284,7 @@ dependencies = [
 
 [[package]]
 name = "teamy-phon-jit"
-version = "0.2.0-rc.5"
+version = "0.2.0-rc.7"
 dependencies = [
  "copypatch",
  "teamy-phon-ir",
@@ -4294,18 +4294,11 @@ dependencies = [
 
 [[package]]
 name = "teamy-phon-schema"
-version = "0.2.0-rc.5"
+version = "0.2.0-rc.6"
 dependencies = [
  "blake3",
+ "taxon",
  "teamy-facet-value",
- "teamy-taxon",
-]
-
-[[package]]
-name = "teamy-taxon"
-version = "0.2.0-rc.5"
-dependencies = [
- "blake3",
 ]
 
 [[package]]

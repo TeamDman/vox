@@ -1269,6 +1269,7 @@ fn skip_op(writer: &SchemaRef, reg: &Registry) -> Result<SkipOp> {
             SchemaKind::Tensor { .. } => Err(CompactError::Unsupported("skip: tensor")),
             SchemaKind::Channel { .. } => Err(CompactError::Unsupported("skip: channel")),
             SchemaKind::External { .. } => Err(CompactError::Unsupported("skip: external")),
+            SchemaKind::Semantic { .. } => Err(CompactError::Unsupported("skip: semantic")),
             // A self-describing value is self-delimiting: skip it by decoding one
             // value and discarding it.
             SchemaKind::Dynamic => Ok(SkipOp::Dynamic),

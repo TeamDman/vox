@@ -26,7 +26,7 @@ import {
 } from "@bearcove/phon-schema";
 import type { Field, Primitive, SchemaKind, SchemaRef, Value, Variant, VariantPayload } from "@bearcove/phon-schema";
 import { canonicalKey } from "@bearcove/phon-schema";
-import { checkFixedCount, decodePrimitive, decodeRef, product } from "./compact.ts";
+import { checkFixedCount, decodePrimitive, decodeRef, MissingSemanticHandler, product } from "./compact.ts";
 import { MESSAGE_MAX_DEPTH } from "./limits.ts";
 
 const PLAN_MAX_DEPTH = 128;
@@ -218,6 +218,10 @@ function planKind(wk: SchemaKind, rk: SchemaKind, ctx: PlanCtx, depth: number): 
   if (wk.kind === "dynamic" && rk.kind === "dynamic") {
     return { kind: "dynamic" };
   }
+  if (wk.kind === "semantic" || rk.kind === "semantic") {
+    const semantic = wk.kind === "semantic" ? wk.name : rk.kind === "semantic" ? rk.name : "unknown";
+    throw new MissingSemanticHandler(semantic);
+  }
   if (wk.kind === rk.kind && (wk.kind === "tensor" || wk.kind === "channel" || wk.kind === "external")) {
     throw new Error(`compat plan unsupported for ${wk.kind}`);
   }
@@ -374,6 +378,10 @@ function refTargets(kind: SchemaKind): bigint[] {
       break;
     case "external":
       if (kind.metadata) addRef(kind.metadata);
+      break;
+    case "semantic":
+      for (const arg of kind.args) addRef(arg);
+      addRef(kind.representation);
       break;
   }
   return out;

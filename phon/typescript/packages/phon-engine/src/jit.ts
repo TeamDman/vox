@@ -33,7 +33,7 @@ import {
   writeValueInto,
 } from "@bearcove/phon-schema";
 import type { Primitive, SchemaKind, SchemaRef, Value, VariantPayload } from "@bearcove/phon-schema";
-import { checkFixedCount, decodeRef, encode, product } from "./compact.ts";
+import { checkFixedCount, decodeRef, encode, MissingSemanticHandler, product } from "./compact.ts";
 import { MESSAGE_MAX_DEPTH } from "./limits.ts";
 import type { Node, Payload, Plan, StructPlan } from "./plan.ts";
 import { buildPlan, decodeWithPlan, WriterOnlyVariantError } from "./plan.ts";
@@ -432,6 +432,8 @@ class EncCodegen {
       }
       case "dynamic":
         return `H.writeValueInto(out, ${vexpr});\n`;
+      case "semantic":
+        throw new MissingSemanticHandler(kind.name);
       case "tensor":
       case "channel":
       case "external":

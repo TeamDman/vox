@@ -6,7 +6,7 @@ import java.util.List;
 import org.facet.phon.*;
 
 public enum TerminalColorSpace { SRGB;
-  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x179b9dd725665f3eL), List.of(), new Schema.EnumKind("TerminalColorSpace", List.of(new Schema.Variant("Srgb", 0, Schema.Payload.unit()))));
+  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0xaaaee5c0f5899809L), List.of(), new Schema.EnumKind("TerminalColorSpace", List.of(new Schema.Variant("Srgb", 0, Schema.Payload.unit()))));
   public static final PhonAdapter<TerminalColorSpace> ADAPTER = new PhonAdapter<>() {
     @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA); }
     @Override public void encode(PhonEncoder encoder, TerminalColorSpace value) throws PhonException { encoder.writeU32Unaligned(value.ordinal()); }

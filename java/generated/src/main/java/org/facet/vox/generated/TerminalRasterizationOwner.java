@@ -6,7 +6,7 @@ import java.util.List;
 import org.facet.phon.*;
 
 public enum TerminalRasterizationOwner { SERVER, CLIENT;
-  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x7f3e38d718ecc469L), List.of(), new Schema.EnumKind("TerminalRasterizationOwner", List.of(new Schema.Variant("Server", 0, Schema.Payload.unit()), new Schema.Variant("Client", 1, Schema.Payload.unit()))));
+  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x28df0cf05a590844L), List.of(), new Schema.EnumKind("TerminalRasterizationOwner", List.of(new Schema.Variant("Server", 0, Schema.Payload.unit()), new Schema.Variant("Client", 1, Schema.Payload.unit()))));
   public static final PhonAdapter<TerminalRasterizationOwner> ADAPTER = new PhonAdapter<>() {
     @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA); }
     @Override public void encode(PhonEncoder encoder, TerminalRasterizationOwner value) throws PhonException { encoder.writeU32Unaligned(value.ordinal()); }

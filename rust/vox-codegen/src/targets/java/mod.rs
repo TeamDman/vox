@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::fmt::{self, Write};
 
 use facet_core::{ScalarType, Shape};
-use phon_schema::schema_to_bytes;
+use phon_schema::schema_bundle_to_bytes;
 use vox_types::{
     EnumInfo, MethodDescriptor, ServiceDescriptor, ShapeKind, StructInfo, VariantKind,
     classify_shape, classify_variant, is_bytes,
@@ -827,31 +827,15 @@ fn emit_exact_schema_closure(
         .expect("one schema closure root")
         .id
         .as_u64();
-    let _ = writeln!(
-        out,
-        "  private static final SchemaClosure {field_name} = {factory_name}();"
-    );
-    let _ = writeln!(
-        out,
-        "  private static SchemaClosure {factory_name}() {{\n    try {{\n      return SchemaClosure.fromCanonicalBytes(SchemaId.fromLong(0x{root:016x}L), new byte[][] {{"
-    );
-    for index in 0..module.schemas.len() {
-        let _ = writeln!(out, "        {factory_name}Schema{index}(),");
-    }
-    out.push_str(
-        "      }, PhonLimits.defaults());\n    } catch (PhonException error) {\n      throw new ExceptionInInitializerError(error);\n    }\n  }\n",
-    );
-    for (index, schema) in module.schemas.iter().enumerate() {
-        let bytes = schema_to_bytes(schema)
-            .iter()
-            .map(|byte| format!("(byte)0x{byte:02x}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let _ = writeln!(
-            out,
-            "  private static byte[] {factory_name}Schema{index}() {{ return new byte[] {{{bytes}}}; }}"
-        );
-    }
+    let bytes = schema_bundle_to_bytes(&module.schemas)
+        .expect("validated Java schema bundle")
+        .iter()
+        .map(|byte| format!("(byte)0x{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let _ = writeln!(out, "  private static final SchemaClosure {field_name} = {factory_name}();");
+    let _ = writeln!(out,
+        "  private static SchemaClosure {factory_name}() {{\n    try {{\n      return SchemaClosure.fromSchemaBundleBytes(SchemaId.fromLong(0x{root:016x}L), {factory_name}Bundle(), PhonLimits.defaults());\n    }} catch (PhonException error) {{\n      throw new ExceptionInInitializerError(error);\n    }}\n  }}\n  private static byte[] {factory_name}Bundle() {{ return new byte[] {{{bytes}}}; }}");
 }
 
 fn exact_schema_closure_expression(shape: &'static Shape) -> String {
@@ -867,20 +851,13 @@ fn exact_schema_closure_expression(shape: &'static Shape) -> String {
         .expect("one schema closure root")
         .id
         .as_u64();
-    let schemas = module
-        .schemas
+    let bytes = schema_bundle_to_bytes(&module.schemas)
+        .expect("validated Java schema bundle")
         .iter()
-        .map(|schema| {
-            let bytes = schema_to_bytes(schema)
-                .iter()
-                .map(|byte| format!("(byte)0x{byte:02x}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("new byte[] {{{bytes}}}")
-        })
+        .map(|byte| format!("(byte)0x{byte:02x}"))
         .collect::<Vec<_>>()
         .join(", ");
-    format!("PrimitiveAdapters.schemaClosure(0x{root:016x}L, new byte[][] {{{schemas}}})")
+    format!("PrimitiveAdapters.schemaClosure(0x{root:016x}L, new byte[] {{{bytes}}})")
 }
 
 fn schema_ref_expr(shape: &'static Shape) -> String {
@@ -1504,7 +1481,7 @@ fn generate_primitive_adapters(package: &str) -> String {
         "  static <T> PhonAdapter<List<T>> list(PhonAdapter<T> elementAdapter, SchemaClosure schema) {\n    Objects.requireNonNull(elementAdapter, \"elementAdapter\");\n    Objects.requireNonNull(schema, \"schema\");\n    return new PhonAdapter<>() {\n      @Override public SchemaClosure schema() { return schema; }\n      @Override public void encode(PhonEncoder encoder, List<T> values) throws PhonException { writeList(encoder, values, elementAdapter); }\n      @Override public List<T> decode(PhonDecoder decoder) throws PhonException { return readList(decoder, elementAdapter); }\n    };\n  }\n",
     );
     out.push_str(
-        "  static SchemaClosure schemaClosure(long rootId, byte[][] canonicalSchemas) {\n    try {\n      return SchemaClosure.fromCanonicalBytes(SchemaId.fromLong(rootId), canonicalSchemas, PhonLimits.defaults());\n    } catch (PhonException error) {\n      throw new ExceptionInInitializerError(error);\n    }\n  }\n",
+        "  static SchemaClosure schemaClosure(long rootId, byte[] schemaBundle) {\n    try {\n      return SchemaClosure.fromSchemaBundleBytes(SchemaId.fromLong(rootId), schemaBundle, PhonLimits.defaults());\n    } catch (PhonException error) {\n      throw new ExceptionInInitializerError(error);\n    }\n  }\n",
     );
     out.push_str("  static <T> PhonAdapter<T> unsupported(String shape) { throw new IllegalArgumentException(\"unsupported generated adapter \" + shape); }\n");
     out.push_str("  private PrimitiveAdapters() {}\n}\n");
@@ -1959,7 +1936,7 @@ mod tests {
                 .contains("PrimitiveAdapters.writeList(encoder, value.items(), ListItem.ADAPTER);")
         );
         assert!(envelope.contains("PrimitiveAdapters.readList(decoder, ListItem.ADAPTER)"));
-        assert!(envelope.contains("SchemaClosure.fromCanonicalBytes"));
+        assert!(envelope.contains("SchemaClosure.fromSchemaBundleBytes"));
 
         let primitive = source("PrimitiveAdapters.java");
         assert!(primitive.contains("encoder.writeCount(values.size())"));
@@ -1974,7 +1951,7 @@ mod tests {
         let descriptor = source("ListFixtureServiceDescriptor.java");
         assert!(descriptor.contains("PrimitiveAdapters.list(ListItem.ADAPTER"));
         assert!(descriptor.contains("PrimitiveAdapters.schemaClosure(0x"));
-        assert!(descriptor.contains("new byte[][]"));
+        assert!(descriptor.contains("new byte[]"));
     }
 
     #[test]
@@ -1992,7 +1969,7 @@ mod tests {
         assert!(
             first
                 .iter()
-                .all(|file| file.source.contains("CANONICAL_SCHEMAS"))
+                .all(|file| file.source.contains("SCHEMA_BUNDLE"))
         );
         assert!(first[0].source.contains("HANDSHAKE_MESSAGE_SCHEMA_ID"));
         assert!(first[1].source.contains("MESSAGE_SCHEMA_ID"));
@@ -2247,7 +2224,7 @@ public final class ListRoundtrip {
             ),
             (
                 "org/facet/phon/SchemaClosure.java",
-                "package org.facet.phon; import java.util.*; public final class SchemaClosure { public static SchemaClosure uncheckedOf(Schema s,Schema... r){return new SchemaClosure();} public static SchemaClosure uncheckedWithAuxiliaryClosures(Schema s,List<Schema> r,Map<String,SchemaClosure> a){return new SchemaClosure();} public static SchemaClosure uncheckedWithAuxiliaryClosures(SchemaClosure s,Map<String,SchemaClosure> a){return new SchemaClosure();} public static SchemaClosure fromCanonicalBytes(SchemaId id,byte[][] b,PhonLimits l)throws PhonException{return new SchemaClosure();} }",
+                "package org.facet.phon; import java.util.*; public final class SchemaClosure { public static SchemaClosure uncheckedOf(Schema s,Schema... r){return new SchemaClosure();} public static SchemaClosure uncheckedWithAuxiliaryClosures(Schema s,List<Schema> r,Map<String,SchemaClosure> a){return new SchemaClosure();} public static SchemaClosure uncheckedWithAuxiliaryClosures(SchemaClosure s,Map<String,SchemaClosure> a){return new SchemaClosure();} public static SchemaClosure fromSchemaBundleBytes(SchemaId id,byte[] b,PhonLimits l)throws PhonException{return new SchemaClosure();} }",
             ),
             (
                 "org/facet/phon/SchemaId.java",

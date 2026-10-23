@@ -6,7 +6,7 @@ import java.util.List;
 import org.facet.phon.*;
 
 public enum TerminalRasterFrameKind { FULL, DIRTY_REGIONS;
-  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x91c1a78e3af176feL), List.of(), new Schema.EnumKind("TerminalRasterFrameKind", List.of(new Schema.Variant("Full", 0, Schema.Payload.unit()), new Schema.Variant("DirtyRegions", 1, Schema.Payload.unit()))));
+  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0xe61681cbd1d5c26cL), List.of(), new Schema.EnumKind("TerminalRasterFrameKind", List.of(new Schema.Variant("Full", 0, Schema.Payload.unit()), new Schema.Variant("DirtyRegions", 1, Schema.Payload.unit()))));
   public static final PhonAdapter<TerminalRasterFrameKind> ADAPTER = new PhonAdapter<>() {
     @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA); }
     @Override public void encode(PhonEncoder encoder, TerminalRasterFrameKind value) throws PhonException { encoder.writeU32Unaligned(value.ordinal()); }

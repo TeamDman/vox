@@ -10,8 +10,19 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { ByteSink, DecodeError, Reader, Registry, ZST_COUNT_CAP, hexToBytes, schemaFromBytes } from "@bearcove/phon-schema";
-import type { Primitive, SchemaRef } from "@bearcove/phon-schema";
-import { buildPlan, compile, compileEncoder, decode, decodeCompact, decodeRef, encode, recordJitFallbacks, WriterOnlyVariantError } from "./index.ts";
+import type { Primitive, Schema, SchemaRef } from "@bearcove/phon-schema";
+import {
+  buildPlan,
+  compile,
+  compileEncoder,
+  decode,
+  decodeCompact,
+  decodeRef,
+  encode,
+  MissingSemanticHandler,
+  recordJitFallbacks,
+  WriterOnlyVariantError,
+} from "./index.ts";
 import type { Value } from "@bearcove/phon-schema";
 
 interface VectorFile {
@@ -68,6 +79,39 @@ const malformed: { name: string; root: bigint; bytes: Uint8Array; want?: RegExp 
     want: /invalid UTF-8/,
   },
 ];
+
+// r[verify type-system.semantic]
+describe("semantic schemas require an explicit handler", () => {
+  const semanticId = 0x9000_0000_0000_1000n;
+  const semantic: Schema = {
+    id: semanticId,
+    typeParams: [],
+    kind: {
+      kind: "semantic",
+      name: "org.example.semantic-v1",
+      args: [],
+      representation: primitiveRef("u32"),
+    },
+  };
+  const semanticRegistry = new Registry(
+    [semantic],
+    corpus.primitives.map((p) => ({ id: BigInt(`0x${p.id}`), tag: p.tag as Primitive })),
+  );
+  const wire = bytes((sink) => sink.u32(7));
+
+  it("rejects direct compact encode and decode instead of exposing representation values", () => {
+    expect(() => encode(7n, semanticId, semanticRegistry)).toThrow(MissingSemanticHandler);
+    expect(() => decodeCompact(wire, semanticId, semanticRegistry)).toThrow(MissingSemanticHandler);
+  });
+
+  it("rejects compatibility and JIT paths before consuming semantic bytes", () => {
+    expect(() => buildPlan(semanticId, semanticId, semanticRegistry)).toThrow(MissingSemanticHandler);
+    expect(() => compile(semanticId, semanticId, semanticRegistry, { jit: false })).toThrow(MissingSemanticHandler);
+    expect(() => compile(semanticId, semanticId, semanticRegistry, { jit: true })).toThrow(MissingSemanticHandler);
+    expect(() => compileEncoder(semanticId, semanticRegistry, { jit: false })(7n)).toThrow(MissingSemanticHandler);
+    expect(() => compileEncoder(semanticId, semanticRegistry, { jit: true })(7n)).toThrow(MissingSemanticHandler);
+  });
+});
 
 // r[verify decode.whole-message]
 // r[verify validate.lengths]

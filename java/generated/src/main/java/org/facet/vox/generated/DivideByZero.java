@@ -6,7 +6,7 @@ import java.util.List;
 import org.facet.phon.*;
 
 public enum DivideByZero { ZERO;
-  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0xfb754a5995522002L), List.of(), new Schema.EnumKind("DivideByZero", List.of(new Schema.Variant("Zero", 0, Schema.Payload.unit()))));
+  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0xbb9bd29e23085ebcL), List.of(), new Schema.EnumKind("DivideByZero", List.of(new Schema.Variant("Zero", 0, Schema.Payload.unit()))));
   public static final PhonAdapter<DivideByZero> ADAPTER = new PhonAdapter<>() {
     @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA); }
     @Override public void encode(PhonEncoder encoder, DivideByZero value) throws PhonException { encoder.writeU32Unaligned(value.ordinal()); }

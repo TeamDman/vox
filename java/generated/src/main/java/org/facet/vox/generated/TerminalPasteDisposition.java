@@ -6,7 +6,7 @@ import java.util.List;
 import org.facet.phon.*;
 
 public enum TerminalPasteDisposition { PASTED, CONFIRMATION_REQUIRED;
-  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x0c48fc44d06642e5L), List.of(), new Schema.EnumKind("TerminalPasteDisposition", List.of(new Schema.Variant("Pasted", 0, Schema.Payload.unit()), new Schema.Variant("ConfirmationRequired", 1, Schema.Payload.unit()))));
+  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0xe44eb476f283aca0L), List.of(), new Schema.EnumKind("TerminalPasteDisposition", List.of(new Schema.Variant("Pasted", 0, Schema.Payload.unit()), new Schema.Variant("ConfirmationRequired", 1, Schema.Payload.unit()))));
   public static final PhonAdapter<TerminalPasteDisposition> ADAPTER = new PhonAdapter<>() {
     @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA); }
     @Override public void encode(PhonEncoder encoder, TerminalPasteDisposition value) throws PhonException { encoder.writeU32Unaligned(value.ordinal()); }

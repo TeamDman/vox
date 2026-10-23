@@ -81,6 +81,40 @@ public final class Schema {
     public static final class DynamicKind implements Kind {
         public static final DynamicKind INSTANCE = new DynamicKind(); private DynamicKind() {}
     }
+    public static final class SemanticKind implements Kind {
+        private final QualifiedName name;
+        private final List<Ref> arguments;
+        private final Ref representation;
+        public SemanticKind(QualifiedName name, List<Ref> arguments, Ref representation) {
+            this.name = Objects.requireNonNull(name);
+            this.arguments = List.copyOf(arguments);
+            this.representation = Objects.requireNonNull(representation);
+        }
+        public QualifiedName name() { return name; }
+        public List<Ref> arguments() { return arguments; }
+        public Ref representation() { return representation; }
+    }
+    public enum ChannelDirection { TX, RX }
+    public static final class ChannelKind implements Kind {
+        private final ChannelDirection direction;
+        private final Ref element;
+        public ChannelKind(ChannelDirection direction, Ref element) {
+            this.direction = Objects.requireNonNull(direction);
+            this.element = Objects.requireNonNull(element);
+        }
+        public ChannelDirection direction() { return direction; }
+        public Ref element() { return element; }
+    }
+    public static final class ExternalKind implements Kind {
+        private final String name;
+        private final Ref metadata;
+        public ExternalKind(String name, Ref metadata) {
+            this.name = Objects.requireNonNull(name);
+            this.metadata = metadata;
+        }
+        public String name() { return name; }
+        public Ref metadata() { return metadata; }
+    }
     public static final class UnsupportedKind implements Kind {
         private final String name;
         public UnsupportedKind(String name) { this.name = Objects.requireNonNull(name); }

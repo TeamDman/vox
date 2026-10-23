@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::fmt::Write;
 
 use phon_schema::{
-    Primitive, Schema, SchemaKind, SchemaRef, VariantPayload, primitive_id, schema_to_bytes,
+    Primitive, Schema, SchemaKind, SchemaRef, VariantPayload, primitive_id, schema_bundle_to_bytes,
 };
 
 use crate::source::Module;
@@ -55,35 +55,32 @@ pub fn render(module: &Module) -> String {
     r.render()
 }
 
+/// Encode the complete schema closure carried by a generated module.
+///
+/// # Errors
+/// Returns an error if the module's schema graph is not a canonical admitted
+/// bundle.
+pub fn schema_bundle_bytes(module: &Module) -> Result<Vec<u8>, phon_schema::DecodeError> {
+    schema_bundle_to_bytes(&module.schemas)
+}
+
 /// Render JUST a named phon `Registry` for `module`'s schemas (no type
-/// declarations, no `schemaId`): the `SCHEMA_BYTES`/`PRIMITIVES` tables and an
-/// `export const <name> = new Registry(...)`. The arrays are name-prefixed so
-/// several registries can coexist in one module. Used by RPC codegen, which
-/// supplies its own (channel-aware) type declarations.
+/// declarations, no `schemaId`). The generated source carries one canonical
+/// `SchemaBundleEnvelope` constant and admits it through the language runtime.
+/// Used by RPC codegen, which supplies its own channel-aware declarations.
 // r[impl codegen.schema-is-source-of-truth]
 #[must_use]
 pub fn render_registry(module: &Module, name: &str) -> String {
+    let bytes = schema_bundle_bytes(module).expect("codegen module schemas form a valid bundle");
     let mut out = String::new();
-    let _ = writeln!(out, "const {name}_SCHEMA_BYTES: string[] = [");
-    for schema in &module.schemas {
-        let _ = writeln!(out, "  \"{}\",", hex(&schema_to_bytes(schema)));
-    }
-    out.push_str("];\n\n");
-
-    let _ = writeln!(out, "const {name}_PRIMITIVES: [string, Primitive][] = [");
-    for &p in &PRIMITIVES {
-        let _ = writeln!(
-            out,
-            "  [\"{:016x}\", \"{}\"],",
-            primitive_id(p).as_u64(),
-            p.tag()
-        );
-    }
-    out.push_str("];\n\n");
-
     let _ = writeln!(
         out,
-        "export const {name} = new Registry(\n  {name}_SCHEMA_BYTES.map((b) => schemaFromBytes(hexToBytes(b))),\n  {name}_PRIMITIVES.map(([id, tag]) => ({{ id: BigInt(`0x${{id}}`), tag }})),\n);\n"
+        "export const {name}SchemaBundle = hexToBytes(\"{}\");",
+        hex(&bytes)
+    );
+    let _ = writeln!(
+        out,
+        "export const {name} = new Registry(parseSchemaBundle({name}SchemaBundle));"
     );
     out
 }
@@ -109,9 +106,8 @@ impl<'m> Renderer<'m> {
             "// Type declarations + self-describing schema-bytes for the phon engine.\n\n",
         );
         out.push_str(
-            "import { Registry, schemaFromBytes, hexToBytes } from \"@bearcove/phon-schema\";\n",
+            "import { Registry, hexToBytes, parseSchemaBundle } from \"@bearcove/phon-schema\";\n\n",
         );
-        out.push_str("import type { Primitive } from \"@bearcove/phon-schema\";\n\n");
 
         // Type declarations: one per named composite (struct/enum), in id order.
         for schema in &self.module.schemas {
@@ -121,30 +117,15 @@ impl<'m> Renderer<'m> {
             }
         }
 
-        // The registry: every composite's schema-bytes (hex) + the primitive
-        // id->tag table, assembled into a ready Registry.
-        out.push_str("const SCHEMA_BYTES: string[] = [\n");
-        for schema in &self.module.schemas {
-            let _ = writeln!(out, "  \"{}\",", hex(&schema_to_bytes(schema)));
-        }
-        out.push_str("];\n\n");
-
-        out.push_str("const PRIMITIVES: [string, Primitive][] = [\n");
-        for &p in &PRIMITIVES {
-            let _ = writeln!(
-                out,
-                "  [\"{:016x}\", \"{}\"],",
-                primitive_id(p).as_u64(),
-                p.tag()
-            );
-        }
-        out.push_str("];\n\n");
-
-        out.push_str(
-            "export const registry = new Registry(\n  \
-SCHEMA_BYTES.map((b) => schemaFromBytes(hexToBytes(b))),\n  \
-PRIMITIVES.map(([id, tag]) => ({ id: BigInt(`0x${id}`), tag })),\n);\n\n",
+        // One canonical bundle contains the complete generated schema closure.
+        let bytes =
+            schema_bundle_bytes(self.module).expect("codegen module schemas form a valid bundle");
+        let _ = writeln!(
+            out,
+            "export const schemaBundle = hexToBytes(\"{}\");",
+            hex(&bytes)
         );
+        out.push_str("export const registry = new Registry(parseSchemaBundle(schemaBundle));\n\n");
 
         // Per-root SchemaId constants (u64 as a bigint literal).
         out.push_str("export const schemaId = {\n");
@@ -247,6 +228,7 @@ PRIMITIVES.map(([id, tag]) => ({ id: BigInt(`0x${id}`), tag })),\n);\n\n",
                 let inner: Vec<String> = elements.iter().map(|e| self.render_ref(e)).collect();
                 format!("[{}]", inner.join(", "))
             }
+            SchemaKind::Semantic { representation, .. } => self.render_ref(representation),
             SchemaKind::Dynamic => "unknown".to_string(),
             SchemaKind::Primitive(p) => primitive_ts(*p).to_string(),
             SchemaKind::Tensor { .. }

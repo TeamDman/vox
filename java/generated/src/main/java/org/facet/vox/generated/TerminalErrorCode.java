@@ -6,7 +6,7 @@ import java.util.List;
 import org.facet.phon.*;
 
 public enum TerminalErrorCode { INVALID_REQUEST, UNSUPPORTED_CAPABILITY, SESSION_NOT_FOUND, CAPACITY_EXCEEDED, CANCELLED, DISCONNECTED, INTERNAL;
-  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0xeb4a16e9a59ce36fL), List.of(), new Schema.EnumKind("TerminalErrorCode", List.of(new Schema.Variant("InvalidRequest", 0, Schema.Payload.unit()), new Schema.Variant("UnsupportedCapability", 1, Schema.Payload.unit()), new Schema.Variant("SessionNotFound", 2, Schema.Payload.unit()), new Schema.Variant("CapacityExceeded", 3, Schema.Payload.unit()), new Schema.Variant("Cancelled", 4, Schema.Payload.unit()), new Schema.Variant("Disconnected", 5, Schema.Payload.unit()), new Schema.Variant("Internal", 6, Schema.Payload.unit()))));
+  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x243fff0387dd1369L), List.of(), new Schema.EnumKind("TerminalErrorCode", List.of(new Schema.Variant("InvalidRequest", 0, Schema.Payload.unit()), new Schema.Variant("UnsupportedCapability", 1, Schema.Payload.unit()), new Schema.Variant("SessionNotFound", 2, Schema.Payload.unit()), new Schema.Variant("CapacityExceeded", 3, Schema.Payload.unit()), new Schema.Variant("Cancelled", 4, Schema.Payload.unit()), new Schema.Variant("Disconnected", 5, Schema.Payload.unit()), new Schema.Variant("Internal", 6, Schema.Payload.unit()))));
   public static final PhonAdapter<TerminalErrorCode> ADAPTER = new PhonAdapter<>() {
     @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA); }
     @Override public void encode(PhonEncoder encoder, TerminalErrorCode value) throws PhonException { encoder.writeU32Unaligned(value.ordinal()); }

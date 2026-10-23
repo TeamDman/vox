@@ -6,7 +6,7 @@ import java.util.List;
 import org.facet.phon.*;
 
 public enum TerminalFrameEncoding { STRUCTURED_CELLS, RGBA8, BGRA8, PNG;
-  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x17c306211a803210L), List.of(), new Schema.EnumKind("TerminalFrameEncoding", List.of(new Schema.Variant("StructuredCells", 0, Schema.Payload.unit()), new Schema.Variant("Rgba8", 1, Schema.Payload.unit()), new Schema.Variant("Bgra8", 2, Schema.Payload.unit()), new Schema.Variant("Png", 3, Schema.Payload.unit()))));
+  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0xeb964f9c15665745L), List.of(), new Schema.EnumKind("TerminalFrameEncoding", List.of(new Schema.Variant("StructuredCells", 0, Schema.Payload.unit()), new Schema.Variant("Rgba8", 1, Schema.Payload.unit()), new Schema.Variant("Bgra8", 2, Schema.Payload.unit()), new Schema.Variant("Png", 3, Schema.Payload.unit()))));
   public static final PhonAdapter<TerminalFrameEncoding> ADAPTER = new PhonAdapter<>() {
     @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA); }
     @Override public void encode(PhonEncoder encoder, TerminalFrameEncoding value) throws PhonException { encoder.writeU32Unaligned(value.ordinal()); }

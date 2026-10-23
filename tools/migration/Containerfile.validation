@@ -1,0 +1,6 @@
+# Build tooling only; no source, credentials, or caches are embedded.
+FROM docker.io/library/eclipse-temurin@sha256:7db733aadd907ea0a5168163d1f0df57e2f611cfa879836878e0872d4e6476dc AS jdk_source
+FROM docker.io/library/rust@sha256:c993d32d95cc146bd12c84d66f0b924a6a96f3988325f39c144f2f9893dea120
+COPY --from=jdk_source /opt/java/openjdk /opt/java
+ENV JAVA_HOME=/opt/java
+ENV PATH=/opt/java/bin:${PATH}

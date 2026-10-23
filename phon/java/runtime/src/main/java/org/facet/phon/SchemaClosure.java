@@ -139,6 +139,19 @@ public final class SchemaClosure {
             ordered.sort(java.util.Comparator.comparing(schema -> schema.id().toString()));
             return new SchemaClosure(root, ordered, roots, PhonLimits.DEFAULT);
     }
+    /** Load a canonical PHONSCM1 table emitted by current code generators. */
+    public static SchemaClosure fromSchemaBundleBytes(
+            SchemaId rootId, byte[] bytes, PhonLimits limits) throws PhonException {
+        SchemaBundleLimits bundleLimits = new SchemaBundleLimits(
+                limits.schemaBytes(), limits.schemaBytes(), limits.collectionEntries(),
+                limits.referencedSchemas(), limits.nestingDepth(), limits.planningWork());
+        List<Schema> decoded = new ArrayList<>(SchemaBundle.decode(bytes, bundleLimits).schemas());
+        Schema root = decoded.stream().filter(schema -> schema.id().equals(rootId)).findFirst()
+                .orElseThrow(() -> new PhonException(PhonException.Kind.SCHEMA,
+                        "root schema " + rootId + " is absent from schema bundle"));
+        decoded.remove(root);
+        return new SchemaClosure(root, decoded, Map.of(), limits);
+    }
     public static SchemaClosure fromCanonicalBytes(
             SchemaId rootId, byte[][] canonicalSchemas, PhonLimits limits)
             throws PhonException {

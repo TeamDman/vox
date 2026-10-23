@@ -52,6 +52,8 @@ public final class CompatibilityPlan {
             if(wk instanceof Schema.PrimitiveKind&&rk instanceof Schema.PrimitiveKind){
                 if(((Schema.PrimitiveKind)wk).primitive()!=((Schema.PrimitiveKind)rk).primitive())bad(path,"primitive mismatch");return;
             }
+            if(wk instanceof Schema.SemanticKind||rk instanceof Schema.SemanticKind)
+                bad(path,"semantic compatibility requires a registered handler");
             if(wk instanceof Schema.DynamicKind&&rk instanceof Schema.DynamicKind)return;
             if(wk instanceof Schema.RecordKind&&rk instanceof Schema.RecordKind){
                 Map<String,Schema.Field>wf=fields(((Schema.RecordKind)wk).fields());
@@ -117,6 +119,11 @@ public final class CompatibilityPlan {
         if(kind instanceof Schema.MapKind)return new Schema.MapKind(sub(((Schema.MapKind)kind).key(),parameters,arguments),sub(((Schema.MapKind)kind).value(),parameters,arguments));
         if(kind instanceof Schema.ArrayKind){Schema.ArrayKind value=(Schema.ArrayKind)kind;return new Schema.ArrayKind(sub(value.element(),parameters,arguments),value.dimensions());}
         if(kind instanceof Schema.TensorKind){Schema.TensorKind value=(Schema.TensorKind)kind;return new Schema.TensorKind(sub(value.element(),parameters,arguments),value.rank());}
+        if(kind instanceof Schema.SemanticKind){
+            Schema.SemanticKind value=(Schema.SemanticKind)kind;List<Schema.Ref>semanticArgs=new ArrayList<>();
+            for(Schema.Ref argument:value.arguments())semanticArgs.add(sub(argument,parameters,arguments));
+            return new Schema.SemanticKind(value.name(),semanticArgs,sub(value.representation(),parameters,arguments));
+        }
         return kind;
     }
     private static Schema.Payload substitutePayload(Schema.Payload payload,List<String>parameters,List<Schema.Ref>arguments){

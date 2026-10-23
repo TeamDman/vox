@@ -480,6 +480,8 @@ public final class VoxRuntimeTest {
         ExecutionException failure = expectThrows(
                 ExecutionException.class, () -> timedOut.get(2, TimeUnit.SECONDS));
         check(failure.getCause() instanceof TimeoutException, "idle timeout kind");
+        // Completion wakes this thread before the scheduler enqueues cancellation.
+        check(driver.cancelled.await(2, TimeUnit.SECONDS), "timeout cancellation reaches driver");
         check(driver.cancels.get() == 1, "timeout sends cancel after commitment");
         lane.close();
         options.closeOwnedResources();
@@ -584,12 +586,14 @@ public final class VoxRuntimeTest {
         private final LinkedBlockingQueue<ServiceLane.OutboundCall> submitted =
                 new LinkedBlockingQueue<>();
         final AtomicInteger cancels = new AtomicInteger();
+        final java.util.concurrent.CountDownLatch cancelled = new java.util.concurrent.CountDownLatch(1);
         public boolean submit(ServiceLane.OutboundCall call) {
             submitted.add(call);
             return true;
         }
         public boolean cancel(long laneId, long requestId) {
             cancels.incrementAndGet();
+            cancelled.countDown();
             return true;
         }
         public boolean closeLane(long laneId) { return true; }

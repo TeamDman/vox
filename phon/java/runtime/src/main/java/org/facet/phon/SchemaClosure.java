@@ -60,17 +60,13 @@ public final class SchemaClosure {
             }
         }
         this.auxiliaryRoots = java.util.Collections.unmodifiableMap(roots);
+        // Validate references and bounded identity work before recursive encoding.
+        SchemaBundle.validate(new ArrayList<>(table.values()), new SchemaBundleLimits(
+                limits.inputBytes(), limits.schemaBytes(), limits.collectionEntries(),
+                limits.referencedSchemas(), limits.nestingDepth(), limits.planningWork()));
         this.canonicalBytes = SchemaWire.encode(root);
         if (canonicalBytes.length > limits.schemaBytes())
             throw new PhonException(PhonException.Kind.LIMIT, "schema bytes exceed schemaBytes");
-        List<Schema> composites = new ArrayList<>(table.values());
-        Map<SchemaId, SchemaId> actual = SchemaIdentity.recompute(composites, limits);
-        for (Schema schema : composites) {
-            SchemaId computed = actual.get(schema.id());
-            if (!schema.id().equals(computed))
-                throw new PhonException(PhonException.Kind.SCHEMA,
-                        "schema id mismatch: stated " + schema.id() + ", computed " + computed);
-        }
     }
 
     public static SchemaClosure of(Schema root, Schema... reachable) throws PhonException {

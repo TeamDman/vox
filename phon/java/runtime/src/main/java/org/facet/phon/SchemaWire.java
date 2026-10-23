@@ -18,8 +18,19 @@ final class SchemaWire {
     private SchemaWire() {}
 
     static byte[] encode(Schema schema) throws PhonException {
+        // Bare-schema callers also need a bound before recursive reference emission.
+        var pending = new java.util.ArrayDeque<RefDepth>();
+        for (Schema.Ref ref : SchemaBundle.directRefs(schema.kind())) pending.addLast(new RefDepth(ref, 0));
+        int work = 0;
+        while (!pending.isEmpty()) {
+            RefDepth item = pending.removeLast();
+            if (++work > PhonLimits.DEFAULT.planningWork() || item.depth > PhonLimits.DEFAULT.nestingDepth())
+                throw limit("schema encoding work or depth");
+            for (Schema.Ref arg : item.ref.arguments()) pending.addLast(new RefDepth(arg, item.depth + 1));
+        }
         Out out=new Out();schema(out,schema);return out.bytes();
     }
+    private record RefDepth(Schema.Ref ref, int depth) {}
     static Schema decode(byte[] bytes,PhonLimits limits)throws PhonException{
         if(bytes.length>limits.schemaBytes())throw new PhonException(PhonException.Kind.LIMIT,"schema bytes exceed schemaBytes");
         In in=new In(bytes,limits);Schema schema=schema(in,0);if(in.remaining()!=0)throw in.error("trailing schema bytes");return schema;

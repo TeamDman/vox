@@ -275,10 +275,10 @@ public final class VoxJavaSubject {
     private static void runCompatibleSchemaEvolution(VoxConnection connection) throws Exception {
         SchemaClosure argsSchema = schema(
                 EvolvedProfileArgsWireSchemas._SCHEMA_ID,
-                EvolvedProfileArgsWireSchemas.CANONICAL_SCHEMAS);
+                EvolvedProfileArgsWireSchemas.SCHEMA_BUNDLE);
         SchemaClosure responseSchema = schema(
                 EvolvedProfileResponseWireSchemas.RESULT_SCHEMA_ID,
-                EvolvedProfileResponseWireSchemas.CANONICAL_SCHEMAS);
+                EvolvedProfileResponseWireSchemas.SCHEMA_BUNDLE);
         MethodDescriptor method = genericMethod(
                 EvolutionWireConstants.ECHO_PROFILE_METHOD_ID,
                 "echo_profile",
@@ -315,10 +315,10 @@ public final class VoxJavaSubject {
     private static void runIncompatibleSchemaEvolution(VoxConnection connection) throws Exception {
         SchemaClosure argsSchema = schema(
                 EvolvedMeasurementArgsWireSchemas._SCHEMA_ID,
-                EvolvedMeasurementArgsWireSchemas.CANONICAL_SCHEMAS);
+                EvolvedMeasurementArgsWireSchemas.SCHEMA_BUNDLE);
         SchemaClosure responseSchema = schema(
                 EvolvedMeasurementResponseWireSchemas.RESULT_SCHEMA_ID,
-                EvolvedMeasurementResponseWireSchemas.CANONICAL_SCHEMAS);
+                EvolvedMeasurementResponseWireSchemas.SCHEMA_BUNDLE);
         MethodDescriptor method = genericMethod(
                 EvolutionWireConstants.ECHO_MEASUREMENT_METHOD_ID,
                 "echo_measurement",
@@ -348,10 +348,10 @@ public final class VoxJavaSubject {
         }
     }
 
-    private static SchemaClosure schema(long rootId, byte[][] canonicalSchemas)
+    private static SchemaClosure schema(long rootId, byte[] schemaBundle)
             throws PhonException {
-        return SchemaClosure.fromCanonicalBytes(
-                SchemaId.fromLong(rootId), canonicalSchemas, PhonLimits.defaults());
+        return SchemaClosure.fromSchemaBundleBytes(
+                SchemaId.fromLong(rootId), schemaBundle, PhonLimits.defaults());
     }
 
     private static MethodDescriptor genericMethod(

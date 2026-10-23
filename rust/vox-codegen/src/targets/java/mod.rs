@@ -827,15 +827,11 @@ fn emit_exact_schema_closure(
         .expect("one schema closure root")
         .id
         .as_u64();
-    let bytes = schema_bundle_to_bytes(&module.schemas)
-        .expect("validated Java schema bundle")
-        .iter()
-        .map(|byte| format!("(byte)0x{byte:02x}"))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let bytes = schema_bundle_to_bytes(&module.schemas).expect("validated Java schema bundle");
     let _ = writeln!(out, "  private static final SchemaClosure {field_name} = {factory_name}();");
     let _ = writeln!(out,
-        "  private static SchemaClosure {factory_name}() {{\n    try {{\n      return SchemaClosure.fromSchemaBundleBytes(SchemaId.fromLong(0x{root:016x}L), {factory_name}Bundle(), PhonLimits.defaults());\n    }} catch (PhonException error) {{\n      throw new ExceptionInInitializerError(error);\n    }}\n  }}\n  private static byte[] {factory_name}Bundle() {{ return new byte[] {{{bytes}}}; }}");
+        "  private static SchemaClosure {factory_name}() {{\n    try {{\n      return SchemaClosure.fromSchemaBundleBytes(SchemaId.fromLong(0x{root:016x}L), {factory_name}Bundle(), PhonLimits.defaults());\n    }} catch (PhonException error) {{\n      throw new ExceptionInInitializerError(error);\n    }}\n  }}");
+    out.push_str(&phon_codegen::targets::java::render_byte_factory(&format!("{factory_name}Bundle"), &bytes));
 }
 
 fn exact_schema_closure_expression(shape: &'static Shape) -> String {
@@ -851,13 +847,11 @@ fn exact_schema_closure_expression(shape: &'static Shape) -> String {
         .expect("one schema closure root")
         .id
         .as_u64();
-    let bytes = schema_bundle_to_bytes(&module.schemas)
-        .expect("validated Java schema bundle")
-        .iter()
-        .map(|byte| format!("(byte)0x{byte:02x}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("PrimitiveAdapters.schemaClosure(0x{root:016x}L, new byte[] {{{bytes}}})")
+    let bytes = schema_bundle_to_bytes(&module.schemas).expect("validated Java schema bundle");
+    let factory = phon_codegen::targets::java::render_byte_factory("bundle", &bytes);
+    // A nested supplier gives each inline list closure its own bounded methods
+    // and constant pool instead of inflating the service's initializer.
+    format!("PrimitiveAdapters.schemaClosure(0x{root:016x}L, new java.util.function.Supplier<byte[]>() {{ {factory} public byte[] get() {{ return bundle(); }} }}.get())")
 }
 
 fn schema_ref_expr(shape: &'static Shape) -> String {
@@ -1951,7 +1945,7 @@ mod tests {
         let descriptor = source("ListFixtureServiceDescriptor.java");
         assert!(descriptor.contains("PrimitiveAdapters.list(ListItem.ADAPTER"));
         assert!(descriptor.contains("PrimitiveAdapters.schemaClosure(0x"));
-        assert!(descriptor.contains("new byte[]"));
+        assert!(descriptor.contains("HexFormat.of().parseHex"));
     }
 
     #[test]

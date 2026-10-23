@@ -16,6 +16,7 @@ public final class PhonConformanceTest {
 
     public static void main(String[] args) throws Exception {
         Path repository=Path.of(args.length==0?".":args[0]).toAbsolutePath().normalize();
+        SchemaBundleTest.run(repository);
         primitiveIdsMatchRust();
         acceptedSchemaCorpusRoundTrips(repository);
         schemaBundlesRoundTrip(repository);

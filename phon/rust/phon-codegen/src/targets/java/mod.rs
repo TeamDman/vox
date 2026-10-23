@@ -23,15 +23,31 @@ pub fn render_schema_table(module: &Module, package: &str, class_name: &str) -> 
             root.id.as_u64()
         );
     }
-    let bytes = schema_bundle_to_bytes(&module.schemas)
-        .expect("validated codegen schema bundle")
-        .iter()
-        .map(|byte| format!("(byte)0x{byte:02x}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let _ = writeln!(out, "  public static final byte[] SCHEMA_BUNDLE = new byte[] {{{bytes}}};");
+    let bytes = schema_bundle_to_bytes(&module.schemas).expect("validated codegen schema bundle");
+    out.push_str("  public static final byte[] SCHEMA_BUNDLE = schemaBundle();\n");
+    out.push_str(&render_byte_factory("schemaBundle", &bytes));
     let _ = writeln!(out, "  private {class_name}() {{}}");
     out.push_str("}\n");
+    out
+}
+
+/// Emit bounded UTF-8 constants instead of one bytecode instruction per byte.
+/// 16 KiB chunks stay below the JVM's 65,535-byte constant and method limits,
+/// including for bundles at the runtime's 64 MiB admission limit.
+#[must_use]
+pub fn render_byte_factory(name: &str, bytes: &[u8]) -> String {
+    let mut out = format!(
+        "  private static byte[] {name}() {{\n    var out = new java.io.ByteArrayOutputStream({});\n",
+        bytes.len()
+    );
+    for chunk in bytes.chunks(16 * 1024) {
+        out.push_str("    out.writeBytes(java.util.HexFormat.of().parseHex(\"");
+        for byte in chunk {
+            let _ = write!(out, "{byte:02x}");
+        }
+        out.push_str("\"));\n");
+    }
+    out.push_str("    return out.toByteArray();\n  }\n");
     out
 }
 
@@ -65,6 +81,43 @@ mod tests {
     }
 
     #[test]
+    fn large_byte_factory_compiles_and_preserves_every_byte() {
+        let bytes: Vec<u8> = (0..262_147).map(|i| (i % 251) as u8).collect();
+        let factory = super::render_byte_factory("bundle", &bytes);
+        assert_eq!(factory, super::render_byte_factory("bundle", &bytes));
+        let directory =
+            std::env::temp_dir().join(format!("phon-java-bundle-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let source = format!(
+            "public class LargeBundle {{ {factory} public static void main(String[] args) throws Exception {{ java.nio.file.Files.write(java.nio.file.Path.of(args[0]), bundle()); }} }}"
+        );
+        std::fs::write(directory.join("LargeBundle.java"), source).unwrap();
+        let compile = std::process::Command::new("javac")
+            .args(["--release", "17"])
+            .arg(directory.join("LargeBundle.java"))
+            .output()
+            .expect("JDK required for Java generation qualification");
+        assert!(
+            compile.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        let output = directory.join("bundle.bin");
+        assert!(
+            std::process::Command::new("java")
+                .arg("-cp")
+                .arg(&directory)
+                .arg("LargeBundle")
+                .arg(&output)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(std::fs::read(output).unwrap(), bytes);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn schema_table_is_deterministic_and_contains_canonical_root() {
         let module = Builder::new()
             .add::<Message>()
@@ -74,7 +127,7 @@ mod tests {
         let second = render_schema_table(&module, "org.facet.phon.generated", "FixtureSchemas");
         assert_eq!(first, second);
         assert!(first.contains("MESSAGE_SCHEMA_ID = 0x"));
-        assert!(first.contains("new byte[]"));
+        assert!(first.contains("HexFormat.of().parseHex"));
         assert!(first.contains("private FixtureSchemas()"));
     }
 }

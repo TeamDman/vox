@@ -188,14 +188,10 @@ pub fn parse_schema_bytes(bytes: &[u8]) -> Result<SchemaBundle, Error> {
         let slice = r
             .read_slice(len)
             .map_err(|e| Error(format!("schema bundle entry body: {e:?}")))?;
-        let (schema, consumed) = schema_from_bytes(slice, DecodeLimits::DEFAULT)
+        // The decoder rejects trailing bytes itself. Its second result is the
+        // owned allocation budget used, not the number of wire bytes consumed.
+        let (schema, _owned_bytes) = schema_from_bytes(slice, DecodeLimits::DEFAULT)
             .map_err(|e| Error(format!("schema decode: {e:?}")))?;
-        if consumed != slice.len() {
-            return Err(Error(format!(
-                "schema decode consumed {consumed} of {} bytes",
-                slice.len()
-            )));
-        }
         schemas.push(schema);
     }
 
@@ -651,6 +647,15 @@ mod tests {
         assert_eq!(bundle.root, d.root);
         assert_eq!(bundle.schemas.len(), d.schemas.len());
         assert!(bundle.auxiliary_roots.is_empty());
+    }
+
+    #[test]
+    fn schema_bundle_rejects_trailing_bytes_inside_entry() {
+        let mut bytes = schema_bytes::<Writer>().expect("schema bytes");
+        let length = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
+        bytes.splice(16 + length as usize..16 + length as usize, [0]);
+        bytes[12..16].copy_from_slice(&(length + 1).to_le_bytes());
+        assert!(parse_schema_bytes(&bytes).is_err());
     }
 
     #[test]

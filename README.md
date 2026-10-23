@@ -1,5 +1,10 @@
 # vox
 
+This is the Teamy fork. The standalone Java/terminal migration, dependency
+identities, preserved commit maps, and validation limits are documented in
+[the migration report](docs/teamy-migration/README.md). Migration packages are
+not published; the badges below describe upstream Vox.
+
 [![crates.io](https://img.shields.io/crates/v/vox.svg)](https://crates.io/crates/vox)
 [![documentation](https://docs.rs/vox/badge.svg)](https://docs.rs/vox)
 [![MIT/Apache-2.0 licensed](https://img.shields.io/crates/l/vox.svg)](https://github.com/bearcove/vox/blob/main/LICENSE-MIT)

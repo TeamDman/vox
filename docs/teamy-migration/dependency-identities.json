@@ -1,0 +1,1336 @@
+{
+  "migration": [
+    {
+      "name": "teamy-facet",
+      "version": "0.50.0-rc.7",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-vox",
+        "teamy-facet"
+      ]
+    },
+    {
+      "name": "teamy-facet-core",
+      "version": "0.50.0-rc.7",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-vox-core",
+        "teamy-facet-core"
+      ]
+    },
+    {
+      "name": "teamy-facet-dessert",
+      "version": "0.50.0-rc.7",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-vox-proto",
+        "teamy-facet-value",
+        "teamy-facet-format",
+        "teamy-facet-dessert"
+      ]
+    },
+    {
+      "name": "teamy-facet-error",
+      "version": "0.50.0-rc.7",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-vox-xtask",
+        "teamy-figue",
+        "teamy-facet-error"
+      ]
+    },
+    {
+      "name": "teamy-facet-format",
+      "version": "0.50.0-rc.9",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-vox-proto",
+        "teamy-facet-value",
+        "teamy-facet-format"
+      ]
+    },
+    {
+      "name": "teamy-facet-json",
+      "version": "0.50.0-rc.9",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-vox-xtask",
+        "teamy-facet-json"
+      ]
+    },
+    {
+      "name": "teamy-facet-macro-parse",
+      "version": "0.50.0-rc.7",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-vox",
+        "teamy-facet",
+        "teamy-facet-macros",
+        "teamy-facet-macros-impl",
+        "teamy-facet-macro-parse"
+      ]
+    },
+    {
+      "name": "teamy-facet-macro-types",
+      "version": "0.50.0-rc.7",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-vox",
+        "teamy-facet",
+        "teamy-facet-macros",
+        "teamy-facet-macros-impl",
+        "teamy-facet-macro-types"
+      ]
+    },
+    {
+      "name": "teamy-facet-macros",
+      "version": "0.50.0-rc.7",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-vox",
+        "teamy-facet",
+        "teamy-facet-macros"
+      ]
+    },
+    {
+      "name": "teamy-facet-macros-impl",
+      "version": "0.50.0-rc.7",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-vox",
+        "teamy-facet",
+        "teamy-facet-macros",
+        "teamy-facet-macros-impl"
+      ]
+    },
+    {
+      "name": "teamy-facet-path",
+      "version": "0.50.0-rc.7",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-vox",
+        "teamy-facet-reflect",
+        "teamy-facet-path"
+      ]
+    },
+    {
+      "name": "teamy-facet-pretty",
+      "version": "0.50.0-rc.7",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-vox",
+        "teamy-facet-pretty"
+      ]
+    },
+    {
+      "name": "teamy-facet-reflect",
+      "version": "0.50.0-rc.7",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-vox",
+        "teamy-facet-reflect"
+      ]
+    },
+    {
+      "name": "teamy-facet-solver",
+      "version": "0.50.0-rc.7",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-vox-proto",
+        "teamy-facet-value",
+        "teamy-facet-format",
+        "teamy-facet-solver"
+      ]
+    },
+    {
+      "name": "teamy-facet-testhelpers",
+      "version": "0.50.0-rc.7",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-vox-core",
+        "teamy-facet-testhelpers"
+      ]
+    },
+    {
+      "name": "teamy-facet-testhelpers-macros",
+      "version": "0.50.0-rc.7",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-vox-core",
+        "teamy-facet-testhelpers",
+        "teamy-facet-testhelpers-macros"
+      ]
+    },
+    {
+      "name": "teamy-facet-value",
+      "version": "0.50.0-rc.9",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-vox-proto",
+        "teamy-facet-value"
+      ]
+    },
+    {
+      "name": "teamy-figue",
+      "version": "6.0.0-rc.5",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-vox-xtask",
+        "teamy-figue"
+      ]
+    },
+    {
+      "name": "teamy-figue-attrs",
+      "version": "6.0.0-rc.3",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-vox-xtask",
+        "teamy-figue",
+        "teamy-figue-attrs"
+      ]
+    },
+    {
+      "name": "teamy-phon",
+      "version": "0.2.0-rc.5",
+      "source": null,
+      "path_from_workspace": [
+        "teamy-vox-phon",
+        "teamy-phon"
+      ]
+    },
+    {
+      "name": "teamy-phon-codegen",
+      "version": "0.2.0-rc.5",
+      "source": null,
+      "path_from_workspace": [
+        "teamy-vox-codegen",
+        "teamy-phon-codegen"
+      ]
+    },
+    {
+      "name": "teamy-phon-engine",
+      "version": "0.2.0-rc.5",
+      "source": null,
+      "path_from_workspace": [
+        "teamy-vox-phon",
+        "teamy-phon-engine"
+      ]
+    },
+    {
+      "name": "teamy-phon-ir",
+      "version": "0.2.0-rc.5",
+      "source": null,
+      "path_from_workspace": [
+        "teamy-vox-phon",
+        "teamy-phon-ir"
+      ]
+    },
+    {
+      "name": "teamy-phon-jit",
+      "version": "0.2.0-rc.5",
+      "source": null,
+      "path_from_workspace": [
+        "teamy-vox-phon",
+        "teamy-phon-jit"
+      ]
+    },
+    {
+      "name": "teamy-phon-schema",
+      "version": "0.2.0-rc.5",
+      "source": null,
+      "path_from_workspace": [
+        "teamy-vox-phon",
+        "teamy-phon-schema"
+      ]
+    },
+    {
+      "name": "teamy-vox",
+      "version": "0.10.0-rc.7",
+      "source": null,
+      "path_from_workspace": [
+        "teamy-vox"
+      ]
+    },
+    {
+      "name": "teamy-vox-codegen",
+      "version": "0.10.0-rc.7",
+      "source": null,
+      "path_from_workspace": [
+        "teamy-vox-codegen"
+      ]
+    },
+    {
+      "name": "teamy-vox-core",
+      "version": "0.10.0-rc.7",
+      "source": null,
+      "path_from_workspace": [
+        "teamy-vox-core"
+      ]
+    },
+    {
+      "name": "teamy-vox-fdpass",
+      "version": "0.10.0-rc.7",
+      "source": null,
+      "path_from_workspace": [
+        "teamy-vox-fdpass"
+      ]
+    },
+    {
+      "name": "teamy-vox-ffi",
+      "version": "0.10.0-rc.7",
+      "source": null,
+      "path_from_workspace": [
+        "teamy-vox-ffi"
+      ]
+    },
+    {
+      "name": "teamy-vox-inprocess",
+      "version": "0.10.0-rc.7",
+      "source": null,
+      "path_from_workspace": [
+        "teamy-vox-inprocess"
+      ]
+    },
+    {
+      "name": "teamy-vox-iroh",
+      "version": "0.10.0-rc.5",
+      "source": null,
+      "path_from_workspace": [
+        "teamy-vox-iroh"
+      ]
+    },
+    {
+      "name": "teamy-vox-local",
+      "version": "0.10.0-rc.7",
+      "source": null,
+      "path_from_workspace": [
+        "teamy-vox-local"
+      ]
+    },
+    {
+      "name": "teamy-vox-macros-core",
+      "version": "0.10.0-rc.7",
+      "source": null,
+      "path_from_workspace": [
+        "teamy-vox-macros-core"
+      ]
+    },
+    {
+      "name": "teamy-vox-macros-parse",
+      "version": "0.10.0-rc.7",
+      "source": null,
+      "path_from_workspace": [
+        "teamy-vox-macros-parse"
+      ]
+    },
+    {
+      "name": "teamy-vox-phon",
+      "version": "0.10.0-rc.7",
+      "source": null,
+      "path_from_workspace": [
+        "teamy-vox-phon"
+      ]
+    },
+    {
+      "name": "teamy-vox-proto",
+      "version": "0.2.2",
+      "source": null,
+      "path_from_workspace": [
+        "teamy-vox-proto"
+      ]
+    },
+    {
+      "name": "teamy-vox-rt",
+      "version": "0.10.0-rc.7",
+      "source": null,
+      "path_from_workspace": [
+        "teamy-vox-rt"
+      ]
+    },
+    {
+      "name": "teamy-vox-rt-macros",
+      "version": "0.10.0-rc.7",
+      "source": null,
+      "path_from_workspace": [
+        "teamy-vox-rt-macros"
+      ]
+    },
+    {
+      "name": "teamy-vox-schema",
+      "version": "0.10.0-rc.7",
+      "source": null,
+      "path_from_workspace": [
+        "teamy-vox-schema"
+      ]
+    },
+    {
+      "name": "teamy-vox-service-macros",
+      "version": "0.10.0-rc.7",
+      "source": null,
+      "path_from_workspace": [
+        "teamy-vox-service-macros"
+      ]
+    },
+    {
+      "name": "teamy-vox-stream",
+      "version": "0.10.0-rc.7",
+      "source": null,
+      "path_from_workspace": [
+        "teamy-vox-stream"
+      ]
+    },
+    {
+      "name": "teamy-vox-types",
+      "version": "0.10.0-rc.7",
+      "source": null,
+      "path_from_workspace": [
+        "teamy-vox-types"
+      ]
+    },
+    {
+      "name": "teamy-vox-websocket",
+      "version": "0.10.0-rc.7",
+      "source": null,
+      "path_from_workspace": [
+        "teamy-vox-websocket"
+      ]
+    },
+    {
+      "name": "teamy-vox-xtask",
+      "version": "0.2.2",
+      "source": null,
+      "path_from_workspace": [
+        "teamy-vox-xtask"
+      ]
+    }
+  ],
+  "terminal": [
+    {
+      "name": "facet",
+      "version": "0.50.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "facet"
+      ]
+    },
+    {
+      "name": "facet",
+      "version": "0.50.0-rc.5",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "vox",
+        "facet"
+      ]
+    },
+    {
+      "name": "facet-core",
+      "version": "0.50.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "facet",
+        "facet-core"
+      ]
+    },
+    {
+      "name": "facet-core",
+      "version": "0.50.0-rc.5",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "vox",
+        "facet",
+        "facet-core"
+      ]
+    },
+    {
+      "name": "facet-csv",
+      "version": "0.50.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "path_from_workspace": [
+        "teamy-terminal-cli",
+        "facet-csv"
+      ]
+    },
+    {
+      "name": "facet-dessert",
+      "version": "0.50.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "facet-json",
+        "facet-format",
+        "facet-dessert"
+      ]
+    },
+    {
+      "name": "facet-dessert",
+      "version": "0.50.0-rc.5",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "vox",
+        "vox-types",
+        "facet-value",
+        "facet-format",
+        "facet-dessert"
+      ]
+    },
+    {
+      "name": "facet-error",
+      "version": "0.50.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "path_from_workspace": [
+        "teamy-terminal-cli",
+        "figue",
+        "facet-error"
+      ]
+    },
+    {
+      "name": "facet-format",
+      "version": "0.50.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "facet-json",
+        "facet-format"
+      ]
+    },
+    {
+      "name": "facet-format",
+      "version": "0.50.0-rc.5",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "vox",
+        "vox-types",
+        "facet-value",
+        "facet-format"
+      ]
+    },
+    {
+      "name": "facet-json",
+      "version": "0.50.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "facet-json"
+      ]
+    },
+    {
+      "name": "facet-macro-parse",
+      "version": "0.50.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "facet",
+        "facet-macros",
+        "facet-macros-impl",
+        "facet-macro-parse"
+      ]
+    },
+    {
+      "name": "facet-macro-parse",
+      "version": "0.50.0-rc.5",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "vox",
+        "facet",
+        "facet-macros",
+        "facet-macros-impl",
+        "facet-macro-parse"
+      ]
+    },
+    {
+      "name": "facet-macro-types",
+      "version": "0.50.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "facet",
+        "facet-macros",
+        "facet-macros-impl",
+        "facet-macro-types"
+      ]
+    },
+    {
+      "name": "facet-macro-types",
+      "version": "0.50.0-rc.5",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "vox",
+        "facet",
+        "facet-macros",
+        "facet-macros-impl",
+        "facet-macro-types"
+      ]
+    },
+    {
+      "name": "facet-macros",
+      "version": "0.50.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "facet",
+        "facet-macros"
+      ]
+    },
+    {
+      "name": "facet-macros",
+      "version": "0.50.0-rc.5",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "vox",
+        "facet",
+        "facet-macros"
+      ]
+    },
+    {
+      "name": "facet-macros-impl",
+      "version": "0.50.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "facet",
+        "facet-macros",
+        "facet-macros-impl"
+      ]
+    },
+    {
+      "name": "facet-macros-impl",
+      "version": "0.50.0-rc.5",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "vox",
+        "facet",
+        "facet-macros",
+        "facet-macros-impl"
+      ]
+    },
+    {
+      "name": "facet-path",
+      "version": "0.50.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "facet-json",
+        "facet-format",
+        "facet-path"
+      ]
+    },
+    {
+      "name": "facet-path",
+      "version": "0.50.0-rc.5",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "vox",
+        "facet-reflect",
+        "facet-path"
+      ]
+    },
+    {
+      "name": "facet-pretty",
+      "version": "0.50.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "path_from_workspace": [
+        "teamy-terminal-cli",
+        "facet-pretty"
+      ]
+    },
+    {
+      "name": "facet-pretty",
+      "version": "0.50.0-rc.5",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "vox",
+        "facet-pretty"
+      ]
+    },
+    {
+      "name": "facet-reflect",
+      "version": "0.50.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "facet-json",
+        "facet-reflect"
+      ]
+    },
+    {
+      "name": "facet-reflect",
+      "version": "0.50.0-rc.5",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "vox",
+        "facet-reflect"
+      ]
+    },
+    {
+      "name": "facet-solver",
+      "version": "0.50.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "facet-json",
+        "facet-format",
+        "facet-solver"
+      ]
+    },
+    {
+      "name": "facet-solver",
+      "version": "0.50.0-rc.5",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "vox",
+        "vox-types",
+        "facet-value",
+        "facet-format",
+        "facet-solver"
+      ]
+    },
+    {
+      "name": "facet-value",
+      "version": "0.50.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "path_from_workspace": [
+        "teamy-terminal-cli",
+        "spec-proto",
+        "facet-value"
+      ]
+    },
+    {
+      "name": "facet-value",
+      "version": "0.50.0-rc.5",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "vox",
+        "vox-types",
+        "facet-value"
+      ]
+    },
+    {
+      "name": "figue",
+      "version": "5.0.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "path_from_workspace": [
+        "teamy-terminal-cli",
+        "figue"
+      ]
+    },
+    {
+      "name": "figue-attrs",
+      "version": "5.0.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "path_from_workspace": [
+        "teamy-terminal-cli",
+        "figue",
+        "figue-attrs"
+      ]
+    },
+    {
+      "name": "phon",
+      "version": "0.2.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "path_from_workspace": [
+        "teamy-terminal-cli",
+        "vox",
+        "vox-phon",
+        "phon"
+      ]
+    },
+    {
+      "name": "phon",
+      "version": "0.2.0-rc.5",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "vox",
+        "vox-phon",
+        "phon"
+      ]
+    },
+    {
+      "name": "phon-engine",
+      "version": "0.2.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "path_from_workspace": [
+        "teamy-terminal-cli",
+        "vox",
+        "vox-phon",
+        "phon-engine"
+      ]
+    },
+    {
+      "name": "phon-engine",
+      "version": "0.2.0-rc.5",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "vox",
+        "vox-phon",
+        "phon-engine"
+      ]
+    },
+    {
+      "name": "phon-ir",
+      "version": "0.2.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "path_from_workspace": [
+        "teamy-terminal-cli",
+        "vox",
+        "vox-phon",
+        "phon-ir"
+      ]
+    },
+    {
+      "name": "phon-ir",
+      "version": "0.2.0-rc.5",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "vox",
+        "vox-phon",
+        "phon-ir"
+      ]
+    },
+    {
+      "name": "phon-jit",
+      "version": "0.2.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "path_from_workspace": [
+        "teamy-terminal-cli",
+        "vox",
+        "vox-phon",
+        "phon-jit"
+      ]
+    },
+    {
+      "name": "phon-jit",
+      "version": "0.2.0-rc.5",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "vox",
+        "vox-phon",
+        "phon-jit"
+      ]
+    },
+    {
+      "name": "phon-schema",
+      "version": "0.2.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "path_from_workspace": [
+        "teamy-terminal-cli",
+        "vox",
+        "vox-phon",
+        "phon-schema"
+      ]
+    },
+    {
+      "name": "phon-schema",
+      "version": "0.2.0-rc.5",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "vox",
+        "vox-phon",
+        "phon-schema"
+      ]
+    },
+    {
+      "name": "vox",
+      "version": "0.10.0-rc.0",
+      "source": "git+https://github.com/bearcove/vox.git?rev=2ca38f41c2d615e05c11347d6d6e781b3a3a178e#2ca38f41c2d615e05c11347d6d6e781b3a3a178e",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "vox"
+      ]
+    },
+    {
+      "name": "vox",
+      "version": "0.10.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "path_from_workspace": [
+        "teamy-terminal-cli",
+        "vox"
+      ]
+    },
+    {
+      "name": "vox-core",
+      "version": "0.10.0-rc.0",
+      "source": "git+https://github.com/bearcove/vox.git?rev=2ca38f41c2d615e05c11347d6d6e781b3a3a178e#2ca38f41c2d615e05c11347d6d6e781b3a3a178e",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "vox",
+        "vox-core"
+      ]
+    },
+    {
+      "name": "vox-core",
+      "version": "0.10.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "path_from_workspace": [
+        "teamy-terminal-cli",
+        "vox",
+        "vox-core"
+      ]
+    },
+    {
+      "name": "vox-macros-core",
+      "version": "0.10.0-rc.0",
+      "source": "git+https://github.com/bearcove/vox.git?rev=2ca38f41c2d615e05c11347d6d6e781b3a3a178e#2ca38f41c2d615e05c11347d6d6e781b3a3a178e",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "vox",
+        "vox-service-macros",
+        "vox-macros-core"
+      ]
+    },
+    {
+      "name": "vox-macros-core",
+      "version": "0.10.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "path_from_workspace": [
+        "teamy-terminal-cli",
+        "vox",
+        "vox-service-macros",
+        "vox-macros-core"
+      ]
+    },
+    {
+      "name": "vox-macros-parse",
+      "version": "0.10.0-rc.0",
+      "source": "git+https://github.com/bearcove/vox.git?rev=2ca38f41c2d615e05c11347d6d6e781b3a3a178e#2ca38f41c2d615e05c11347d6d6e781b3a3a178e",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "vox",
+        "vox-service-macros",
+        "vox-macros-core",
+        "vox-macros-parse"
+      ]
+    },
+    {
+      "name": "vox-macros-parse",
+      "version": "0.10.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "path_from_workspace": [
+        "teamy-terminal-cli",
+        "vox",
+        "vox-service-macros",
+        "vox-macros-core",
+        "vox-macros-parse"
+      ]
+    },
+    {
+      "name": "vox-phon",
+      "version": "0.10.0-rc.0",
+      "source": "git+https://github.com/bearcove/vox.git?rev=2ca38f41c2d615e05c11347d6d6e781b3a3a178e#2ca38f41c2d615e05c11347d6d6e781b3a3a178e",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "vox",
+        "vox-phon"
+      ]
+    },
+    {
+      "name": "vox-phon",
+      "version": "0.10.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "path_from_workspace": [
+        "teamy-terminal-cli",
+        "vox",
+        "vox-phon"
+      ]
+    },
+    {
+      "name": "vox-rt",
+      "version": "0.10.0-rc.0",
+      "source": "git+https://github.com/bearcove/vox.git?rev=2ca38f41c2d615e05c11347d6d6e781b3a3a178e#2ca38f41c2d615e05c11347d6d6e781b3a3a178e",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "vox",
+        "vox-rt"
+      ]
+    },
+    {
+      "name": "vox-rt",
+      "version": "0.10.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "path_from_workspace": [
+        "teamy-terminal-cli",
+        "vox",
+        "vox-rt"
+      ]
+    },
+    {
+      "name": "vox-rt-macros",
+      "version": "0.10.0-rc.0",
+      "source": "git+https://github.com/bearcove/vox.git?rev=2ca38f41c2d615e05c11347d6d6e781b3a3a178e#2ca38f41c2d615e05c11347d6d6e781b3a3a178e",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "vox",
+        "vox-rt",
+        "vox-rt-macros"
+      ]
+    },
+    {
+      "name": "vox-rt-macros",
+      "version": "0.10.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "path_from_workspace": [
+        "teamy-terminal-cli",
+        "vox",
+        "vox-rt",
+        "vox-rt-macros"
+      ]
+    },
+    {
+      "name": "vox-schema",
+      "version": "0.10.0-rc.0",
+      "source": "git+https://github.com/bearcove/vox.git?rev=2ca38f41c2d615e05c11347d6d6e781b3a3a178e#2ca38f41c2d615e05c11347d6d6e781b3a3a178e",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "vox",
+        "vox-types",
+        "vox-schema"
+      ]
+    },
+    {
+      "name": "vox-schema",
+      "version": "0.10.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "path_from_workspace": [
+        "teamy-terminal-cli",
+        "spec-proto",
+        "vox-schema"
+      ]
+    },
+    {
+      "name": "vox-service-macros",
+      "version": "0.10.0-rc.0",
+      "source": "git+https://github.com/bearcove/vox.git?rev=2ca38f41c2d615e05c11347d6d6e781b3a3a178e#2ca38f41c2d615e05c11347d6d6e781b3a3a178e",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "vox",
+        "vox-service-macros"
+      ]
+    },
+    {
+      "name": "vox-service-macros",
+      "version": "0.10.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "path_from_workspace": [
+        "teamy-terminal-cli",
+        "vox",
+        "vox-service-macros"
+      ]
+    },
+    {
+      "name": "vox-stream",
+      "version": "0.10.0-rc.0",
+      "source": "git+https://github.com/bearcove/vox.git?rev=2ca38f41c2d615e05c11347d6d6e781b3a3a178e#2ca38f41c2d615e05c11347d6d6e781b3a3a178e",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "vox",
+        "vox-stream"
+      ]
+    },
+    {
+      "name": "vox-stream",
+      "version": "0.10.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "path_from_workspace": [
+        "teamy-terminal-cli",
+        "vox",
+        "vox-stream"
+      ]
+    },
+    {
+      "name": "vox-types",
+      "version": "0.10.0-rc.0",
+      "source": "git+https://github.com/bearcove/vox.git?rev=2ca38f41c2d615e05c11347d6d6e781b3a3a178e#2ca38f41c2d615e05c11347d6d6e781b3a3a178e",
+      "path_from_workspace": [
+        "teamy-terminal-control",
+        "vox",
+        "vox-types"
+      ]
+    },
+    {
+      "name": "vox-types",
+      "version": "0.10.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "path_from_workspace": [
+        "teamy-terminal-cli",
+        "vox",
+        "vox-types"
+      ]
+    }
+  ],
+  "mover": [
+    {
+      "name": "facet",
+      "version": "0.50.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=23ad4dcd0#23ad4dcd034d123f0c38943305ffb077519040ce",
+      "path_from_workspace": [
+        "teamy-mover",
+        "facet"
+      ]
+    },
+    {
+      "name": "facet-core",
+      "version": "0.50.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=23ad4dcd0#23ad4dcd034d123f0c38943305ffb077519040ce",
+      "path_from_workspace": [
+        "teamy-mover",
+        "facet",
+        "facet-core"
+      ]
+    },
+    {
+      "name": "facet-csv",
+      "version": "0.50.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=23ad4dcd0#23ad4dcd034d123f0c38943305ffb077519040ce",
+      "path_from_workspace": [
+        "teamy-mover",
+        "facet-csv"
+      ]
+    },
+    {
+      "name": "facet-dessert",
+      "version": "0.50.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=23ad4dcd0#23ad4dcd034d123f0c38943305ffb077519040ce",
+      "path_from_workspace": [
+        "teamy-mover",
+        "facet-csv",
+        "facet-format",
+        "facet-dessert"
+      ]
+    },
+    {
+      "name": "facet-error",
+      "version": "0.50.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=23ad4dcd0#23ad4dcd034d123f0c38943305ffb077519040ce",
+      "path_from_workspace": [
+        "teamy-mover",
+        "figue",
+        "facet-error"
+      ]
+    },
+    {
+      "name": "facet-format",
+      "version": "0.50.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=23ad4dcd0#23ad4dcd034d123f0c38943305ffb077519040ce",
+      "path_from_workspace": [
+        "teamy-mover",
+        "facet-csv",
+        "facet-format"
+      ]
+    },
+    {
+      "name": "facet-json",
+      "version": "0.50.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=23ad4dcd0#23ad4dcd034d123f0c38943305ffb077519040ce",
+      "path_from_workspace": [
+        "teamy-mover",
+        "facet-json"
+      ]
+    },
+    {
+      "name": "facet-macro-parse",
+      "version": "0.50.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=23ad4dcd0#23ad4dcd034d123f0c38943305ffb077519040ce",
+      "path_from_workspace": [
+        "teamy-mover",
+        "facet",
+        "facet-macros",
+        "facet-macros-impl",
+        "facet-macro-parse"
+      ]
+    },
+    {
+      "name": "facet-macro-types",
+      "version": "0.50.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=23ad4dcd0#23ad4dcd034d123f0c38943305ffb077519040ce",
+      "path_from_workspace": [
+        "teamy-mover",
+        "facet",
+        "facet-macros",
+        "facet-macros-impl",
+        "facet-macro-types"
+      ]
+    },
+    {
+      "name": "facet-macros",
+      "version": "0.50.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=23ad4dcd0#23ad4dcd034d123f0c38943305ffb077519040ce",
+      "path_from_workspace": [
+        "teamy-mover",
+        "facet",
+        "facet-macros"
+      ]
+    },
+    {
+      "name": "facet-macros-impl",
+      "version": "0.50.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=23ad4dcd0#23ad4dcd034d123f0c38943305ffb077519040ce",
+      "path_from_workspace": [
+        "teamy-mover",
+        "facet",
+        "facet-macros",
+        "facet-macros-impl"
+      ]
+    },
+    {
+      "name": "facet-path",
+      "version": "0.50.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=23ad4dcd0#23ad4dcd034d123f0c38943305ffb077519040ce",
+      "path_from_workspace": [
+        "teamy-mover",
+        "facet-csv",
+        "facet-format",
+        "facet-path"
+      ]
+    },
+    {
+      "name": "facet-pretty",
+      "version": "0.50.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=23ad4dcd0#23ad4dcd034d123f0c38943305ffb077519040ce",
+      "path_from_workspace": [
+        "teamy-mover",
+        "facet-pretty"
+      ]
+    },
+    {
+      "name": "facet-reflect",
+      "version": "0.50.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=23ad4dcd0#23ad4dcd034d123f0c38943305ffb077519040ce",
+      "path_from_workspace": [
+        "teamy-mover",
+        "facet-csv",
+        "facet-reflect"
+      ]
+    },
+    {
+      "name": "facet-solver",
+      "version": "0.50.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=23ad4dcd0#23ad4dcd034d123f0c38943305ffb077519040ce",
+      "path_from_workspace": [
+        "teamy-mover",
+        "facet-csv",
+        "facet-format",
+        "facet-solver"
+      ]
+    },
+    {
+      "name": "figue",
+      "version": "5.0.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=23ad4dcd0#23ad4dcd034d123f0c38943305ffb077519040ce",
+      "path_from_workspace": [
+        "teamy-mover",
+        "figue"
+      ]
+    },
+    {
+      "name": "figue-attrs",
+      "version": "5.0.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=23ad4dcd0#23ad4dcd034d123f0c38943305ffb077519040ce",
+      "path_from_workspace": [
+        "teamy-mover",
+        "figue",
+        "figue-attrs"
+      ]
+    }
+  ],
+  "sfm_latest_lock": [
+    {
+      "name": "facet",
+      "version": "0.50.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "dependencies": [
+        "autocfg",
+        "facet-core",
+        "facet-macros"
+      ]
+    },
+    {
+      "name": "facet-core",
+      "version": "0.50.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "dependencies": [
+        "autocfg",
+        "camino",
+        "const-fnv1a-hash",
+        "iddqd",
+        "impls",
+        "indexmap",
+        "taxon"
+      ]
+    },
+    {
+      "name": "figue",
+      "version": "5.0.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "dependencies": [
+        "ariadne",
+        "camino",
+        "facet",
+        "facet-core",
+        "facet-error",
+        "facet-format",
+        "facet-json",
+        "facet-pretty",
+        "facet-reflect",
+        "figue-attrs",
+        "heck",
+        "indexmap",
+        "owo-colors",
+        "strip-ansi-escapes",
+        "strsim",
+        "supports-color 3.0.2",
+        "tracing",
+        "unicode-width"
+      ]
+    },
+    {
+      "name": "phon",
+      "version": "0.2.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "dependencies": [
+        "facet",
+        "facet-value",
+        "phon-engine",
+        "phon-ir",
+        "phon-jit",
+        "phon-schema"
+      ]
+    },
+    {
+      "name": "vox",
+      "version": "0.10.0-rc.5",
+      "source": "git+https://github.com/TeamDman/facet.git?rev=f2afdece6c79e64085d2f8c047e22fe16b2c8c54#f2afdece6c79e64085d2f8c047e22fe16b2c8c54",
+      "dependencies": [
+        "facet",
+        "facet-pretty",
+        "facet-reflect",
+        "tokio",
+        "tracing",
+        "vox-core",
+        "vox-phon",
+        "vox-rt",
+        "vox-service-macros",
+        "vox-stream",
+        "vox-types"
+      ]
+    }
+  ]
+}

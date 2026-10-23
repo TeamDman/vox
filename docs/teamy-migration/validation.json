@@ -1,0 +1,213 @@
+{
+  "observed_utc_date": "2026-10-23",
+  "tested_source_commit": "89fb51a009f10c9f85f40104ac783d8d8f27d478",
+  "toolchain": {
+    "rust": "1.96.0 (ac68faa20 2026-05-25)",
+    "java": "Eclipse Adoptium|21.0.8+9-LTS",
+    "java_target": 17,
+    "platform": "Linux x86_64"
+  },
+  "validation_image": {
+    "local_config_id": "sha256:9b0ae0d1367c43d657b107ed00b7f2f8f8e6b43f86e5614d95ee5610f3bd195c",
+    "rust_base_digest": "docker.io/library/rust@sha256:c993d32d95cc146bd12c84d66f0b924a6a96f3988325f39c144f2f9893dea120",
+    "jdk_base_digest": "docker.io/library/eclipse-temurin@sha256:7db733aadd907ea0a5168163d1f0df57e2f611cfa879836878e0872d4e6476dc",
+    "construction": "Rust 1.96 bookworm base plus COPY /opt/java/openjdk from the verified Temurin image into /opt/java; JAVA_HOME=/opt/java; prepend its bin to PATH"
+  },
+  "isolation": {
+    "rootless": true,
+    "host": "Windows Podman with WSL VM backend",
+    "network": "none for compilation and tests",
+    "read_only_root": true,
+    "cap_drop": "all",
+    "no_new_privileges": true,
+    "cpus": 2,
+    "memory_mib": 1536,
+    "pids_limit": 256,
+    "source": "read-only snapshot without .git, copied to bounded scratch",
+    "writable_mounts": [
+      "dedicated cargo cache",
+      "dedicated target cache",
+      "test output directory"
+    ],
+    "sensitive_mounts": [],
+    "cache_scope": "this migration, Rust 1.96, Linux x86_64, trusted dependencies only"
+  },
+  "checks": [
+    {
+      "check": "focused Rust check",
+      "command": "cargo check --offline --locked -p teamy-vox -p teamy-vox-codegen -p teamy-vox-xtask -p teamy-vox-proto",
+      "status": "passed",
+      "result_lines": [],
+      "log_sha256": "a0060298510c9c76c9a88d1da7d5cc63857bd48263fd5fa61a98e91131056608"
+    },
+    {
+      "check": "Java generation/runtime",
+      "command": "cargo run --offline --locked -p teamy-vox-xtask -- test-java",
+      "status": "passed",
+      "result_lines": [],
+      "log_sha256": "b9f31142e9dbc49253273f4370e4aea8a572463856528a1b450efffe553bb54d"
+    },
+    {
+      "check": "Rust core/types",
+      "command": "cargo test --offline --locked -p teamy-vox-core -p teamy-vox-types --lib",
+      "status": "passed",
+      "result_lines": [
+        "test result: ok. 88 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.75s",
+        "test result: ok. 103 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s"
+      ],
+      "log_sha256": "93e8e349a56806b0330838f80969a3f4be91893a09b49714b4dfb54772a44a46"
+    },
+    {
+      "check": "channel lifetimes",
+      "command": "cargo test --offline --locked -p teamy-vox --test channel_lifetime_tests",
+      "status": "passed",
+      "result_lines": [
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s"
+      ],
+      "log_sha256": "c70478202652b0db3ad9476ab4845de21a1bb01f133c76684ca05d19bce73ce5"
+    },
+    {
+      "check": "deterministic Java artifact",
+      "command": "VOX_JAVA_BUILD_JDK=\"Eclipse Adoptium|21.0.8+9-LTS\" cargo run --offline --locked -p teamy-vox-xtask -- package-java",
+      "status": "passed",
+      "result_lines": [],
+      "log_sha256": "b4177776b9976f9ed737d5aac0aec64651bc7be23ac7b757a2291b940cc799e1"
+    },
+    {
+      "check": "codegen unit tests",
+      "command": "cargo test --offline --locked -p teamy-vox-codegen --lib",
+      "status": "passed",
+      "result_lines": [
+        "test result: ok. 48 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.35s"
+      ],
+      "log_sha256": "a6c96e88da78202c24aff52ab734cb8e2768266219fbc7f898bd41149415d010"
+    },
+    {
+      "check": "Rust-Java wire",
+      "command": "cargo test --offline --locked -p spec-tests --test java_wire -- --test-threads=2",
+      "status": "passed",
+      "result_lines": [
+        "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.24s"
+      ],
+      "log_sha256": "52f5fc109e41b42fd79dff7bcc6f6ffa7daac8ebb70ad190ef2a6cb696b4bb09"
+    },
+    {
+      "check": "Phon conformance/schema/Taxon",
+      "command": "cargo test --offline --locked --manifest-path phon/Cargo.toml -p teamy-phon-conformance -p teamy-phon-schema -p teamy-taxon",
+      "status": "passed",
+      "result_lines": [
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+        "test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s",
+        "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "log_sha256": "99c2d173358931ffef70a5c7c7138a9b306f93c11c3477f247780b47a211fe48"
+    }
+  ],
+  "credit_characterization": {
+    "historical_4a_cases_passed": 19,
+    "e76_matches_historical_assertions": 15,
+    "e76_differences": 4,
+    "historical_runtime_suite": "passed",
+    "details": "credit-behavior.md"
+  },
+  "artifact": {
+    "filename": "teamy-vox-java-0.10.0-rc.7.jar",
+    "sha256": "6587629a7d484aab6ea90e1fb4ca4d27cb6eb638029da48d5a01cd99ead8bffe",
+    "published": false,
+    "same_build_reassembly_identical": true,
+    "fresh_consumer": "passed",
+    "jdeps_missing_dependencies": "none"
+  },
+  "dependency_resolution": {
+    "root_and_nested_locked_offline_metadata": "passed",
+    "facet_core_identities_per_graph": 1,
+    "official_facet_phon_vox_duplicates": false,
+    "taxon_boundary": [
+      {
+        "name": "taxon",
+        "version": "0.2.0-rc.5",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "features": []
+      },
+      {
+        "name": "teamy-facet-core",
+        "version": "0.50.0-rc.7",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "features": [
+          "alloc",
+          "camino",
+          "default",
+          "indexmap",
+          "std",
+          "taxon"
+        ]
+      },
+      {
+        "name": "teamy-taxon",
+        "version": "0.2.0-rc.5",
+        "source": null,
+        "features": []
+      }
+    ],
+    "local_non_publishable_packages": 36,
+    "lockfiles": {
+      "Cargo.lock": {
+        "sha256": "6e31e2ca672988316a09cf0c04e01b511d2a793dad491d271522f8cc09324551"
+      },
+      "phon/Cargo.lock": {
+        "sha256": "b2809621ad44fd35a5afa05588f7de032deba0aae59e7475a52c38e51ff5c845"
+      }
+    }
+  },
+  "source_integrity": {
+    "original_refs_unchanged": 3033,
+    "preexisting_dirty_files_unchanged": 122,
+    "original_worktree_heads_unchanged": true,
+    "byte_identical_to_e76": {
+      "java/runtime/": 30,
+      "java/subject/": 3,
+      "phon/rust/": 54,
+      "phon/java/": 20,
+      "phon/conformance/": 40,
+      "phon/docs/": 3,
+      "phon/typescript/": 32,
+      "phon/swift/": 56
+    },
+    "extracted_trees_authors_committers_messages_verified": {
+      "vox": 1602,
+      "phon": 327,
+      "older_credit": 1602
+    }
+  },
+  "failed_experiments": [
+    {
+      "candidate": "54599c25411952ff9c361083916280599d580cf0",
+      "check": "Java generated-source drift",
+      "status": "failed",
+      "reason": "newer upstream Phon/Taxon changes schema identities",
+      "disposition": "preserved on migration/upstream-phon-schema-audit; compatibility branch retains legacy identities"
+    },
+    {
+      "candidate": "intermediate compatibility tree",
+      "check": "Java Phon conformance corpus",
+      "status": "failed",
+      "reason": "newer corpus used changed schema identities",
+      "disposition": "restored matching legacy corpus, spec and TypeScript implementation; final Java gate passed"
+    }
+  ],
+  "unrun": [
+    "Full workspace/all-feature/all-platform test suite",
+    "Native Windows compilation and execution of the migrated graph",
+    "TypeScript pnpm check and runtime suites; Swift suites",
+    "Consumer SFM/teamy-terminal/teamy-mover builds against new pins (pins unchanged)",
+    "Tracey spec synchronization (required skill/MCP unavailable)",
+    "Malformed credit after local lane close (inspection only; follow-up test recommended)"
+  ],
+  "publication_boundary": "Migration branches only; no default/main/consumer merge, consumer pin change, crates/Maven publication or deployment"
+}

@@ -1,5 +1,6 @@
 [package]
-name = "phon-engine"
+publish = false
+name = "teamy-phon-engine"
 version = "0.2.0-rc.7"
 edition.workspace = true
 rust-version.workspace = true
@@ -20,3 +21,6 @@ weavy.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+
+[lib]
+name = "phon_engine"

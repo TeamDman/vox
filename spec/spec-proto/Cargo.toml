@@ -1,9 +1,9 @@
 [package]
-name = "spec-proto"
+publish = false
+name = "teamy-vox-proto"
 version = "0.2.2"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-publish = false
 description = "Service definitions used by the canonical vox compliance suite"
 
 [package.metadata]
@@ -14,8 +14,11 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 [dependencies]
 facet.workspace = true
 facet-value.workspace = true
-vox = { path = "../../rust/vox", version = "0.10.0-rc.7", default-features = false, features = ["runtime"] }
+vox = { package = "teamy-vox", path = "../../rust/vox", version = "=0.10.0-rc.7", default-features = false, features = ["runtime"] }
 vox-schema.workspace = true
 
 [dev-dependencies]
 vox-phon.workspace = true
+
+[lib]
+name = "spec_proto"

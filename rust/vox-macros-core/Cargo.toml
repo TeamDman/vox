@@ -1,5 +1,6 @@
 [package]
-name = "vox-macros-core"
+publish = false
+name = "teamy-vox-macros-core"
 version = "0.10.0-rc.7"
 edition.workspace = true
 rust-version.workspace = true
@@ -25,3 +26,6 @@ heck.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
+
+[lib]
+name = "vox_macros_core"

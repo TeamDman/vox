@@ -1,15 +1,15 @@
 [package]
-name = "vox-afl"
+publish = false
+name = "teamy-vox-afl"
 version = "0.1.0"
 edition = "2024"
-publish = false
 
 [dependencies]
 afl = "0.18"
-vox = { path = "../../rust/vox" }
-vox-core = { path = "../../rust/vox-core" }
-vox-types = { path = "../../rust/vox-types" }
-spec-proto = { path = "../../spec/spec-proto" }
+vox = { package = "teamy-vox", path = "../../rust/vox" }
+vox-core = { package = "teamy-vox-core", path = "../../rust/vox-core" }
+vox-types = { package = "teamy-vox-types", path = "../../rust/vox-types" }
+spec-proto = { package = "teamy-vox-proto", path = "../../spec/spec-proto" }
 tokio = { version = "1", features = ["rt", "time", "macros"] }
 
 [[bin]]

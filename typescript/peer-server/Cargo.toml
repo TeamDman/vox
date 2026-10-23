@@ -1,9 +1,9 @@
 [package]
+publish = false
 name = "peer-server"
 version = "0.2.2"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-publish = false
 description = "Rust WebSocket server for testing TypeScript clients"
 
 [package.metadata]

@@ -1,5 +1,6 @@
 [package]
-name = "phon-jit"
+publish = false
+name = "teamy-phon-jit"
 version = "0.2.0-rc.7"
 edition.workspace = true
 rust-version.workspace = true
@@ -20,3 +21,6 @@ weavy.workspace = true
 [build-dependencies]
 # Build-time stencil extraction (compile_object, extract_stencil).
 copypatch = { workspace = true, features = ["build"] }
+
+[lib]
+name = "phon_jit"

@@ -1,5 +1,6 @@
 [package]
-name = "vox-types"
+publish = false
+name = "teamy-vox-types"
 version = "0.10.0-rc.7"
 edition.workspace = true
 rust-version.workspace = true
@@ -41,3 +42,6 @@ tokio.workspace = true
 # runtime it builds); the workspace tokio enables neither. Without this the
 # whole `vox-types` test target failed to compile, so none of its tests ran.
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lib]
+name = "vox_types"

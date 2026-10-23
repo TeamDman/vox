@@ -633,14 +633,13 @@ fn java_source_roots(
     workspace_root: &std::path::Path,
     include_tests_and_fixture: bool,
 ) -> Result<Vec<std::path::PathBuf>, Box<dyn std::error::Error>> {
-    let facet_root = workspace_root.parent().expect("vox has repository parent");
     let mut roots = vec![
-        facet_root.join("phon/java/runtime/src/main/java"),
+        workspace_root.join("phon/java/runtime/src/main/java"),
         workspace_root.join("java/runtime/src/main/java"),
     ];
     if include_tests_and_fixture {
         roots.extend([
-            facet_root.join("phon/java/runtime/src/test/java"),
+            workspace_root.join("phon/java/runtime/src/test/java"),
             workspace_root.join("java/runtime/src/test/java"),
             workspace_root.join("java/generated/src/main/java"),
             workspace_root.join("java/subject/src/main/java"),
@@ -703,7 +702,6 @@ fn test_java(workspace_root: &std::path::Path) -> Result<(), Box<dyn std::error:
         &java_source_roots(workspace_root, true)?,
         None,
     )?;
-    let facet_root = workspace_root.parent().expect("vox has repository parent");
     for main_class in [
         "org.facet.phon.PhonConformanceTest",
         "org.facet.vox.tcp.StreamFramingTest",
@@ -713,7 +711,7 @@ fn test_java(workspace_root: &std::path::Path) -> Result<(), Box<dyn std::error:
         let mut command = std::process::Command::new(&java);
         command.arg("-ea").arg("-cp").arg(&classes).arg(main_class);
         if main_class == "org.facet.phon.PhonConformanceTest" {
-            command.arg(facet_root);
+            command.arg(workspace_root);
         }
         run_checked(&mut command, &format!("Java test {main_class}"))?;
     }
@@ -793,7 +791,7 @@ fn package_java(workspace_root: &std::path::Path) -> Result<(), Box<dyn std::err
         "Manifest-Version: 1.0\r\nAutomatic-Module-Name: org.facet.vox\r\nCreated-By: vox-xtask\r\n\r\n",
     )?;
     let version = vox_java_version(workspace_root)?;
-    let artifact = target.join(format!("vox-java-{version}.jar"));
+    let artifact = target.join(format!("teamy-vox-java-{version}.jar"));
     let class_files = collect_files(&classes, "class")?;
     let packaged_classes = class_files
         .iter()

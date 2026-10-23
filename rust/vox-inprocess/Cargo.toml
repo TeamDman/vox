@@ -1,5 +1,6 @@
 [package]
-name = "vox-inprocess"
+publish = false
+name = "teamy-vox-inprocess"
 version = "0.10.0-rc.7"
 edition.workspace = true
 rust-version.workspace = true
@@ -26,4 +27,5 @@ futures-channel.workspace = true
 futures-util = { workspace = true, features = ["sink"] }
 
 [lib]
+name = "vox_inprocess"
 crate-type = ["cdylib", "rlib"]

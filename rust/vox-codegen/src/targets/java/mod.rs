@@ -2153,7 +2153,7 @@ public final class ListRoundtrip {
         let java_wire_path = dir.join("java.phon");
         fs::write(&rust_wire_path, &rust_wire).expect("write Rust wire fixture");
 
-        let facet_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let facet_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let mut sources = collect_java_files(&facet_root.join("phon/java/runtime/src/main/java"));
         sources.extend(collect_java_files(&generated));
         sources.sort();

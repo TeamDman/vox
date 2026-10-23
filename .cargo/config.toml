@@ -1,2 +1,2 @@
 [alias]
-xtask = "run --package vox-xtask --"
+xtask = "run --package teamy-vox-xtask --"

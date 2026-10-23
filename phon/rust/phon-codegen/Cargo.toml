@@ -1,5 +1,6 @@
 [package]
-name = "phon-codegen"
+publish = false
+name = "teamy-phon-codegen"
 version = "0.2.0-rc.7"
 edition.workspace = true
 rust-version.workspace = true
@@ -16,3 +17,6 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 phon.workspace = true
 phon-schema.workspace = true
 facet.workspace = true
+
+[lib]
+name = "phon_codegen"

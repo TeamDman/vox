@@ -1,8 +1,8 @@
 [package]
-name = "vox-xtask"
+publish = false
+name = "teamy-vox-xtask"
 version = "0.2.2"
 edition = "2024"
-publish = false
 
 [package.metadata.docs.rs]
 rustdoc-args = ["--html-in-header", "arborium-header.html"]

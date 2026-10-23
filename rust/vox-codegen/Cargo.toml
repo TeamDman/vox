@@ -1,5 +1,6 @@
 [package]
-name = "vox-codegen"
+publish = false
+name = "teamy-vox-codegen"
 version = "0.10.0-rc.7"
 edition.workspace = true
 rust-version.workspace = true
@@ -33,4 +34,7 @@ phon-codegen.workspace = true
 [dev-dependencies]
 facet.workspace = true
 facet-value.workspace = true
-spec-proto = { path = "../../spec/spec-proto" }
+spec-proto = { package = "teamy-vox-proto", path = "../../spec/spec-proto" }
+
+[lib]
+name = "vox_codegen"

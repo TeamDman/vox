@@ -1,5 +1,6 @@
 [package]
-name = "vox"
+publish = false
+name = "teamy-vox"
 version = "0.10.0-rc.7"
 edition.workspace = true
 rust-version.workspace = true
@@ -54,7 +55,10 @@ rustls-pemfile = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
-vox-core = { path = "../vox-core" }
-vox-ffi = { path = "../vox-ffi" }
+vox-core = { package = "teamy-vox-core", path = "../vox-core" }
+vox-ffi = { package = "teamy-vox-ffi", path = "../vox-ffi" }
 tempfile.workspace = true
 tracing-subscriber.workspace = true
+
+[lib]
+name = "vox"

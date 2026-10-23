@@ -1,5 +1,6 @@
 [package]
-name = "vox-rt"
+publish = false
+name = "teamy-vox-rt"
 version = "0.10.0-rc.7"
 edition.workspace = true
 rust-version.workspace = true
@@ -31,3 +32,6 @@ wasm-bindgen.workspace = true
 wasm-bindgen-futures.workspace = true
 wasmtimer.workspace = true
 web-sys = { workspace = true, features = ["Window"] }
+
+[lib]
+name = "vox_rt"

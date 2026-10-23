@@ -1,5 +1,6 @@
 [package]
-name = "vox-stream"
+publish = false
+name = "teamy-vox-stream"
 version = "0.10.0-rc.7"
 edition.workspace = true
 rust-version.workspace = true
@@ -45,5 +46,8 @@ vox-fdpass.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tempfile.workspace = true
-vox-phon = { path = "../vox-phon" }
+vox-phon = { package = "teamy-vox-phon", path = "../vox-phon" }
 tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lib]
+name = "vox_stream"

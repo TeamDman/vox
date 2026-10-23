@@ -1,5 +1,6 @@
 [package]
-name = "vox-iroh"
+publish = false
+name = "teamy-vox-iroh"
 version = "0.10.0-rc.5"
 edition.workspace = true
 rust-version.workspace = true
@@ -47,3 +48,6 @@ tokio = { version = "1", default-features = false, features = ["io-util"] }
 iroh = { workspace = true, features = ["test-utils"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 tracing-subscriber.workspace = true
+
+[lib]
+name = "vox_iroh"

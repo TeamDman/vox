@@ -1,5 +1,6 @@
 [package]
-name = "vox-core"
+publish = false
+name = "teamy-vox-core"
 version = "0.10.0-rc.7"
 edition.workspace = true
 rust-version.workspace = true
@@ -41,3 +42,6 @@ wasm-bindgen-futures.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 facet-testhelpers.workspace = true
 tracing-subscriber = { workspace = true }
+
+[lib]
+name = "vox_core"

@@ -1,5 +1,6 @@
 [package]
-name = "vox-macros-parse"
+publish = false
+name = "teamy-vox-macros-parse"
 version = "0.10.0-rc.7"
 edition.workspace = true
 rust-version.workspace = true
@@ -20,3 +21,6 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 [dependencies]
 unsynn.workspace = true
 proc-macro2.workspace = true
+
+[lib]
+name = "vox_macros_parse"

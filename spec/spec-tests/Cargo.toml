@@ -1,9 +1,9 @@
 [package]
+publish = false
 name = "spec-tests"
 version = "0.2.2"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-publish = false
 description = "Compliance tests for the canonical vox spec in docs/content/"
 
 [dependencies]

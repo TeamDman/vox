@@ -1,5 +1,6 @@
 [package]
-name = "vox-ffi"
+publish = false
+name = "teamy-vox-ffi"
 version = "0.10.0-rc.7"
 edition.workspace = true
 rust-version.workspace = true
@@ -17,3 +18,6 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 [dependencies]
 vox-types.workspace = true
 tracing.workspace = true
+
+[lib]
+name = "vox_ffi"

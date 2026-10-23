@@ -1,5 +1,6 @@
 [package]
-name = "vox-websocket"
+publish = false
+name = "teamy-vox-websocket"
 version = "0.10.0-rc.7"
 edition.workspace = true
 rust-version.workspace = true
@@ -47,3 +48,6 @@ futures-util = { workspace = true, features = ["sink"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[lib]
+name = "vox_websocket"

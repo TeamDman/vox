@@ -23,17 +23,11 @@ The current runtime implements:
 
 ## Integration seam
 
-`VoxConnection.establishSelfDescribingHandshake` is deliberately fail-closed.
-It must be replaced during integration by the normative self-describing Phon
-connection handshake using the Java schemas/adapters from the Phon track.
-After that, the same driver must encode/decode the generated canonical
-`ConnectionMessage` schema and turn its queued `CallCommand`, `CancelCommand`,
-and `CloseLaneCommand` values into the corresponding protocol messages.
-
-Until those generated schemas exist, the hosted subject announces a listening
-address when required by the harness but never claims that a Vox connection is
-usable. It exits on the explicit handshake failure and cannot strand a
-non-daemon executor.
+`VoxConnection.establishSelfDescribingHandshake` exchanges the generated Phon
+handshake schema, validates peer connection settings, and binds the peer's
+message schema before driving application calls. The checked-in generated
+handshake/message schemas and terminal bindings are verified by `test-java`.
+The standalone repository includes the owned Phon Java runtime under `phon/java`.
 
 `WireConstants` is the one temporary hand-written projection of Rust protocol
 constants. The generator integration replaces it with a generated source file;
@@ -46,8 +40,8 @@ runtime; the temporary test-only `PhonAdapter` fixture has been removed. The
 repository tasks discover JDK tools through `JAVA_HOME` and then `PATH`:
 
 ```console
-cargo run -p vox-xtask -- test-java
-cargo run -p vox-xtask -- package-java
+cargo run --locked -p teamy-vox-xtask -- test-java
+cargo run --locked -p teamy-vox-xtask -- package-java
 ```
 
 `test-java` checks generated-source drift, compiles main, generated, test, and
@@ -55,11 +49,17 @@ subject sources with `javac --release 17 -Xlint:all -Werror`, and runs the Phon
 conformance and focused Vox tests. `package-java` repeats that gate, builds only
 the Phon and Vox runtime classes plus the generated `Terminal*` service
 bindings, and writes
-`vox/java/target/vox-java-<version>.jar`. It assembles the JAR twice to verify
+`java/target/teamy-vox-java-<version>.jar`. It assembles the JAR twice to verify
 byte-for-byte reproducibility, compiles and runs a fresh Java consumer against
 the artifact (including a generated terminal request), and rejects unresolved
 non-JDK dependencies with `jdeps`. Generated testbed/application bindings are
 intentionally excluded from the runtime artifact.
+
+For reproducible SDK selection, set `VOX_JAVA_BUILD_JDK` to
+`Eclipse Adoptium|21.0.8+9-LTS` and set `JAVA_HOME` to that JDK. Java package and
+module names remain unchanged. This migration does not publish the artifact or
+replace SFM's existing source-build lock; see the
+[migration evidence](../docs/teamy-migration/README.md).
 
 `GeneratedResponseIntegrationTest` additionally proves that complete
 `Result<T, VoxError<E>>` response bytes round-trip without a private outer tag.

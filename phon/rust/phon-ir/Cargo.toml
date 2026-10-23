@@ -1,5 +1,6 @@
 [package]
-name = "phon-ir"
+publish = false
+name = "teamy-phon-ir"
 version = "0.2.0-rc.7"
 edition.workspace = true
 rust-version.workspace = true
@@ -15,3 +16,6 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 [dependencies]
 phon-schema.workspace = true
 weavy.workspace = true
+
+[lib]
+name = "phon_ir"

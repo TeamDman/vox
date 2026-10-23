@@ -1,8 +1,8 @@
 [package]
+publish = false
 name = "wasm-inprocess-tests"
 version.workspace = true
 edition.workspace = true
-publish = false
 
 [lib]
 crate-type = ["cdylib"]

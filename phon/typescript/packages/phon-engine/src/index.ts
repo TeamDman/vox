@@ -15,16 +15,7 @@
 export const PHON_ENGINE_PACKAGE = "@bearcove/phon-engine";
 
 // Compact schema-driven codec.
-export {
-  encode,
-  decode as decodeCompact,
-  encodeRef,
-  decodeRef,
-  decodePrimitive,
-  product,
-  checkFixedCount,
-  MissingSemanticHandler,
-} from "./compact.ts";
+export { encode, decode as decodeCompact, encodeRef, decodeRef, decodePrimitive, product, checkFixedCount } from "./compact.ts";
 
 // Compatibility planning + interpreter.
 export {

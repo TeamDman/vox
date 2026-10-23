@@ -53,7 +53,7 @@ import type {
   Variant,
   VariantPayload,
 } from "@bearcove/phon-schema";
-import { checkFixedCount, decodeRef, encode, MissingSemanticHandler, product } from "./compact.ts";
+import { checkFixedCount, decodeRef, encode, product } from "./compact.ts";
 import { MESSAGE_MAX_DEPTH } from "./limits.ts";
 import { buildPlan, WriterOnlyVariantError } from "./plan.ts";
 import type { Node, Payload, Plan, StructPlan } from "./plan.ts";
@@ -716,8 +716,6 @@ class TypedEncodeCodegen {
         return this.genEnum(kind, vexpr, depth);
       case "dynamic":
         return `H.writeValueInto(out, ${vexpr});\n`;
-      case "semantic":
-        throw new MissingSemanticHandler(kind.name);
       case "tensor":
       case "channel":
       case "external":
@@ -898,8 +896,6 @@ function valueToTyped(v: Value, kind: SchemaKind, reg: Registry): Typed {
       return v === null ? null : valueToTypedRef(v, kind.element, reg);
     case "dynamic":
       return v; // inherently untyped — keep the coarse Value
-    case "semantic":
-      throw new MissingSemanticHandler(kind.name);
     case "tensor":
     case "channel":
     case "external":
@@ -1049,8 +1045,6 @@ function typedToValue(t: Typed, kind: SchemaKind, reg: Registry): Value {
       return t === null ? null : typedToValueRef(t, kind.element, reg);
     case "dynamic":
       return t as Value;
-    case "semantic":
-      throw new MissingSemanticHandler(kind.name);
     case "tensor":
     case "channel":
     case "external":

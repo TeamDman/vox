@@ -13,8 +13,7 @@ use std::fs;
 
 use phon_conformance::{cases, cases_dir, resolve_case, value_cases, values_dir};
 use phon_schema::{
-    DecodeLimits, Schema, resolve_ids, schema_from_bytes, schema_to_bytes, value_from_bytes,
-    value_to_bytes,
+    Schema, resolve_ids, schema_from_bytes, schema_to_bytes, value_from_bytes, value_to_bytes,
 };
 
 #[test]
@@ -44,7 +43,7 @@ fn corpus_is_golden_and_self_consistent() {
             );
 
             // round-trip: committed bytes decode to the expected schema and back.
-            let (decoded, _) = schema_from_bytes(&committed, DecodeLimits::DEFAULT)
+            let decoded = schema_from_bytes(&committed)
                 .unwrap_or_else(|e| panic!("{}/{}: decode failed: {e}", case.name, ls.label));
             assert_eq!(
                 decoded, ls.schema,

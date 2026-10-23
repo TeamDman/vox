@@ -26,7 +26,6 @@ use facet_value::{
     ValueType,
 };
 
-use crate::QualifiedName;
 use crate::bytes::{
     DecodeError, Reader, Sink, write_bool, write_bytes, write_f64, write_i64, write_i128,
     write_str, write_u8, write_u32, write_u64, write_u128,
@@ -88,90 +87,22 @@ pub fn schema_to_bytes(schema: &Schema) -> Vec<u8> {
     out
 }
 
-/// Compare a schema's canonical self-describing encoding with existing bytes
-/// without allocating an encoded copy.
-#[must_use]
-pub fn schema_matches_bytes(schema: &Schema, bytes: &[u8]) -> bool {
-    let mut comparison = ComparisonSink::new(bytes);
-    enc_schema(&mut comparison, schema);
-    comparison.matches()
-}
-
-struct ComparisonSink<'a> {
-    expected: &'a [u8],
-    consumed: usize,
-    equal: bool,
-}
-
-impl<'a> ComparisonSink<'a> {
-    const fn new(expected: &'a [u8]) -> Self {
-        Self {
-            expected,
-            consumed: 0,
-            equal: true,
-        }
-    }
-
-    fn matches(&self) -> bool {
-        self.equal && self.consumed == self.expected.len()
-    }
-}
-
-impl Sink for ComparisonSink<'_> {
-    fn put(&mut self, bytes: &[u8]) {
-        let Some(end) = self.consumed.checked_add(bytes.len()) else {
-            self.equal = false;
-            return;
-        };
-        if self.equal && self.expected.get(self.consumed..end) != Some(bytes) {
-            self.equal = false;
-        }
-        self.consumed = end;
-    }
-}
-
-/// Caller-selected allocation ceiling for one decoded schema.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DecodeLimits {
-    max_owned_bytes: usize,
-}
-
-impl DecodeLimits {
-    pub const DEFAULT: Self = Self {
-        max_owned_bytes: 16 * 1024 * 1024,
-    };
-
-    #[must_use]
-    pub const fn with_max_owned_bytes(mut self, max_owned_bytes: usize) -> Self {
-        self.max_owned_bytes = max_owned_bytes;
-        self
-    }
-}
-
-impl Default for DecodeLimits {
-    fn default() -> Self {
-        Self::DEFAULT
-    }
-}
-
 /// Decode a schema from self-describing bytes, rejecting trailing bytes.
 ///
 /// # Errors
-/// Returns a [`DecodeError`] for malformed input, allocation failure, an owned-byte
-/// limit violation, excessive nesting, invalid UTF-8, or trailing bytes.
+/// Returns a [`DecodeError`] for any malformed input — out-of-range tags,
+/// lengths beyond the buffer, excessive nesting, invalid UTF-8, or leftover
+/// bytes.
 // r[impl self-describing.bootstraps-schemas]
 // r[impl self-describing.tag-led]
 // r[impl decode.whole-message]
-pub fn schema_from_bytes(buf: &[u8], limits: DecodeLimits) -> Result<(Schema, usize), DecodeError> {
-    let mut decoder = SchemaDecoder {
-        reader: Reader::new(buf),
-        budget: OwnedBudget::new(limits.max_owned_bytes),
-    };
-    let schema = decoder.schema(0)?;
-    if decoder.reader.remaining() != 0 {
-        return Err(DecodeError::TrailingBytes(decoder.reader.remaining()));
+pub fn schema_from_bytes(buf: &[u8]) -> Result<Schema, DecodeError> {
+    let mut r = Reader::new(buf);
+    let schema = dec_schema(&mut r, 0)?;
+    if r.remaining() != 0 {
+        return Err(DecodeError::TrailingBytes(r.remaining()));
     }
-    Ok((schema, decoder.budget.used))
+    Ok(schema)
 }
 
 // ============================================================================
@@ -346,20 +277,6 @@ fn enc_kind<S: Sink>(out: &mut S, k: &SchemaKind) {
                 }
             }
         }
-        SchemaKind::Semantic {
-            name,
-            args,
-            representation,
-        } => {
-            write_str(out, "Semantic");
-            st(out, "Semantic", 3);
-            write_str(out, "name");
-            v_str(out, name.as_str());
-            write_str(out, "args");
-            enc_ref_list(out, args);
-            write_str(out, "representation");
-            enc_ref(out, representation);
-        }
     }
 }
 
@@ -482,407 +399,308 @@ fn expect(r: &mut Reader, t: u8, what: &'static str) -> Result<(), DecodeError> 
     }
 }
 
-struct OwnedBudget {
-    configured: usize,
-    used: usize,
+fn d_u32(r: &mut Reader) -> Result<u32, DecodeError> {
+    expect(r, tag::U32, "u32")?;
+    r.read_u32()
 }
 
-impl OwnedBudget {
-    const fn new(configured: usize) -> Self {
-        Self {
-            configured,
-            used: 0,
-        }
-    }
+fn d_u64(r: &mut Reader) -> Result<u64, DecodeError> {
+    expect(r, tag::U64, "u64")?;
+    r.read_u64()
+}
 
-    fn charge(&mut self, bytes: usize) -> Result<(), DecodeError> {
-        let attempted =
-            self.used
-                .checked_add(bytes)
-                .ok_or(DecodeError::OwnedBytesLimitExceeded {
-                    configured: self.configured,
-                    attempted: usize::MAX,
-                })?;
-        if attempted > self.configured {
-            return Err(DecodeError::OwnedBytesLimitExceeded {
-                configured: self.configured,
-                attempted,
-            });
+fn d_bool(r: &mut Reader) -> Result<bool, DecodeError> {
+    expect(r, tag::BOOL, "bool")?;
+    r.read_bool()
+}
+
+fn d_str(r: &mut Reader) -> Result<String, DecodeError> {
+    expect(r, tag::STRING, "string")?;
+    Ok(r.read_str()?.to_string())
+}
+
+fn d_unit(r: &mut Reader) -> Result<(), DecodeError> {
+    expect(r, tag::UNIT, "unit")
+}
+
+/// Read a struct header (tag, name, field count), verifying the field count.
+fn st_begin(r: &mut Reader, fields: u32) -> Result<(), DecodeError> {
+    expect(r, tag::STRUCT, "struct")?;
+    r.read_str()?; // struct name (informational)
+    if r.read_u32()? != fields {
+        return Err(DecodeError::Malformed("struct field count"));
+    }
+    Ok(())
+}
+
+/// Read and discard a struct field's name (fields are positional here).
+fn fname(r: &mut Reader) -> Result<(), DecodeError> {
+    r.read_str()?;
+    Ok(())
+}
+
+/// Read a list header, returning the element count (bounded by the buffer).
+fn list_len(r: &mut Reader) -> Result<usize, DecodeError> {
+    expect(r, tag::LIST, "list")?;
+    r.read_len(1)
+}
+
+// ============================================================================
+// Decoding — schema
+// ============================================================================
+
+// r[impl validate.depth]
+fn dec_schema(r: &mut Reader, depth: usize) -> Result<Schema, DecodeError> {
+    check_depth(depth)?;
+    st_begin(r, 3)?;
+    fname(r)?;
+    let id = SchemaId::from_raw(d_u64(r)?);
+    fname(r)?;
+    let n = list_len(r)?;
+    let mut type_params = Vec::with_capacity(n);
+    for _ in 0..n {
+        type_params.push(d_str(r)?);
+    }
+    fname(r)?;
+    let kind = dec_kind(r, depth + 1)?;
+    Ok(Schema {
+        id,
+        type_params,
+        kind,
+    })
+}
+
+fn dec_kind(r: &mut Reader, depth: usize) -> Result<SchemaKind, DecodeError> {
+    check_depth(depth)?;
+    expect(r, tag::ENUM, "enum")?;
+    let variant = r.read_str()?.to_string();
+    Ok(match variant.as_str() {
+        "Primitive" => SchemaKind::Primitive(dec_primitive(r)?),
+        "Struct" => {
+            st_begin(r, 2)?;
+            fname(r)?;
+            let name = d_str(r)?;
+            fname(r)?;
+            let fields = dec_field_list(r, depth + 1)?;
+            SchemaKind::Struct { name, fields }
         }
-        self.used = attempted;
-        Ok(())
+        "Enum" => {
+            st_begin(r, 2)?;
+            fname(r)?;
+            let name = d_str(r)?;
+            fname(r)?;
+            let count = list_len(r)?;
+            let mut variants = Vec::with_capacity(count);
+            for _ in 0..count {
+                variants.push(dec_variant(r, depth + 1)?);
+            }
+            SchemaKind::Enum { name, variants }
+        }
+        "Tuple" => {
+            st_begin(r, 1)?;
+            fname(r)?;
+            SchemaKind::Tuple {
+                elements: dec_ref_list(r, depth + 1)?,
+            }
+        }
+        "List" => {
+            st_begin(r, 1)?;
+            fname(r)?;
+            SchemaKind::List {
+                element: dec_ref(r, depth + 1)?,
+            }
+        }
+        "Set" => {
+            st_begin(r, 1)?;
+            fname(r)?;
+            SchemaKind::Set {
+                element: dec_ref(r, depth + 1)?,
+            }
+        }
+        "Option" => {
+            st_begin(r, 1)?;
+            fname(r)?;
+            SchemaKind::Option {
+                element: dec_ref(r, depth + 1)?,
+            }
+        }
+        "Map" => {
+            st_begin(r, 2)?;
+            fname(r)?;
+            let key = dec_ref(r, depth + 1)?;
+            fname(r)?;
+            let value = dec_ref(r, depth + 1)?;
+            SchemaKind::Map { key, value }
+        }
+        "Array" => {
+            st_begin(r, 2)?;
+            fname(r)?;
+            let element = dec_ref(r, depth + 1)?;
+            fname(r)?;
+            let count = list_len(r)?;
+            let mut dimensions = Vec::with_capacity(count);
+            for _ in 0..count {
+                dimensions.push(d_u64(r)?);
+            }
+            SchemaKind::Array {
+                element,
+                dimensions,
+            }
+        }
+        "Tensor" => {
+            st_begin(r, 2)?;
+            fname(r)?;
+            let element = dec_ref(r, depth + 1)?;
+            fname(r)?;
+            let rank = match r.read_u8()? {
+                tag::OPTION_NONE => None,
+                tag::OPTION_SOME => Some(d_u32(r)?),
+                got => {
+                    return Err(DecodeError::UnexpectedTag {
+                        expected: "option",
+                        got,
+                    });
+                }
+            };
+            SchemaKind::Tensor { element, rank }
+        }
+        "Channel" => {
+            st_begin(r, 2)?;
+            fname(r)?;
+            let direction = dec_direction(r)?;
+            fname(r)?;
+            let element = dec_ref(r, depth + 1)?;
+            SchemaKind::Channel { direction, element }
+        }
+        "Dynamic" => {
+            d_unit(r)?;
+            SchemaKind::Dynamic
+        }
+        "External" => {
+            st_begin(r, 2)?;
+            fname(r)?;
+            let kind = d_str(r)?;
+            fname(r)?;
+            let metadata = match r.read_u8()? {
+                tag::OPTION_NONE => None,
+                tag::OPTION_SOME => Some(dec_ref(r, depth + 1)?),
+                got => {
+                    return Err(DecodeError::UnexpectedTag {
+                        expected: "option",
+                        got,
+                    });
+                }
+            };
+            SchemaKind::External { kind, metadata }
+        }
+        _ => return Err(DecodeError::UnknownVariant(variant)),
+    })
+}
+
+fn dec_primitive(r: &mut Reader) -> Result<Primitive, DecodeError> {
+    expect(r, tag::ENUM, "enum")?;
+    let name = r.read_str()?.to_string();
+    d_unit(r)?;
+    Primitive::from_tag(&name).ok_or(DecodeError::UnknownVariant(name))
+}
+
+fn dec_direction(r: &mut Reader) -> Result<ChannelDirection, DecodeError> {
+    expect(r, tag::ENUM, "enum")?;
+    let name = r.read_str()?.to_string();
+    d_unit(r)?;
+    match name.as_str() {
+        "tx" => Ok(ChannelDirection::Tx),
+        "rx" => Ok(ChannelDirection::Rx),
+        _ => Err(DecodeError::UnknownVariant(name)),
     }
 }
 
-struct SchemaDecoder<'a> {
-    reader: Reader<'a>,
-    budget: OwnedBudget,
+fn dec_ref(r: &mut Reader, depth: usize) -> Result<SchemaRef, DecodeError> {
+    check_depth(depth)?;
+    expect(r, tag::ENUM, "enum")?;
+    let variant = r.read_str()?.to_string();
+    match variant.as_str() {
+        "Concrete" => {
+            st_begin(r, 2)?;
+            fname(r)?;
+            let id = SchemaId::from_raw(d_u64(r)?);
+            fname(r)?;
+            let args = dec_ref_list(r, depth + 1)?;
+            Ok(SchemaRef::Concrete { id, args })
+        }
+        "Var" => {
+            st_begin(r, 1)?;
+            fname(r)?;
+            Ok(SchemaRef::Var { name: d_str(r)? })
+        }
+        _ => Err(DecodeError::UnknownVariant(variant)),
+    }
 }
 
-impl SchemaDecoder<'_> {
-    fn reserve<T>(&mut self, count: usize) -> Result<Vec<T>, DecodeError> {
-        self.budget
-            .charge(count.checked_mul(core::mem::size_of::<T>()).ok_or(
-                DecodeError::OwnedBytesLimitExceeded {
-                    configured: self.budget.configured,
-                    attempted: usize::MAX,
-                },
-            )?)?;
-        let mut values = Vec::new();
-        values
-            .try_reserve_exact(count)
-            .map_err(|_| DecodeError::AllocationFailed)?;
-        Ok(values)
-    }
+fn dec_field(r: &mut Reader, depth: usize) -> Result<Field, DecodeError> {
+    check_depth(depth)?;
+    st_begin(r, 3)?;
+    fname(r)?;
+    let name = d_str(r)?;
+    fname(r)?;
+    let schema = dec_ref(r, depth + 1)?;
+    fname(r)?;
+    let required = d_bool(r)?;
+    Ok(Field {
+        name,
+        schema,
+        required,
+    })
+}
 
-    fn string(&mut self) -> Result<String, DecodeError> {
-        expect(&mut self.reader, tag::STRING, "string")?;
-        let value = self.reader.read_str()?;
-        self.copy_str(value)
-    }
+fn dec_variant(r: &mut Reader, depth: usize) -> Result<Variant, DecodeError> {
+    check_depth(depth)?;
+    st_begin(r, 3)?;
+    fname(r)?;
+    let name = d_str(r)?;
+    fname(r)?;
+    let index = d_u32(r)?;
+    fname(r)?;
+    let payload = dec_variant_payload(r, depth + 1)?;
+    Ok(Variant {
+        name,
+        index,
+        payload,
+    })
+}
 
-    fn copy_str(&mut self, value: &str) -> Result<String, DecodeError> {
-        self.budget.charge(value.len())?;
-        let mut owned = String::new();
-        owned
-            .try_reserve_exact(value.len())
-            .map_err(|_| DecodeError::AllocationFailed)?;
-        owned.push_str(value);
-        Ok(owned)
-    }
-
-    fn u32(&mut self) -> Result<u32, DecodeError> {
-        expect(&mut self.reader, tag::U32, "u32")?;
-        self.reader.read_u32()
-    }
-
-    fn u64(&mut self) -> Result<u64, DecodeError> {
-        expect(&mut self.reader, tag::U64, "u64")?;
-        self.reader.read_u64()
-    }
-
-    fn boolean(&mut self) -> Result<bool, DecodeError> {
-        expect(&mut self.reader, tag::BOOL, "bool")?;
-        self.reader.read_bool()
-    }
-
-    fn unit(&mut self) -> Result<(), DecodeError> {
-        expect(&mut self.reader, tag::UNIT, "unit")
-    }
-    fn struct_begin_named(&mut self, name: &'static str, fields: u32) -> Result<(), DecodeError> {
-        expect(&mut self.reader, tag::STRUCT, "struct")?;
-        if self.reader.read_str()? != name {
-            return Err(DecodeError::Malformed("struct name"));
+fn dec_variant_payload(r: &mut Reader, depth: usize) -> Result<VariantPayload, DecodeError> {
+    check_depth(depth)?;
+    expect(r, tag::ENUM, "enum")?;
+    let variant = r.read_str()?.to_string();
+    match variant.as_str() {
+        "Unit" => {
+            d_unit(r)?;
+            Ok(VariantPayload::Unit)
         }
-        if self.reader.read_u32()? != fields {
-            return Err(DecodeError::Malformed("struct field count"));
-        }
-        Ok(())
+        "Newtype" => Ok(VariantPayload::Newtype(dec_ref(r, depth + 1)?)),
+        "Tuple" => Ok(VariantPayload::Tuple(dec_ref_list(r, depth + 1)?)),
+        "Struct" => Ok(VariantPayload::Struct(dec_field_list(r, depth + 1)?)),
+        _ => Err(DecodeError::UnknownVariant(variant)),
     }
+}
 
-    fn struct_begin(&mut self, fields: u32) -> Result<(), DecodeError> {
-        expect(&mut self.reader, tag::STRUCT, "struct")?;
-        self.reader.read_str()?;
-        if self.reader.read_u32()? != fields {
-            return Err(DecodeError::Malformed("struct field count"));
-        }
-        Ok(())
+fn dec_ref_list(r: &mut Reader, depth: usize) -> Result<Vec<SchemaRef>, DecodeError> {
+    let n = list_len(r)?;
+    let mut v = Vec::with_capacity(n);
+    for _ in 0..n {
+        v.push(dec_ref(r, depth + 1)?);
     }
+    Ok(v)
+}
 
-    fn field_name_exact(&mut self, expected: &'static str) -> Result<(), DecodeError> {
-        if self.reader.read_str()? != expected {
-            return Err(DecodeError::Malformed("struct field name"));
-        }
-        Ok(())
+fn dec_field_list(r: &mut Reader, depth: usize) -> Result<Vec<Field>, DecodeError> {
+    let n = list_len(r)?;
+    let mut v = Vec::with_capacity(n);
+    for _ in 0..n {
+        v.push(dec_field(r, depth + 1)?);
     }
-
-    fn field_name(&mut self) -> Result<(), DecodeError> {
-        self.reader.read_str()?;
-        Ok(())
-    }
-
-    fn qualified_name(&mut self) -> Result<QualifiedName, DecodeError> {
-        let name = self.string()?;
-        QualifiedName::try_from(name.as_str()).map_err(|_| DecodeError::Malformed("qualified name"))
-    }
-
-    fn list_len(&mut self) -> Result<usize, DecodeError> {
-        expect(&mut self.reader, tag::LIST, "list")?;
-        self.reader.read_len(1)
-    }
-
-    // r[impl validate.depth]
-    fn schema(&mut self, depth: usize) -> Result<Schema, DecodeError> {
-        check_depth(depth)?;
-        self.struct_begin_named("Schema", 3)?;
-        self.field_name_exact("id")?;
-        let id = SchemaId::from_raw(self.u64()?);
-        self.field_name_exact("type_params")?;
-        let count = self.list_len()?;
-        let mut type_params = self.reserve::<String>(count)?;
-        for _ in 0..count {
-            type_params.push(self.string()?);
-        }
-        self.field_name_exact("kind")?;
-        let kind = self.kind(depth + 1)?;
-        Ok(Schema {
-            id,
-            type_params,
-            kind,
-        })
-    }
-
-    fn kind(&mut self, depth: usize) -> Result<SchemaKind, DecodeError> {
-        check_depth(depth)?;
-        expect(&mut self.reader, tag::ENUM, "enum")?;
-        let variant = self.reader.read_str()?;
-        Ok(match variant {
-            "Primitive" => SchemaKind::Primitive(self.primitive()?),
-            "Struct" => {
-                self.struct_begin(2)?;
-                self.field_name()?;
-                let name = self.string()?;
-                self.field_name()?;
-                let fields = self.field_list(depth + 1)?;
-                SchemaKind::Struct { name, fields }
-            }
-            "Enum" => {
-                self.struct_begin(2)?;
-                self.field_name()?;
-                let name = self.string()?;
-                self.field_name()?;
-                let count = self.list_len()?;
-                let mut variants = self.reserve::<Variant>(count)?;
-                for _ in 0..count {
-                    variants.push(self.variant(depth + 1)?);
-                }
-                SchemaKind::Enum { name, variants }
-            }
-            "Tuple" => {
-                self.struct_begin(1)?;
-                self.field_name()?;
-                SchemaKind::Tuple {
-                    elements: self.ref_list(depth + 1)?,
-                }
-            }
-            "List" => {
-                self.struct_begin(1)?;
-                self.field_name()?;
-                SchemaKind::List {
-                    element: self.schema_ref(depth + 1)?,
-                }
-            }
-            "Set" => {
-                self.struct_begin(1)?;
-                self.field_name()?;
-                SchemaKind::Set {
-                    element: self.schema_ref(depth + 1)?,
-                }
-            }
-            "Option" => {
-                self.struct_begin(1)?;
-                self.field_name()?;
-                SchemaKind::Option {
-                    element: self.schema_ref(depth + 1)?,
-                }
-            }
-            "Map" => {
-                self.struct_begin(2)?;
-                self.field_name()?;
-                let key = self.schema_ref(depth + 1)?;
-                self.field_name()?;
-                let value = self.schema_ref(depth + 1)?;
-                SchemaKind::Map { key, value }
-            }
-            "Array" => {
-                self.struct_begin(2)?;
-                self.field_name()?;
-                let element = self.schema_ref(depth + 1)?;
-                self.field_name()?;
-                let count = self.list_len()?;
-                let mut dimensions = self.reserve::<u64>(count)?;
-                for _ in 0..count {
-                    dimensions.push(self.u64()?);
-                }
-                SchemaKind::Array {
-                    element,
-                    dimensions,
-                }
-            }
-            "Tensor" => {
-                self.struct_begin(2)?;
-                self.field_name()?;
-                let element = self.schema_ref(depth + 1)?;
-                self.field_name()?;
-                let rank = match self.reader.read_u8()? {
-                    tag::OPTION_NONE => None,
-                    tag::OPTION_SOME => Some(self.u32()?),
-                    got => {
-                        return Err(DecodeError::UnexpectedTag {
-                            expected: "option",
-                            got,
-                        });
-                    }
-                };
-                SchemaKind::Tensor { element, rank }
-            }
-            "Channel" => {
-                self.struct_begin(2)?;
-                self.field_name()?;
-                let direction = self.direction()?;
-                self.field_name()?;
-                let element = self.schema_ref(depth + 1)?;
-                SchemaKind::Channel { direction, element }
-            }
-            "Dynamic" => {
-                self.unit()?;
-                SchemaKind::Dynamic
-            }
-            "External" => {
-                self.struct_begin(2)?;
-                self.field_name()?;
-                let kind = self.string()?;
-                self.field_name()?;
-                let metadata = match self.reader.read_u8()? {
-                    tag::OPTION_NONE => None,
-                    tag::OPTION_SOME => Some(self.schema_ref(depth + 1)?),
-                    got => {
-                        return Err(DecodeError::UnexpectedTag {
-                            expected: "option",
-                            got,
-                        });
-                    }
-                };
-                SchemaKind::External { kind, metadata }
-            }
-            "Semantic" => {
-                self.struct_begin_named("Semantic", 3)?;
-                self.field_name_exact("name")?;
-                let name = self.qualified_name()?;
-                self.field_name_exact("args")?;
-                let args = self.ref_list(depth + 1)?;
-                self.field_name_exact("representation")?;
-                let representation = self.schema_ref(depth + 1)?;
-                SchemaKind::Semantic {
-                    name: name.into(),
-                    args,
-                    representation,
-                }
-            }
-            unknown => return Err(DecodeError::UnknownVariant(self.copy_str(unknown)?)),
-        })
-    }
-
-    fn primitive(&mut self) -> Result<Primitive, DecodeError> {
-        expect(&mut self.reader, tag::ENUM, "enum")?;
-        let name = self.reader.read_str()?;
-        self.unit()?;
-        match Primitive::from_tag(name) {
-            Some(primitive) => Ok(primitive),
-            None => Err(DecodeError::UnknownVariant(self.copy_str(name)?)),
-        }
-    }
-
-    fn direction(&mut self) -> Result<ChannelDirection, DecodeError> {
-        expect(&mut self.reader, tag::ENUM, "enum")?;
-        let name = self.reader.read_str()?;
-        self.unit()?;
-        match name {
-            "tx" => Ok(ChannelDirection::Tx),
-            "rx" => Ok(ChannelDirection::Rx),
-            unknown => Err(DecodeError::UnknownVariant(self.copy_str(unknown)?)),
-        }
-    }
-
-    fn schema_ref(&mut self, depth: usize) -> Result<SchemaRef, DecodeError> {
-        check_depth(depth)?;
-        expect(&mut self.reader, tag::ENUM, "enum")?;
-        let variant = self.reader.read_str()?;
-        match variant {
-            "Concrete" => {
-                self.struct_begin(2)?;
-                self.field_name()?;
-                let id = SchemaId::from_raw(self.u64()?);
-                self.field_name()?;
-                let args = self.ref_list(depth + 1)?;
-                Ok(SchemaRef::Concrete { id, args })
-            }
-            "Var" => {
-                self.struct_begin(1)?;
-                self.field_name()?;
-                Ok(SchemaRef::Var {
-                    name: self.string()?,
-                })
-            }
-            unknown => Err(DecodeError::UnknownVariant(self.copy_str(unknown)?)),
-        }
-    }
-
-    fn field(&mut self, depth: usize) -> Result<Field, DecodeError> {
-        check_depth(depth)?;
-        self.struct_begin(3)?;
-        self.field_name()?;
-        let name = self.string()?;
-        self.field_name()?;
-        let schema = self.schema_ref(depth + 1)?;
-        self.field_name()?;
-        let required = self.boolean()?;
-        Ok(Field {
-            name,
-            schema,
-            required,
-        })
-    }
-
-    fn variant(&mut self, depth: usize) -> Result<Variant, DecodeError> {
-        check_depth(depth)?;
-        self.struct_begin(3)?;
-        self.field_name()?;
-        let name = self.string()?;
-        self.field_name()?;
-        let index = self.u32()?;
-        self.field_name()?;
-        let payload = self.variant_payload(depth + 1)?;
-        Ok(Variant {
-            name,
-            index,
-            payload,
-        })
-    }
-
-    fn variant_payload(&mut self, depth: usize) -> Result<VariantPayload, DecodeError> {
-        check_depth(depth)?;
-        expect(&mut self.reader, tag::ENUM, "enum")?;
-        let variant = self.reader.read_str()?;
-        match variant {
-            "Unit" => {
-                self.unit()?;
-                Ok(VariantPayload::Unit)
-            }
-            "Newtype" => Ok(VariantPayload::Newtype(self.schema_ref(depth + 1)?)),
-            "Tuple" => Ok(VariantPayload::Tuple(self.ref_list(depth + 1)?)),
-            "Struct" => Ok(VariantPayload::Struct(self.field_list(depth + 1)?)),
-            unknown => Err(DecodeError::UnknownVariant(self.copy_str(unknown)?)),
-        }
-    }
-
-    fn ref_list(&mut self, depth: usize) -> Result<Vec<SchemaRef>, DecodeError> {
-        let count = self.list_len()?;
-        let mut refs = self.reserve::<SchemaRef>(count)?;
-        for _ in 0..count {
-            refs.push(self.schema_ref(depth + 1)?);
-        }
-        Ok(refs)
-    }
-
-    fn field_list(&mut self, depth: usize) -> Result<Vec<Field>, DecodeError> {
-        let count = self.list_len()?;
-        let mut fields = self.reserve::<Field>(count)?;
-        for _ in 0..count {
-            fields.push(self.field(depth + 1)?);
-        }
-        Ok(fields)
-    }
+    Ok(v)
 }
 
 // ============================================================================
@@ -1413,53 +1231,8 @@ mod tests {
 
     fn roundtrip(schema: &Schema) {
         let bytes = schema_to_bytes(schema);
-        let (back, _) = schema_from_bytes(&bytes, DecodeLimits::DEFAULT).expect("decode");
+        let back = schema_from_bytes(&bytes).expect("decode");
         assert_eq!(schema, &back);
-    }
-
-    #[test]
-    fn imported_taxon_identity_distinguishes_ordered_type_parameters() {
-        let generic_tuple = |type_params: &[&str]| Schema {
-            id: SchemaId::from_raw(1),
-            type_params: type_params.iter().map(|name| (*name).to_string()).collect(),
-            kind: SchemaKind::Tuple {
-                elements: vec![SchemaRef::var("T"), SchemaRef::var("U")],
-            },
-        };
-
-        let tu = crate::resolve_ids(vec![generic_tuple(&["T", "U"])])[0].id;
-        let ut = crate::resolve_ids(vec![generic_tuple(&["U", "T"])])[0].id;
-        assert_ne!(tu, ut);
-    }
-
-    #[test]
-    fn imported_taxon_identity_propagates_nested_cycle_parameter_changes() {
-        let cycle = |second_params: &[&str]| {
-            vec![
-                Schema {
-                    id: SchemaId::from_raw(10),
-                    type_params: vec!["T".to_string(), "U".to_string()],
-                    kind: SchemaKind::Tuple {
-                        elements: vec![SchemaRef::concrete(SchemaId::from_raw(20))],
-                    },
-                },
-                Schema {
-                    id: SchemaId::from_raw(20),
-                    type_params: second_params
-                        .iter()
-                        .map(|name| (*name).to_string())
-                        .collect(),
-                    kind: SchemaKind::Tuple {
-                        elements: vec![SchemaRef::concrete(SchemaId::from_raw(10))],
-                    },
-                },
-            ]
-        };
-
-        let canonical = crate::resolve_ids(cycle(&["T", "U"]));
-        let reordered = crate::resolve_ids(cycle(&["U", "T"]));
-        assert_ne!(canonical[0].id, reordered[0].id);
-        assert_ne!(canonical[1].id, reordered[1].id);
     }
 
     #[test]
@@ -1484,40 +1257,6 @@ mod tests {
                 ],
             },
         });
-    }
-
-    #[test]
-    fn roundtrip_semantic_schema_with_canonical_qualified_name() {
-        let schema = Schema {
-            id: SchemaId::from_raw(9),
-            type_params: vec!["T".to_string()],
-            kind: SchemaKind::Semantic {
-                name: QualifiedName::try_from("org.bearcove.phon.region-ref-v1")
-                    .unwrap()
-                    .into(),
-                args: vec![SchemaRef::var("T")],
-                representation: concrete(Primitive::U32),
-            },
-        };
-        roundtrip(&schema);
-    }
-
-    #[test]
-    fn semantic_schema_decoder_rejects_noncanonical_name_before_exposure() {
-        let schema = Schema {
-            id: SchemaId::from_raw(9),
-            type_params: Vec::new(),
-            kind: SchemaKind::Semantic {
-                name: taxon::SemanticName::try_from("Org.example").unwrap(),
-                args: Vec::new(),
-                representation: concrete(Primitive::U32),
-            },
-        };
-        let bytes = schema_to_bytes(&schema);
-        assert!(matches!(
-            schema_from_bytes(&bytes, DecodeLimits::DEFAULT),
-            Err(DecodeError::Malformed("qualified name"))
-        ));
     }
 
     #[test]
@@ -1649,51 +1388,6 @@ mod tests {
     }
 
     #[test]
-    fn explicit_owned_byte_limit_rejects_before_retaining_schema_data() {
-        let schema = Schema {
-            id: SchemaId::from_raw(1),
-            type_params: vec!["parameter".to_owned()],
-            kind: SchemaKind::Struct {
-                name: "Record".to_owned(),
-                fields: vec![Field {
-                    name: "field".to_owned(),
-                    schema: concrete(Primitive::String),
-                    required: true,
-                }],
-            },
-        };
-        let bytes = schema_to_bytes(&schema);
-
-        assert!(matches!(
-            schema_from_bytes(&bytes, DecodeLimits::DEFAULT.with_max_owned_bytes(0)),
-            Err(DecodeError::OwnedBytesLimitExceeded {
-                configured: 0,
-                attempted,
-            }) if attempted > 0
-        ));
-        assert_eq!(
-            schema_from_bytes(&bytes, DecodeLimits::DEFAULT)
-                .expect("bounded decode")
-                .0,
-            schema
-        );
-    }
-
-    #[test]
-    fn canonical_schema_comparison_uses_exact_encoded_bytes() {
-        let schema = Schema {
-            id: SchemaId::from_raw(1),
-            type_params: Vec::new(),
-            kind: SchemaKind::Dynamic,
-        };
-        let mut bytes = schema_to_bytes(&schema);
-        assert!(schema_matches_bytes(&schema, &bytes));
-        bytes[19..21].copy_from_slice(b"xx");
-        assert!(!schema_matches_bytes(&schema, &bytes));
-        assert!(!schema_matches_bytes(&schema, &bytes[..bytes.len() - 1]));
-    }
-
-    #[test]
     // r[verify decode.whole-message]
     fn rejects_trailing_bytes() {
         let mut bytes = schema_to_bytes(&Schema {
@@ -1703,7 +1397,7 @@ mod tests {
         });
         bytes.push(0x00);
         assert!(matches!(
-            schema_from_bytes(&bytes, DecodeLimits::DEFAULT),
+            schema_from_bytes(&bytes),
             Err(DecodeError::TrailingBytes(1))
         ));
     }
@@ -1717,7 +1411,7 @@ mod tests {
         });
         for n in 0..bytes.len() {
             assert!(
-                schema_from_bytes(&bytes[..n], DecodeLimits::DEFAULT).is_err(),
+                schema_from_bytes(&bytes[..n]).is_err(),
                 "truncation at {n} should fail"
             );
         }
@@ -1733,7 +1427,7 @@ mod tests {
             kind: SchemaKind::Dynamic,
         });
         bytes[0] = 0x7F;
-        assert!(schema_from_bytes(&bytes, DecodeLimits::DEFAULT).is_err());
+        assert!(schema_from_bytes(&bytes).is_err());
     }
 
     #[test]
@@ -1745,7 +1439,7 @@ mod tests {
         write_str(&mut bytes, "Schema");
         write_u32(&mut bytes, u32::MAX); // absurd field count
         assert!(matches!(
-            schema_from_bytes(&bytes, DecodeLimits::DEFAULT),
+            schema_from_bytes(&bytes),
             Err(DecodeError::Malformed(_))
         ));
     }

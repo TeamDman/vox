@@ -25,10 +25,7 @@ pub use source::{Builder, Module, Root};
 mod tests {
     use super::*;
     use facet::Facet;
-    use phon_schema::{
-        DecodeLimits, SchemaBundleLimits, schema_bundle_from_bytes, schema_from_bytes,
-        schema_to_bytes,
-    };
+    use phon_schema::{schema_from_bytes, schema_to_bytes};
 
     #[derive(Facet)]
     struct Point {
@@ -68,19 +65,9 @@ mod tests {
         assert!(!m.schemas.is_empty());
         for s in &m.schemas {
             let bytes = schema_to_bytes(s);
-            let (back, _) =
-                schema_from_bytes(&bytes, DecodeLimits::DEFAULT).expect("schema round-trips");
+            let back = schema_from_bytes(&bytes).expect("schema round-trips");
             assert_eq!(&back, s, "schema {:#x} must round-trip", s.id.as_u64());
         }
-    }
-
-    #[test]
-    fn emitted_schema_bundle_is_complete_and_admitted() {
-        let module = module();
-        let bytes = typescript::schema_bundle_bytes(&module).expect("schema bundle encodes");
-        let bundle = schema_bundle_from_bytes(&bytes, SchemaBundleLimits::default())
-            .expect("schema bundle admits");
-        assert_eq!(bundle.schemas(), module.schemas);
     }
 
     #[test]
@@ -112,8 +99,5 @@ mod tests {
         assert!(ts.contains("export const registry = new Registry("));
         assert!(ts.contains("export const schemaId = {"));
         assert!(ts.contains("Person: 0x"));
-        assert!(ts.contains("export const schemaBundle = hexToBytes(\"50484f4e53434d31"));
-        assert!(!ts.contains("SCHEMA_BYTES"));
-        assert!(!ts.contains("schemaFromBytes"));
     }
 }

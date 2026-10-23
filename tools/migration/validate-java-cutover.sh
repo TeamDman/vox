@@ -25,7 +25,7 @@ run codegen cargo test --offline --locked -p teamy-vox-codegen --lib
 run rust cargo test --offline --locked -p teamy-vox-core -p teamy-vox-types -p teamy-vox-phon --lib
 run java cargo run --offline --locked -p teamy-vox-xtask -- test-java
 run wire cargo test --offline --locked -p spec-tests --test java_wire -- --test-threads=2
-run typescript pnpm --dir typescript check
+run typescript bash -c 'cd typescript && pnpm check'
 export VOX_JAVA_BUILD_JDK='Eclipse Adoptium|21.0.8+9-LTS'
 run package-first cargo run --offline --locked -p teamy-vox-xtask -- package-java
 sha256sum java/target/teamy-vox-java-*.jar > "$receipt_dir/jar-first.sha256"

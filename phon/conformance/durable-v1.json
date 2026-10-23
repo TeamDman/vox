@@ -1,0 +1,27 @@
+{
+  "fixture": "../rust/phon-storage/testdata/durable-file-feature-v1.phon",
+  "sha256": "34c7ce4788c084e710b54025b4608e81a5f354cd4370ce506c4a90dc378121ac",
+  "format": 1,
+  "fileLength": 549,
+  "descriptorOffset": 140,
+  "requiredFeatures": [],
+  "optionalFeatures": ["org.example.index-v1"],
+  "extents": [
+    { "kind": 0, "number": 0, "offset": 432, "length": 67, "schemaId": null },
+    { "kind": 1, "number": 0, "offset": 512, "length": 4, "schemaId": "281c5be4f2ee63b4" },
+    { "kind": 2, "number": 0, "offset": 528, "length": 3, "schemaId": "ba8125876d6388b4" },
+    { "kind": 3, "number": 0, "offset": 544, "length": 5, "schemaId": "281c5be4f2ee63b4" }
+  ],
+  "aux": [
+    { "feature": "org.example.index-v1", "name": "org.example.index-v1", "number": 0 }
+  ],
+  "regionReferences": [
+    { "targetRegion": 0, "targetSchemaId": "ba8125876d6388b4" }
+  ],
+  "policy": {
+    "unknownRequired": "reject",
+    "unknownOptional": "retain",
+    "knownInvalidRequired": "reject",
+    "knownInvalidOptional": "discard"
+  }
+}

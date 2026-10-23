@@ -345,6 +345,11 @@ weight = 12
 > If the runtime allocates or binds channel state for a request but fails
 > before handing the corresponding endpoint to user code, it MUST tear down
 > that local channel state instead of leaving an orphaned channel.
+>
+> A sender endpoint MUST be able to wait for its logical channel to become
+> terminal without sending a probe item. The wait MUST be event-driven, MUST
+> observe receiver reset/drop and request, lane, or connection termination,
+> and MUST NOT lose a terminal transition that races with waiter registration.
 
 > r[rpc.channel.item]
 >

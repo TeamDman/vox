@@ -1,0 +1,53 @@
+{
+  "version": 7,
+  "extends": "terminal-contract-v6.json",
+  "service": "Terminal",
+  "methods": [
+    {"name": "connect", "id": "9e81b88f62f1eb60", "request": "TerminalConnectRequest", "success": "TerminalConnectResult", "error": "TerminalError"},
+    {"name": "capabilities", "id": "56523a97a4da5b64", "request": "TerminalCapabilitiesRequest", "success": "TerminalCapabilitiesResult", "error": "TerminalError"},
+    {"name": "presentation_capabilities", "id": "7082a10164d7758a", "request": "TerminalPresentationCapabilitiesRequest", "success": "TerminalPresentationCapabilitiesResult", "error": "TerminalError"},
+    {"name": "resize", "id": "ffd4c5752861fc1f", "request": "TerminalResizeRequest", "success": "TerminalResizeResult", "error": "TerminalError"},
+    {"name": "send_text", "id": "a0f86a8a39ae0dcb", "request": "TerminalTextInput", "success": "TerminalInputResult", "error": "TerminalError"},
+    {"name": "send_key", "id": "e0e1cb7a111dc0c7", "request": "TerminalKeyInput", "success": "TerminalInputResult", "error": "TerminalError"},
+    {"name": "send_mouse", "id": "fd17ea461870349a", "request": "TerminalMouseInput", "success": "TerminalInputResult", "error": "TerminalError"},
+    {"name": "snapshot", "id": "4648749132a0ebb8", "request": "TerminalSnapshotRequest", "success": "TerminalSnapshot", "error": "TerminalError"},
+    {"name": "subscribe_frames", "id": "4f1b9f66093e3e90", "request": "TerminalSubscribeRequest", "channel": {"argument": 1, "direction": "tx", "role": "channel.arg.1.tx.element", "element": "TerminalFrameEvent"}, "success": "TerminalOperationResult", "error": "TerminalError"},
+    {"name": "subscribe_raster_frames", "id": "905b8a1a40087760", "request": "TerminalRasterSubscribeRequest", "channel": {"argument": 1, "direction": "tx", "role": "channel.arg.1.tx.element", "element": "TerminalRasterFrameEvent"}, "success": "TerminalOperationResult", "error": "TerminalError"},
+    {"name": "get_content", "id": "6f1917e81fe9c050", "request": "TerminalContentRequest", "success": "TerminalContentResult", "error": "TerminalError"},
+    {"name": "cancel", "id": "94967d6dfd5fa677", "request": "TerminalCancelRequest", "success": "TerminalOperationResult", "error": "TerminalError"},
+    {"name": "disconnect", "id": "babc04d89ee3e7a7", "request": "TerminalDisconnectRequest", "success": "TerminalOperationResult", "error": "TerminalError"}
+  ],
+  "tuning_contract": {
+    "axes": ["surface", "font", "cells"],
+    "modes": ["Auto", "Manual"],
+    "renderer_metric_scope": "renderer_id",
+    "auto_surface": "measured-physical-viewport",
+    "auto_cells": "logical-layout",
+    "auto_font": "largest-fitting-shared-bounds",
+    "manual_surface": "exact-or-reject",
+    "manual_cells": "exact-or-reject",
+    "manual_font": "exact-or-reject",
+    "font_precision": "milli-pixels",
+    "rejection": "typed-axis-and-reason",
+    "rejection_retention": "last-accepted-state-unchanged",
+    "publication": ["connect-result", "resize-result", "legacy-snapshot", "raster-frame"],
+    "legacy_surface_metrics": "effective-compatibility-projection",
+    "compatibility": "defaulted-trailing-records"
+  },
+  "validation": [
+    "manual-values-are-never-silently-clamped",
+    "manual-font-is-never-silently-shrunk",
+    "complete-combination-validates-before-session-mutation",
+    "rejected-request-does-not-advance-terminal-sequence",
+    "rejected-request-does-not-publish-a-frame",
+    "effective-metrics-match-the-enclosing-renderer"
+  ],
+  "bounds": {
+    "max_logical_width": 512,
+    "max_logical_height": 256,
+    "max_pixel_width": 4096,
+    "max_pixel_height": 4096,
+    "max_frame_bytes": 67108864,
+    "max_regions": 64
+  }
+}

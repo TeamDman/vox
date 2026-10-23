@@ -1,0 +1,43 @@
+{
+  "version": 8,
+  "extends": "terminal-contract-v7.json",
+  "service": "Terminal",
+  "methods": [
+    {"name": "connect", "id": "9e81b88f62f1eb60", "request": "TerminalConnectRequest", "success": "TerminalConnectResult", "error": "TerminalError"},
+    {"name": "capabilities", "id": "56523a97a4da5b64", "request": "TerminalCapabilitiesRequest", "success": "TerminalCapabilitiesResult", "error": "TerminalError"},
+    {"name": "presentation_capabilities", "id": "7082a10164d7758a", "request": "TerminalPresentationCapabilitiesRequest", "success": "TerminalPresentationCapabilitiesResult", "error": "TerminalError"},
+    {"name": "resize", "id": "ffd4c5752861fc1f", "request": "TerminalResizeRequest", "success": "TerminalResizeResult", "error": "TerminalError"},
+    {"name": "send_text", "id": "a0f86a8a39ae0dcb", "request": "TerminalTextInput", "success": "TerminalInputResult", "error": "TerminalError"},
+    {"name": "send_key", "id": "e0e1cb7a111dc0c7", "request": "TerminalKeyInput", "success": "TerminalInputResult", "error": "TerminalError"},
+    {"name": "send_mouse", "id": "fd17ea461870349a", "request": "TerminalMouseInput", "success": "TerminalInputResult", "error": "TerminalError"},
+    {"name": "copy_selection", "id": "bb2ca6269d6c6d62", "request": "TerminalCopySelectionRequest", "success": "TerminalCopySelectionResult", "error": "TerminalError"},
+    {"name": "paste", "id": "aa029ba0ebb1133f", "request": "TerminalPasteRequest", "success": "TerminalPasteResult", "error": "TerminalError"},
+    {"name": "snapshot", "id": "4648749132a0ebb8", "request": "TerminalSnapshotRequest", "success": "TerminalSnapshot", "error": "TerminalError"},
+    {"name": "subscribe_frames", "id": "4f1b9f66093e3e90", "request": "TerminalSubscribeRequest", "channel": {"argument": 1, "direction": "tx", "role": "channel.arg.1.tx.element", "element": "TerminalFrameEvent"}, "success": "TerminalOperationResult", "error": "TerminalError"},
+    {"name": "subscribe_raster_frames", "id": "905b8a1a40087760", "request": "TerminalRasterSubscribeRequest", "channel": {"argument": 1, "direction": "tx", "role": "channel.arg.1.tx.element", "element": "TerminalRasterFrameEvent"}, "success": "TerminalOperationResult", "error": "TerminalError"},
+    {"name": "get_content", "id": "6f1917e81fe9c050", "request": "TerminalContentRequest", "success": "TerminalContentResult", "error": "TerminalError"},
+    {"name": "cancel", "id": "94967d6dfd5fa677", "request": "TerminalCancelRequest", "success": "TerminalOperationResult", "error": "TerminalError"},
+    {"name": "disconnect", "id": "babc04d89ee3e7a7", "request": "TerminalDisconnectRequest", "success": "TerminalOperationResult", "error": "TerminalError"}
+  ],
+  "interaction_contract": {
+    "authority": "rust-terminal-session",
+    "mouse_dispositions": ["Forwarded", "SelectionChanged", "NoChange"],
+    "mouse_reporting": "forward-to-child-instead-of-local-selection",
+    "ordinary_left_drag": "bounded-visible-grid-selection",
+    "copy_dispositions": ["Copied", "NoSelection"],
+    "successful_copy": "returns-text-and-clears-selection-atomically",
+    "paste_policies": ["GuardMultiline", "BypassGuard"],
+    "paste_sources": ["Supplied", "AutomaticCallerClipboard"],
+    "remote_clipboard": "caller-resolves-auto-and-sends-supplied",
+    "guard_trigger": "contains-cr-or-lf",
+    "guard_no_write": true,
+    "bypass_identity": "approved-content-id-matches-body",
+    "selection_resync": ["input-result", "copy-result", "snapshot", "raster-frame"],
+    "remote_raster_selection": "base-pixels-selection-free-client-overlay"
+  },
+  "bounds": {
+    "max_input_bytes": 16384,
+    "preview": "separately-bounded",
+    "clipboard_logging": false
+  }
+}

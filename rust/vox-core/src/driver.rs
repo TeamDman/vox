@@ -14,13 +14,13 @@ use vox_rt::sync::{Semaphore, SyncMutex, watch};
 
 use vox_rt::task::FutureExt as _;
 use vox_types::{
-    BoxFut, CallResult, ChannelBinder, ChannelBody, ChannelClose, ChannelCreditReplenisher,
-    ChannelCreditReplenisherHandle, ChannelEventContext, ChannelId, ChannelItem,
-    ChannelMailboxReceiver, ChannelMailboxSender, ChannelMessage, ChannelSink, CreditSink, Handler,
-    IdAllocator, IncomingChannelMessage, LaneId, MaybeSend, MaybeSendFuture, MaybeSync, Parity,
-    Payload, ReplySink, RequestAuthorizationContext, RequestBody, RequestCall, RequestCancel,
-    RequestId, RequestMessage, RequestResponse, RequestTerminationReason, SelfRef, TrySendError,
-    TxError, VoxError, channel_mailbox,
+    BoxFut, CallResult, ChannelBinder, ChannelBody, ChannelClose, ChannelCloseSignal,
+    ChannelCreditReplenisher, ChannelCreditReplenisherHandle, ChannelEventContext, ChannelId,
+    ChannelItem, ChannelMailboxReceiver, ChannelMailboxSender, ChannelMessage, ChannelSink,
+    CreditSink, Handler, IdAllocator, IncomingChannelMessage, LaneId, MaybeSend, MaybeSendFuture,
+    MaybeSync, Parity, Payload, ReplySink, RequestAuthorizationContext, RequestBody, RequestCall,
+    RequestCancel, RequestId, RequestMessage, RequestResponse, RequestTerminationReason, SelfRef,
+    TrySendError, TxError, VoxError, channel_mailbox,
 };
 use vox_types::{
     ChannelCloseReason, ChannelDebugContext, ChannelDirection, ChannelEvent, ChannelResetReason,
@@ -427,6 +427,22 @@ impl ChannelRuntimeDebug {
     }
 }
 
+struct ChannelLifecycleRegistry {
+    terminal: HashSet<ChannelId>,
+    close_signals: BTreeMap<ChannelId, ChannelCloseSignal>,
+    all_closed: bool,
+}
+
+impl ChannelLifecycleRegistry {
+    fn new() -> Self {
+        Self {
+            terminal: HashSet::new(),
+            close_signals: BTreeMap::new(),
+            all_closed: false,
+        }
+    }
+}
+
 /// State shared between the driver loop and any `DriverCaller` / `DriverChannelSink` handles.
 ///
 /// `pending_responses` is keyed by request ID and therefore tracks live
@@ -455,10 +471,10 @@ struct DriverShared {
     last_inbound_message_at: SyncMutex<Option<Instant>>,
     last_outbound_message_at: SyncMutex<Option<Instant>>,
     close_reason: SyncMutex<Option<ConnectionCloseReason>>,
-    /// Channel IDs that have reached a terminal local state. Once a channel is
-    /// closed/reset, outbound sinks must reject further sends and inbound items
-    /// must not be buffered forever.
-    terminal_channels: SyncMutex<HashSet<ChannelId>>,
+    /// Channel IDs that have reached a terminal local state and the persistent
+    /// event signals used by `Tx::closed`. Both live under one lock so signal
+    /// registration and terminal transitions cannot lose a wakeup.
+    channel_lifecycle: SyncMutex<ChannelLifecycleRegistry>,
     channel_schema_roles: SyncMutex<
         HashMap<(vox_types::MethodId, vox_types::BindingDirection, String), Vec<ChannelId>>,
     >,
@@ -475,6 +491,50 @@ struct DriverShared {
 }
 
 impl DriverShared {
+    fn is_channel_terminal(&self, channel_id: ChannelId) -> bool {
+        let lifecycle = self.channel_lifecycle.lock();
+        lifecycle.all_closed || lifecycle.terminal.contains(&channel_id)
+    }
+
+    fn channel_close_signal(&self, channel_id: ChannelId) -> ChannelCloseSignal {
+        let mut lifecycle = self.channel_lifecycle.lock();
+        let terminal = lifecycle.all_closed || lifecycle.terminal.contains(&channel_id);
+        let signal = lifecycle
+            .close_signals
+            .entry(channel_id)
+            .or_insert_with(|| ChannelCloseSignal::new("vox_core.driver.channel_closed"))
+            .clone();
+        drop(lifecycle);
+        if terminal {
+            signal.close();
+        }
+        signal
+    }
+
+    fn mark_channel_terminal(&self, channel_id: ChannelId) -> bool {
+        let (inserted, signal) = {
+            let mut lifecycle = self.channel_lifecycle.lock();
+            let inserted = lifecycle.terminal.insert(channel_id);
+            let signal = lifecycle.close_signals.get(&channel_id).cloned();
+            (inserted, signal)
+        };
+        if let Some(signal) = signal {
+            signal.close();
+        }
+        inserted
+    }
+
+    fn mark_all_channels_terminal(&self) {
+        let signals = {
+            let mut lifecycle = self.channel_lifecycle.lock();
+            lifecycle.all_closed = true;
+            std::mem::take(&mut lifecycle.close_signals)
+        };
+        for signal in signals.into_values() {
+            signal.close();
+        }
+    }
+
     fn remember_channel_context(
         &self,
         channel_id: ChannelId,
@@ -758,7 +818,7 @@ impl DriverShared {
         channel_id: ChannelId,
         termination: RequestTerminationReason,
     ) {
-        if !self.terminal_channels.lock().insert(channel_id) {
+        if !self.mark_channel_terminal(channel_id) {
             return;
         }
 
@@ -877,7 +937,7 @@ impl DriverShared {
         &self,
         channel_id: ChannelId,
     ) -> (ChannelMailboxReceiver<IncomingChannelMessage>, bool) {
-        let terminal = self.terminal_channels.lock().contains(&channel_id);
+        let terminal = self.is_channel_terminal(channel_id);
         let mut senders = self.channel_senders.lock();
         let mut receivers = self.channel_receivers.lock();
 
@@ -1157,6 +1217,7 @@ pub struct DriverChannelSink {
     debug_context: Option<ChannelDebugContext>,
     local_control_tx: mpsc::UnboundedSender<DriverLocalControl>,
     writer_schema: Option<vox_types::ChannelWriterSchemaPlan>,
+    close_signal: ChannelCloseSignal,
 }
 
 impl ChannelSink for DriverChannelSink {
@@ -1169,7 +1230,7 @@ impl ChannelSink for DriverChannelSink {
         let channel_id = self.channel_id;
         let writer_schema = self.writer_schema.clone();
         Box::pin(async move {
-            if shared.terminal_channels.lock().contains(&channel_id) {
+            if shared.is_channel_terminal(channel_id) {
                 return Err(TxError::Transport("channel closed".into()));
             }
 
@@ -1235,12 +1296,7 @@ impl ChannelSink for DriverChannelSink {
         &self,
         payload: Payload<'payload>,
     ) -> Result<(), ChannelTrySendOutcome> {
-        if self
-            .shared
-            .terminal_channels
-            .lock()
-            .contains(&self.channel_id)
-        {
+        if self.close_signal.is_closed() {
             return Err(ChannelTrySendOutcome::Closed);
         }
 
@@ -1260,6 +1316,14 @@ impl ChannelSink for DriverChannelSink {
             })
     }
 
+    fn is_closed(&self) -> bool {
+        self.close_signal.is_closed()
+    }
+
+    fn closed(&self) -> Pin<Box<dyn vox_types::MaybeSendFuture<Output = ()> + '_>> {
+        Box::pin(self.close_signal.closed())
+    }
+
     fn close_channel(
         &self,
         _metadata: vox_types::Metadata,
@@ -1272,7 +1336,7 @@ impl ChannelSink for DriverChannelSink {
         let channel_id = self.channel_id;
         let debug_context = self.debug_context;
         Box::pin(async move {
-            shared.terminal_channels.lock().insert(channel_id);
+            shared.mark_channel_terminal(channel_id);
             shared.observe_channel(channel_id, debug_context, |channel| ChannelEvent::Closed {
                 channel,
                 reason: ChannelCloseReason::Local,
@@ -1292,7 +1356,7 @@ impl ChannelSink for DriverChannelSink {
     }
 
     fn close_channel_on_drop(&self) {
-        self.shared.terminal_channels.lock().insert(self.channel_id);
+        self.shared.mark_channel_terminal(self.channel_id);
         self.shared
             .observe_channel(self.channel_id, self.debug_context, |channel| {
                 ChannelEvent::Closed {
@@ -1597,6 +1661,7 @@ fn make_tx_channel_sink(
         shared.peer_initial_channel_credit,
         debug_context,
     );
+    let close_signal = shared.channel_close_signal(channel_id);
     let inner = DriverChannelSink {
         sender: sender.clone(),
         shared: Arc::clone(shared),
@@ -1604,6 +1669,7 @@ fn make_tx_channel_sink(
         debug_context: debug_context.and_then(ChannelDebugContext::into_option),
         local_control_tx: local_control_tx.clone(),
         writer_schema,
+        close_signal,
     };
     let sink = Arc::new(CreditSink::new(inner, shared.peer_initial_channel_credit));
     shared
@@ -2278,6 +2344,7 @@ impl ChannelCreditReplenisher for DriverChannelCreditReplenisher {
 impl<H: Handler<DriverReplySink>> Driver<H> {
     // r[impl rpc.channel.connection-closure]
     fn close_all_channel_runtime_state(&self, close_reason: ConnectionCloseReason) {
+        self.shared.mark_all_channels_terminal();
         let mut credits = self.shared.channel_credits.lock();
         for semaphore in credits.values() {
             semaphore.close();
@@ -2299,11 +2366,10 @@ impl<H: Handler<DriverReplySink>> Driver<H> {
         }
         self.shared.channel_receivers.lock().clear();
         self.shared.channel_schema_roles.lock().clear();
-        self.shared.terminal_channels.lock().clear();
     }
 
     fn close_outbound_channel(&self, channel_id: ChannelId) {
-        self.shared.terminal_channels.lock().insert(channel_id);
+        self.shared.mark_channel_terminal(channel_id);
         if let Some(semaphore) = self.shared.channel_credits.lock().remove(&channel_id) {
             semaphore.close();
         }
@@ -2374,7 +2440,10 @@ impl<H: Handler<DriverReplySink>> Driver<H> {
                 last_inbound_message_at: SyncMutex::new("driver.last_inbound_message_at", None),
                 last_outbound_message_at: SyncMutex::new("driver.last_outbound_message_at", None),
                 close_reason: SyncMutex::new("driver.close_reason", None),
-                terminal_channels: SyncMutex::new("driver.terminal_channels", HashSet::new()),
+                channel_lifecycle: SyncMutex::new(
+                    "driver.channel_lifecycle",
+                    ChannelLifecycleRegistry::new(),
+                ),
                 channel_schema_roles: SyncMutex::new("driver.channel_schema_roles", HashMap::new()),
                 local_initial_channel_credit: local_settings.initial_channel_credit,
                 peer_initial_channel_credit: peer_settings.initial_channel_credit,
@@ -2996,7 +3065,7 @@ impl<H: Handler<DriverReplySink>> Driver<H> {
             // r[impl rpc.channel.item]
             // r[impl rpc.channel.delivery.reliable]
             ChannelBodyKind::Item => {
-                if self.shared.terminal_channels.lock().contains(&chan_id) {
+                if self.shared.is_channel_terminal(chan_id) {
                     self.shared.record_inbound_item_not_enqueued(chan_id);
                     tracing::trace!(
                         conn_id = self.sender.lane_id().0,
@@ -3039,7 +3108,7 @@ impl<H: Handler<DriverReplySink>> Driver<H> {
             }
             // r[impl rpc.channel.close]
             ChannelBodyKind::Close => {
-                if self.shared.terminal_channels.lock().contains(&chan_id) {
+                if self.shared.is_channel_terminal(chan_id) {
                     return;
                 }
                 let sender = self.shared.inbound_channel_sender(chan_id);
@@ -3057,7 +3126,6 @@ impl<H: Handler<DriverReplySink>> Driver<H> {
                     .await
                     .is_ok();
                 self.shared.channel_senders.lock().remove(&chan_id);
-                self.shared.terminal_channels.lock().insert(chan_id);
                 self.close_outbound_channel(chan_id);
                 if !delivered {
                     self.shared.channel_receivers.lock().remove(&chan_id);
@@ -3071,7 +3139,7 @@ impl<H: Handler<DriverReplySink>> Driver<H> {
             }
             // r[impl rpc.channel.reset]
             ChannelBodyKind::Reset => {
-                if self.shared.terminal_channels.lock().contains(&chan_id) {
+                if self.shared.is_channel_terminal(chan_id) {
                     return;
                 }
                 let sender = self.shared.inbound_channel_sender(chan_id);
@@ -3089,7 +3157,6 @@ impl<H: Handler<DriverReplySink>> Driver<H> {
                     .await
                     .is_ok();
                 self.shared.channel_senders.lock().remove(&chan_id);
-                self.shared.terminal_channels.lock().insert(chan_id);
                 self.close_outbound_channel(chan_id);
                 if !delivered {
                     self.shared.channel_receivers.lock().remove(&chan_id);

@@ -1,0 +1,1834 @@
+//! Rust-authoritative contract for the optional terminal presentation lane.
+//!
+//! The terminal service uses bounded unary control messages plus one typed,
+//! request-scoped frame channel. A terminal frame is a byte payload with
+//! explicit dimensions and encoding; transport/runtime bounds cap its size
+//! before a decoder allocates. Java can provide a local fallback when Vox is
+//! unavailable.
+
+use facet::Facet;
+use vox::{Tx, service};
+
+/// Terminal lifecycle and presentation service.
+#[service]
+pub trait Terminal {
+    /// Negotiate capabilities and create a bounded terminal session.
+    async fn connect(
+        &self,
+        request: TerminalConnectRequest,
+    ) -> Result<TerminalConnectResult, TerminalError>;
+
+    /// Return the capabilities currently accepted for a session.
+    async fn capabilities(
+        &self,
+        request: TerminalCapabilitiesRequest,
+    ) -> Result<TerminalCapabilitiesResult, TerminalError>;
+
+    /// Return exact renderer/damage/transport combinations available to a
+    /// raster subscriber without changing the legacy V2 capability record.
+    async fn presentation_capabilities(
+        &self,
+        request: TerminalPresentationCapabilitiesRequest,
+    ) -> Result<TerminalPresentationCapabilitiesResult, TerminalError>;
+
+    /// Resize the session's logical terminal surface.
+    async fn resize(
+        &self,
+        request: TerminalResizeRequest,
+    ) -> Result<TerminalResizeResult, TerminalError>;
+
+    /// Deliver printable text input to a session.
+    async fn send_text(
+        &self,
+        request: TerminalTextInput,
+    ) -> Result<TerminalInputResult, TerminalError>;
+
+    /// Deliver a key press/release or repeat event to a session.
+    async fn send_key(
+        &self,
+        request: TerminalKeyInput,
+    ) -> Result<TerminalInputResult, TerminalError>;
+
+    /// Deliver a mouse position/button/wheel event to a session.
+    async fn send_mouse(
+        &self,
+        request: TerminalMouseInput,
+    ) -> Result<TerminalInputResult, TerminalError>;
+
+    /// Copy and clear the current Rust-authoritative selection, returning a
+    /// typed no-selection outcome when the caller raced a state update.
+    async fn copy_selection(
+        &self,
+        request: TerminalCopySelectionRequest,
+    ) -> Result<TerminalCopySelectionResult, TerminalError>;
+
+    /// Paste caller-owned clipboard text, optionally stopping before PTY
+    /// mutation when multiline confirmation is required.
+    async fn paste(
+        &self,
+        request: TerminalPasteRequest,
+    ) -> Result<TerminalPasteResult, TerminalError>;
+
+    /// Request the latest bounded frame, optionally after a known sequence.
+    async fn snapshot(
+        &self,
+        request: TerminalSnapshotRequest,
+    ) -> Result<TerminalSnapshot, TerminalError>;
+
+    /// Push full latest-state frames until the request is cancelled, the
+    /// channel closes, or the terminal session ends.
+    async fn subscribe_frames(
+        &self,
+        request: TerminalSubscribeRequest,
+        frames: Tx<TerminalFrameEvent>,
+    ) -> Result<TerminalOperationResult, TerminalError>;
+
+    /// Push presentation-contract V2 full or base-dependent raster frames for one explicitly
+    /// selected presentation mode.
+    async fn subscribe_raster_frames(
+        &self,
+        request: TerminalRasterSubscribeRequest,
+        frames: Tx<TerminalRasterFrameEvent>,
+    ) -> Result<TerminalOperationResult, TerminalError>;
+
+    /// Return the bounded visible terminal text for deterministic probes and
+    /// accessibility/debug witnesses without requiring PNG interpretation.
+    async fn get_content(
+        &self,
+        request: TerminalContentRequest,
+    ) -> Result<TerminalContentResult, TerminalError>;
+
+    /// Cancel an in-flight terminal operation without closing the session.
+    async fn cancel(
+        &self,
+        request: TerminalCancelRequest,
+    ) -> Result<TerminalOperationResult, TerminalError>;
+
+    /// Close a session and release its server-side resources.
+    async fn disconnect(
+        &self,
+        request: TerminalDisconnectRequest,
+    ) -> Result<TerminalOperationResult, TerminalError>;
+}
+
+/// Logical and physical dimensions for one terminal presentation surface.
+/// Logical dimensions control PTY/VT state; physical dimensions describe the
+/// target panel and the renderer's native cell metrics.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Facet)]
+pub struct TerminalSurfaceMetrics {
+    pub columns: u16,
+    pub rows: u16,
+    pub panel_width: u16,
+    pub panel_height: u16,
+    pub cell_width: u16,
+    pub cell_height: u16,
+    pub font_pixel_size: u16,
+}
+
+/// Whether one terminal tuning axis follows its live layout input or uses an
+/// explicit user override. Manual font sizes are exact rather than fitting
+/// hints; a renderer must reject an impossible combination instead of silently
+/// changing another axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Facet)]
+#[repr(u8)]
+pub enum TerminalTuningMode {
+    #[default]
+    Auto,
+    Manual,
+}
+
+/// Typed requested terminal sizing intent.
+///
+/// In auto surface mode, `surface_width` and `surface_height` are the measured
+/// physical viewport. In auto cell mode, `columns` and `rows` are derived from
+/// the client-owned logical layout. Auto font mode requires
+/// `font_pixel_size == 0`; manual font mode requires a non-zero exact em size.
+/// `renderer_id` identifies the renderer whose metrics are used to validate
+/// the complete combination.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Facet)]
+pub struct TerminalTuningRequest {
+    pub renderer_id: String,
+    pub surface_mode: TerminalTuningMode,
+    pub surface_width: u16,
+    pub surface_height: u16,
+    pub font_mode: TerminalTuningMode,
+    pub font_pixel_size: u16,
+    pub cells_mode: TerminalTuningMode,
+    pub columns: u16,
+    pub rows: u16,
+}
+
+/// Named adjustments applied only to auto-derived values. Manual values are
+/// exact and are rejected when they violate a bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Facet)]
+pub struct TerminalTuningAdjustments {
+    pub surface_width_clamped: bool,
+    pub surface_height_clamped: bool,
+    pub font_clamped: bool,
+    pub columns_clamped: bool,
+    pub rows_clamped: bool,
+}
+
+/// Accepted request plus the renderer-specific metrics used by a frame.
+/// `effective_font_pixel_size_milli` preserves fractional auto-fit sizes while
+/// the legacy `TerminalSurfaceMetrics::font_pixel_size` remains rounded.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Facet)]
+pub struct TerminalTuningMetrics {
+    pub request: TerminalTuningRequest,
+    pub surface_width: u16,
+    pub surface_height: u16,
+    pub columns: u16,
+    pub rows: u16,
+    pub cell_width: u16,
+    pub cell_height: u16,
+    pub effective_font_pixel_size_milli: u32,
+    pub raster_width: u16,
+    pub raster_height: u16,
+    pub remainder_width: u16,
+    pub remainder_height: u16,
+    pub adjustments: TerminalTuningAdjustments,
+}
+
+/// Axis associated with a typed tuning rejection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Facet)]
+#[repr(u8)]
+pub enum TerminalTuningAxis {
+    Surface,
+    Font,
+    Cells,
+    Renderer,
+    #[default]
+    Combination,
+}
+
+/// Stable reason for rejecting a terminal tuning transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Facet)]
+#[repr(u8)]
+pub enum TerminalTuningRejectionReason {
+    #[default]
+    InvalidModeValue,
+    OutOfRange,
+    OverConstrained,
+    RendererUnavailable,
+}
+
+/// Structured tuning failure retained by the client while the server keeps
+/// the last accepted terminal configuration and presentation valid.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Facet)]
+pub struct TerminalTuningRejection {
+    pub axis: TerminalTuningAxis,
+    pub reason: TerminalTuningRejectionReason,
+    pub request: TerminalTuningRequest,
+}
+
+/// Negotiated feature and resource limits.  A peer must treat the maxima as
+/// hard bounds; it may advertise smaller values in its response.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalCapabilities {
+    pub text_input: bool,
+    pub key_input: bool,
+    pub mouse_input: bool,
+    pub structured_cells: bool,
+    pub raster_frames: bool,
+    pub selection: bool,
+    pub scrollback: bool,
+    pub dirty_frames: bool,
+    pub max_width: u16,
+    pub max_height: u16,
+    pub max_frame_bytes: u32,
+    #[facet(default)]
+    pub backend_id: String,
+    #[facet(default)]
+    pub transport_id: String,
+}
+
+/// Queries the current presentation combinations for one established
+/// terminal session.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalPresentationCapabilitiesRequest {
+    pub session_id: String,
+    pub client_sequence: i64,
+}
+
+/// Presentation-contract V3 capabilities accepted by both peers.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalPresentationCapabilitiesResult {
+    pub session_id: String,
+    pub default_renderer_id: String,
+    pub default_transport_id: String,
+    /// Every tuple in this list is valid and selectable. Unavailable tuples
+    /// are reported separately so clients never mistake diagnostics for modes.
+    pub modes: Vec<TerminalPresentationMode>,
+    /// Exact tuples that are known but cannot currently be selected, together
+    /// with the structured reason reported by the owning process.
+    #[facet(default)]
+    pub unavailable_presentations: Vec<TerminalPresentationUnavailable>,
+    pub server_sequence: i64,
+}
+
+/// One selectable renderer/damage/transport combination.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalPresentationMode {
+    pub renderer_id: String,
+    pub rasterization_owner: TerminalRasterizationOwner,
+    pub damage_mode_id: String,
+    pub transport_id: String,
+    pub transport_version: u16,
+    pub encoding: TerminalFrameEncoding,
+    pub steady_frame_kind: TerminalRasterFrameKind,
+    pub frame_contract_version: u16,
+    pub origin: TerminalFrameOrigin,
+    pub alpha_mode: TerminalAlphaMode,
+    pub color_space: TerminalColorSpace,
+    pub max_pixel_width: u16,
+    pub max_pixel_height: u16,
+    pub max_frame_bytes: u32,
+    pub max_regions: u16,
+}
+
+/// One known but currently unavailable presentation tuple.
+///
+/// This record intentionally repeats the complete tuple identity rather than
+/// weakening [`TerminalPresentationMode`] with an availability flag. The
+/// `modes` collection therefore remains an exhaustive list of valid choices.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalPresentationUnavailable {
+    pub renderer_id: String,
+    pub rasterization_owner: TerminalRasterizationOwner,
+    pub damage_mode_id: String,
+    pub transport_id: String,
+    pub transport_version: u16,
+    pub error: TerminalError,
+}
+
+/// Process boundary that owns conversion of semantic terminal cells to pixels.
+/// This is closed protocol metadata, not a separately selectable axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum TerminalRasterizationOwner {
+    Server,
+    Client,
+}
+
+/// Creates a session and requests capabilities.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalConnectRequest {
+    pub endpoint: String,
+    pub requested_width: u16,
+    pub requested_height: u16,
+    #[facet(default)]
+    pub surface: TerminalSurfaceMetrics,
+    pub capabilities: TerminalCapabilities,
+    pub client_sequence: i64,
+    #[facet(default)]
+    pub correlation_id: String,
+    #[facet(default)]
+    pub tuning_present: bool,
+    #[facet(default)]
+    pub tuning: TerminalTuningRequest,
+}
+
+/// Successful session creation response.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalConnectResult {
+    pub session_id: String,
+    pub capabilities: TerminalCapabilities,
+    #[facet(default)]
+    pub surface: TerminalSurfaceMetrics,
+    pub server_sequence: i64,
+    pub state: TerminalState,
+    #[facet(default)]
+    pub correlation_id: String,
+    #[facet(default)]
+    pub tuning_present: bool,
+    #[facet(default)]
+    pub tuning: TerminalTuningMetrics,
+}
+
+/// Queries the negotiated capabilities for a session.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalCapabilitiesRequest {
+    pub session_id: String,
+    pub client_sequence: i64,
+}
+
+/// Capability response with sequence metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalCapabilitiesResult {
+    pub session_id: String,
+    pub capabilities: TerminalCapabilities,
+    pub server_sequence: i64,
+}
+
+/// Changes logical terminal dimensions.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalResizeRequest {
+    pub session_id: String,
+    pub width: u16,
+    pub height: u16,
+    #[facet(default)]
+    pub surface: TerminalSurfaceMetrics,
+    pub client_sequence: i64,
+    #[facet(default)]
+    pub correlation_id: String,
+    #[facet(default)]
+    pub tuning_present: bool,
+    #[facet(default)]
+    pub tuning: TerminalTuningRequest,
+}
+
+/// Accepted logical dimensions and resulting sequence.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalResizeResult {
+    pub session_id: String,
+    pub width: u16,
+    pub height: u16,
+    #[facet(default)]
+    pub surface: TerminalSurfaceMetrics,
+    pub server_sequence: i64,
+    #[facet(default)]
+    pub correlation_id: String,
+    #[facet(default)]
+    pub tuning_present: bool,
+    #[facet(default)]
+    pub tuning: TerminalTuningMetrics,
+}
+
+/// Printable text input.  The server rejects a payload longer than the
+/// negotiated request bound before it mutates terminal state.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalTextInput {
+    pub session_id: String,
+    pub text: String,
+    pub client_sequence: i64,
+    #[facet(default)]
+    pub correlation_id: String,
+}
+
+/// Key input, with a stable numeric key code and modifier bitset.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalKeyInput {
+    pub session_id: String,
+    pub key_code: u32,
+    pub modifiers: u32,
+    pub pressed: bool,
+    pub repeat: bool,
+    pub client_sequence: i64,
+    #[facet(default)]
+    pub correlation_id: String,
+}
+
+/// Mouse input in logical terminal coordinates.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalMouseInput {
+    pub session_id: String,
+    pub x: u16,
+    pub y: u16,
+    pub buttons: u8,
+    /// Mouse button number for button transitions.
+    pub button: u8,
+    pub pressed: bool,
+    /// True when this is a motion event rather than a button transition.
+    pub motion: bool,
+    pub wheel_x: i32,
+    pub wheel_y: i32,
+    pub client_sequence: i64,
+    #[facet(default)]
+    pub correlation_id: String,
+}
+
+/// Acknowledges text, key, or mouse input.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalInputResult {
+    pub session_id: String,
+    pub server_sequence: i64,
+    pub frame_sequence: i64,
+    #[facet(default)]
+    pub correlation_id: String,
+    #[facet(default)]
+    pub disposition: TerminalInputDisposition,
+    #[facet(default)]
+    pub selection_present: bool,
+    #[facet(default)]
+    pub selection: TerminalSelection,
+}
+
+/// Observable effect of one text, key, or mouse input operation. Older peers
+/// decode the default as ordinary PTY forwarding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Facet)]
+#[repr(u8)]
+pub enum TerminalInputDisposition {
+    #[default]
+    Forwarded,
+    SelectionChanged,
+    NoChange,
+}
+
+/// Requests an atomic selected-text read followed by selection clearing.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalCopySelectionRequest {
+    pub session_id: String,
+    pub client_sequence: i64,
+    #[facet(default)]
+    pub correlation_id: String,
+}
+
+/// Whether selected text was available at the authoritative mutation point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum TerminalCopySelectionDisposition {
+    Copied,
+    NoSelection,
+}
+
+/// Atomic copy result. `text` is empty for `NoSelection`; a successful copy
+/// always returns the post-copy cleared selection state.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalCopySelectionResult {
+    pub session_id: String,
+    pub disposition: TerminalCopySelectionDisposition,
+    pub text: String,
+    pub server_sequence: i64,
+    pub frame_sequence: i64,
+    pub selection_present: bool,
+    pub selection: TerminalSelection,
+    #[facet(default)]
+    pub correlation_id: String,
+}
+
+/// Whether the service may write immediately or must guard multiline text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum TerminalPastePolicy {
+    GuardMultiline,
+    BypassGuard,
+}
+
+/// Clipboard owner for one paste. A remote/headless service rejects
+/// `AutomaticCallerClipboard`; the invoking UI resolves it and supplies text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum TerminalPasteSource {
+    Supplied,
+    AutomaticCallerClipboard,
+}
+
+/// Guard outcome. `ConfirmationRequired` guarantees no PTY write occurred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum TerminalPasteDisposition {
+    Pasted,
+    ConfirmationRequired,
+}
+
+/// One bounded paste request. `approved_content_id` is empty for guarded
+/// requests and must match the supplied body's identity for a bypass request.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalPasteRequest {
+    pub session_id: String,
+    pub policy: TerminalPastePolicy,
+    pub source: TerminalPasteSource,
+    pub supplied_text: String,
+    pub approved_content_id: String,
+    pub client_sequence: i64,
+    #[facet(default)]
+    pub correlation_id: String,
+}
+
+/// Result of guarded or bypass paste. Preview and identity are populated only
+/// for `ConfirmationRequired`; clipboard bodies are never echoed.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalPasteResult {
+    pub session_id: String,
+    pub disposition: TerminalPasteDisposition,
+    pub server_sequence: i64,
+    pub frame_sequence: i64,
+    pub preview: String,
+    pub content_id: String,
+    #[facet(default)]
+    pub correlation_id: String,
+}
+
+/// Requests a frame no larger than `max_frame_bytes`.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalSnapshotRequest {
+    pub session_id: String,
+    pub after_sequence: i64,
+    pub max_frame_bytes: u32,
+    pub client_sequence: i64,
+    #[facet(default)]
+    pub correlation_id: String,
+}
+
+/// Opens one fresh request-scoped live-frame subscription.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalSubscribeRequest {
+    pub session_id: String,
+    pub after_terminal_sequence: i64,
+    pub max_frame_bytes: u32,
+    pub client_sequence: i64,
+    #[facet(default)]
+    pub correlation_id: String,
+}
+
+/// Opens one fresh presentation-contract V2 request-scoped raster subscription.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalRasterSubscribeRequest {
+    pub session_id: String,
+    pub requested_renderer_id: String,
+    pub requested_damage_mode_id: String,
+    pub requested_transport_id: String,
+    pub requested_transport_version: u16,
+    /// Client-chosen opaque identity that changes for every presentation switch.
+    pub presentation_generation: String,
+    pub after_terminal_sequence: i64,
+    pub after_frame_sequence: i64,
+    pub max_frame_bytes: u32,
+    pub max_regions: u16,
+    pub client_sequence: i64,
+    pub correlation_id: String,
+}
+
+/// Bounded producer evidence attached to each pushed frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Facet)]
+pub struct TerminalPublicationTelemetry {
+    pub mutations: i64,
+    pub renders_started: i64,
+    pub renders_completed: i64,
+    pub pre_render_coalesced: i64,
+    pub credit_blocked_sends: i64,
+    pub frames_pushed: i64,
+    pub pending_depth: u8,
+    pub pending_depth_max: u8,
+    pub mutation_to_send_us: i64,
+    pub credit_wait_us: i64,
+}
+
+/// One authoritative terminal publication. Epochs are opaque and must only be
+/// compared for equality; sequences are monotonic within a session epoch.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalFrameEvent {
+    pub session_id: String,
+    pub connection_epoch: String,
+    pub session_epoch: String,
+    pub terminal_sequence: i64,
+    pub frame_sequence: i64,
+    pub full_resync: bool,
+    pub max_frame_bytes: u32,
+    pub backend_id: String,
+    pub transport_id: String,
+    pub correlation_id: String,
+    pub frame: TerminalSnapshot,
+    #[facet(default)]
+    pub publication: TerminalPublicationTelemetry,
+}
+
+/// One authoritative presentation-contract V2 publication. Frame sequence is monotonic only
+/// within `presentation_generation`; a dirty event extends exactly
+/// `base_frame_sequence` and otherwise requires a new full resynchronization.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalRasterFrameEvent {
+    pub session_id: String,
+    pub connection_epoch: String,
+    pub session_epoch: String,
+    pub presentation_generation: String,
+    pub terminal_sequence: i64,
+    pub frame_sequence: i64,
+    pub base_frame_sequence: i64,
+    pub full_resync: bool,
+    pub renderer_id: String,
+    pub damage_mode_id: String,
+    pub transport_id: String,
+    pub transport_version: u16,
+    pub frame_contract_version: u16,
+    pub max_frame_bytes: u32,
+    pub max_regions: u16,
+    pub correlation_id: String,
+    pub frame: TerminalRasterFrame,
+    #[facet(default)]
+    pub publication: TerminalPublicationTelemetry,
+}
+
+/// Requests bounded visible-grid text, optionally after a known sequence.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalContentRequest {
+    pub session_id: String,
+    pub after_sequence: i64,
+    pub max_chars: u32,
+    pub client_sequence: i64,
+}
+
+/// Rust-owned visible-grid text witness.  The text includes prompt rows and
+/// trailing blank rows exactly as the terminal core exposes them.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalContentResult {
+    pub session_id: String,
+    pub sequence: i64,
+    pub text: String,
+    pub complete: bool,
+    pub truncated: bool,
+    pub prompt: TerminalPromptMetadata,
+}
+
+/// Bounded terminal frame.  `payload` is cells, RGBA/BGRA bytes, or PNG as
+/// selected by `encoding`; its length is checked against negotiated limits.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalSnapshot {
+    pub session_id: String,
+    pub sequence: i64,
+    /// The client sequence from the request that produced this response.
+    pub request_sequence: i64,
+    #[facet(default)]
+    pub logical_columns: u16,
+    #[facet(default)]
+    pub logical_rows: u16,
+    pub width: u16,
+    pub height: u16,
+    #[facet(default)]
+    pub panel_width: u16,
+    #[facet(default)]
+    pub panel_height: u16,
+    #[facet(default)]
+    pub cell_width: u16,
+    #[facet(default)]
+    pub cell_height: u16,
+    #[facet(default)]
+    pub font_pixel_size: u16,
+    #[facet(default)]
+    pub correlation_id: String,
+    pub encoding: TerminalFrameEncoding,
+    pub kind: TerminalFrameKind,
+    pub stride: u32,
+    pub tile_x: u16,
+    pub tile_y: u16,
+    pub tile_width: u16,
+    pub tile_height: u16,
+    pub payload: Vec<u8>,
+    pub complete: bool,
+    pub cursor: TerminalCursor,
+    pub selection_present: bool,
+    pub selection: TerminalSelection,
+    pub prompt: TerminalPromptMetadata,
+    #[facet(default)]
+    pub timing: TerminalSnapshotTiming,
+    #[facet(default)]
+    pub tuning_present: bool,
+    #[facet(default)]
+    pub tuning: TerminalTuningMetrics,
+}
+
+/// Frame payload representation negotiated by the peers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum TerminalFrameEncoding {
+    StructuredCells,
+    Rgba8,
+    Bgra8,
+    Png,
+}
+
+/// Identifies whether a snapshot replaces the complete frame or one tile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum TerminalFrameKind {
+    Full,
+    DirtyTile,
+}
+
+/// Complete-versus-incremental raster semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum TerminalRasterFrameKind {
+    Full,
+    DirtyRegions,
+}
+
+/// Coordinate origin for raw raster payloads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Facet)]
+#[repr(u8)]
+pub enum TerminalFrameOrigin {
+    #[default]
+    TopLeft,
+}
+
+/// Alpha interpretation for raw raster payloads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Facet)]
+#[repr(u8)]
+pub enum TerminalAlphaMode {
+    #[default]
+    Straight,
+}
+
+/// Color interpretation for raw and decoded raster bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Facet)]
+#[repr(u8)]
+pub enum TerminalColorSpace {
+    #[default]
+    Srgb,
+}
+
+/// One complete or incremental raster frame. Complete PNG/raw frames use
+/// `payload` directly and have no regions. Dirty RGBA8 frames pack every region
+/// into the single payload and address it with ordered descriptors.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalRasterFrame {
+    pub logical_columns: u16,
+    pub logical_rows: u16,
+    pub width: u16,
+    pub height: u16,
+    pub surface: TerminalSurfaceMetrics,
+    pub encoding: TerminalFrameEncoding,
+    pub kind: TerminalRasterFrameKind,
+    pub stride: u32,
+    pub origin: TerminalFrameOrigin,
+    pub alpha_mode: TerminalAlphaMode,
+    pub color_space: TerminalColorSpace,
+    pub font_id: String,
+    pub font_sha256: String,
+    pub payload: Vec<u8>,
+    pub regions: Vec<TerminalRasterRegion>,
+    pub complete: bool,
+    pub cursor: TerminalCursor,
+    pub selection_present: bool,
+    pub selection: TerminalSelection,
+    pub prompt: TerminalPromptMetadata,
+    pub timing: TerminalRasterSnapshotTiming,
+    /// Renderer-local stage, cache, and retained-resource evidence for this
+    /// exact frame. This is evidence, not another selectable presentation
+    /// axis; the selected renderer remains identified by the enclosing event.
+    #[facet(default)]
+    pub renderer: TerminalRasterRendererTelemetry,
+    #[facet(default)]
+    pub tuning_present: bool,
+    #[facet(default)]
+    pub tuning: TerminalTuningMetrics,
+}
+
+/// One ordered, tightly bounded raw RGBA8 patch in a dirty frame. The payload
+/// range addresses the enclosing frame's single packed byte buffer.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalRasterRegion {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+    pub stride: u32,
+    pub payload_offset: u32,
+    pub payload_length: u32,
+}
+
+/// Producer-local stages for a raster publication. This remains separate
+/// from the immutable V1/V2 snapshot timing record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Facet)]
+pub struct TerminalRasterSnapshotTiming {
+    pub pty_drain_us: i64,
+    pub terminal_snapshot_us: i64,
+    pub font_load_us: i64,
+    pub damage_us: i64,
+    pub raster_us: i64,
+    pub png_encode_us: i64,
+    pub payload_pack_us: i64,
+    pub total_us: i64,
+}
+
+/// Bounded renderer-local evidence associated with one raster frame.
+///
+/// Every field is a fixed scalar or bounded identity string. Presence flags
+/// distinguish a measured zero from a stage that does not apply to the
+/// selected renderer or transport. Older peers decode this trailing record as
+/// its default value.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Facet)]
+pub struct TerminalRasterRendererTelemetry {
+    /// Human-readable physical-device identity. Empty for CPU renderers.
+    pub device_identity: String,
+    /// Stable compiled shader/source identity. Empty for CPU renderers.
+    pub shader_identity: String,
+    /// True when the GPU-specific timing/resource fields were measured.
+    pub gpu_stages_present: bool,
+    pub full_rgba_pack_present: bool,
+    pub dirty_region_pack_present: bool,
+    pub raw_packet_pack_present: bool,
+    pub png_packet_pack_present: bool,
+    pub geometry_build_us: i64,
+    pub outline_extraction_us: i64,
+    pub directional_band_build_us: i64,
+    pub upload_bytes: i64,
+    pub upload_us: i64,
+    pub command_record_us: i64,
+    pub queue_submit_us: i64,
+    pub gpu_completion_wait_us: i64,
+    pub readback_map_copy_us: i64,
+    pub full_rgba_pack_us: i64,
+    pub dirty_region_pack_us: i64,
+    pub raw_packet_pack_us: i64,
+    pub png_packet_pack_us: i64,
+    pub requested_pixels: i64,
+    pub readback_bytes: i64,
+    pub target_allocation_id: i64,
+    pub geometry_hits: i64,
+    pub geometry_misses: i64,
+    pub geometry_evictions: i64,
+    pub retained_glyphs: i64,
+    pub glyph_capacity: i64,
+    pub buffer_allocations: i64,
+    pub target_capacity: i64,
+    pub retained_targets: i64,
+    pub target_allocations: i64,
+    pub target_reuses: i64,
+    pub target_evictions: i64,
+    pub target_destructions: i64,
+    pub font_catalog_acquisitions: i64,
+    pub process_font_catalog_loads: i64,
+    pub font_renderer_cache_hits: i64,
+    pub font_renderer_cache_misses: i64,
+    pub font_renderer_constructions: i64,
+    pub font_renderer_evictions: i64,
+    pub font_renderer_cache_len: i64,
+    pub font_renderer_cache_capacity: i64,
+    pub glyph_cache_hits: i64,
+    pub glyph_cache_misses: i64,
+    pub glyph_cache_evictions: i64,
+    pub cached_glyphs: i64,
+    pub glyph_cache_capacity: i64,
+    pub frame_buffer_grows: i64,
+    pub frame_buffer_reuses: i64,
+    pub frame_buffer_capacity_bytes: i64,
+    pub png_buffer_grows: i64,
+    pub png_buffer_reuses: i64,
+    pub png_buffer_capacity_bytes: i64,
+    pub transport_payload_copies: i64,
+}
+
+/// The visible terminal cursor associated with a snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+pub struct TerminalCursor {
+    pub x: u16,
+    pub y: u16,
+    pub visible: bool,
+}
+
+/// A linear visible-grid selection associated with a snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Facet)]
+pub struct TerminalSelection {
+    pub anchor_x: u16,
+    pub anchor_y: u16,
+    pub focus_x: u16,
+    pub focus_y: u16,
+}
+
+/// Shell-integration markers associated with the latest visible prompt and
+/// completed command. Presence flags keep this record compatible with the
+/// Java 17 generator, which deliberately avoids nested Option fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+pub struct TerminalPromptMetadata {
+    pub prompt_present: bool,
+    pub prompt: TerminalRange,
+    pub command_present: bool,
+    pub command: TerminalRange,
+    pub command_status_present: bool,
+    pub command_status: i32,
+}
+
+/// A visible-grid range with inclusive start and exclusive end coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+pub struct TerminalRange {
+    pub start_x: u16,
+    pub start_y: u16,
+    pub end_x: u16,
+    pub end_y: u16,
+}
+
+/// Rust-side timing stages for the full-PNG snapshot that contains this
+/// metadata. Java joins these values with its Vox wait and presentation
+/// measurements using the enclosing snapshot correlation ID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Facet)]
+pub struct TerminalSnapshotTiming {
+    pub pty_drain_us: i64,
+    pub terminal_snapshot_us: i64,
+    pub font_load_us: i64,
+    pub raster_us: i64,
+    pub png_encode_us: i64,
+    pub total_us: i64,
+}
+
+/// Cancels a request while retaining the session.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalCancelRequest {
+    pub session_id: String,
+    pub request_sequence: i64,
+    pub reason: String,
+    pub client_sequence: i64,
+    #[facet(default)]
+    pub correlation_id: String,
+}
+
+/// Closes the session or records a peer disconnect.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalDisconnectRequest {
+    pub session_id: String,
+    pub reason: String,
+    pub client_sequence: i64,
+}
+
+/// Acknowledges cancellation or disconnection.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalOperationResult {
+    pub session_id: String,
+    pub state: TerminalState,
+    pub server_sequence: i64,
+}
+
+/// Lifecycle state visible to both peers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum TerminalState {
+    Ready,
+    Closing,
+    Closed,
+    Disconnected,
+}
+
+/// Structured application-level failure.  Transport errors remain Vox
+/// infrastructure failures and are not encoded as this type.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TerminalError {
+    pub code: TerminalErrorCode,
+    pub message: String,
+    pub retryable: bool,
+    pub server_sequence: i64,
+    #[facet(default)]
+    pub tuning_rejection_present: bool,
+    #[facet(default)]
+    pub tuning_rejection: TerminalTuningRejection,
+}
+
+/// Stable terminal error categories for user-visible fallback behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum TerminalErrorCode {
+    InvalidRequest,
+    UnsupportedCapability,
+    SessionNotFound,
+    CapacityExceeded,
+    Cancelled,
+    Disconnected,
+    Internal,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_snapshot_round_trips_through_phon() {
+        let snapshot = TerminalSnapshot {
+            session_id: "session-01".to_string(),
+            sequence: 42,
+            request_sequence: 41,
+            logical_columns: 80,
+            logical_rows: 24,
+            width: 80,
+            height: 24,
+            panel_width: 640,
+            panel_height: 384,
+            cell_width: 8,
+            cell_height: 16,
+            font_pixel_size: 16,
+            correlation_id: "snapshot-01".to_string(),
+            encoding: TerminalFrameEncoding::Rgba8,
+            kind: TerminalFrameKind::Full,
+            stride: 320,
+            tile_x: 0,
+            tile_y: 0,
+            tile_width: 80,
+            tile_height: 24,
+            payload: vec![0, 16, 32, 255, 255, 128, 64, 255],
+            complete: true,
+            cursor: TerminalCursor {
+                x: 3,
+                y: 4,
+                visible: true,
+            },
+            selection_present: true,
+            selection: TerminalSelection {
+                anchor_x: 1,
+                anchor_y: 2,
+                focus_x: 5,
+                focus_y: 2,
+            },
+            prompt: TerminalPromptMetadata {
+                prompt_present: true,
+                prompt: TerminalRange {
+                    start_x: 0,
+                    start_y: 0,
+                    end_x: 3,
+                    end_y: 0,
+                },
+                command_present: true,
+                command: TerminalRange {
+                    start_x: 3,
+                    start_y: 0,
+                    end_x: 12,
+                    end_y: 0,
+                },
+                command_status_present: true,
+                command_status: 0,
+            },
+            timing: TerminalSnapshotTiming::default(),
+            tuning_present: false,
+            tuning: TerminalTuningMetrics::default(),
+        };
+        let bytes = vox_phon::to_vec(&snapshot).expect("encode terminal snapshot");
+        let decoded: TerminalSnapshot =
+            vox_phon::from_slice(&bytes).expect("decode terminal snapshot");
+        assert_eq!(decoded, snapshot);
+    }
+
+    #[test]
+    fn terminal_snapshot_response_wire_payload_is_stable() {
+        type WireResponse = Result<TerminalSnapshot, vox::VoxError<TerminalError>>;
+
+        let snapshot = TerminalSnapshot {
+            session_id: "session-01".to_string(),
+            sequence: 42,
+            request_sequence: 41,
+            logical_columns: 80,
+            logical_rows: 24,
+            width: 80,
+            height: 24,
+            panel_width: 640,
+            panel_height: 384,
+            cell_width: 8,
+            cell_height: 16,
+            font_pixel_size: 16,
+            correlation_id: "snapshot-01".to_string(),
+            encoding: TerminalFrameEncoding::Rgba8,
+            kind: TerminalFrameKind::Full,
+            stride: 320,
+            tile_x: 0,
+            tile_y: 0,
+            tile_width: 80,
+            tile_height: 24,
+            payload: vec![0, 16, 32, 255, 255, 128, 64, 255],
+            complete: true,
+            cursor: TerminalCursor {
+                x: 3,
+                y: 4,
+                visible: true,
+            },
+            selection_present: true,
+            selection: TerminalSelection {
+                anchor_x: 1,
+                anchor_y: 2,
+                focus_x: 5,
+                focus_y: 2,
+            },
+            prompt: TerminalPromptMetadata {
+                prompt_present: true,
+                prompt: TerminalRange {
+                    start_x: 0,
+                    start_y: 0,
+                    end_x: 3,
+                    end_y: 0,
+                },
+                command_present: true,
+                command: TerminalRange {
+                    start_x: 3,
+                    start_y: 0,
+                    end_x: 12,
+                    end_y: 0,
+                },
+                command_status_present: true,
+                command_status: 0,
+            },
+            timing: TerminalSnapshotTiming {
+                pty_drain_us: 1,
+                terminal_snapshot_us: 2,
+                font_load_us: 3,
+                raster_us: 4,
+                png_encode_us: 5,
+                total_us: 15,
+            },
+            tuning_present: false,
+            tuning: TerminalTuningMetrics::default(),
+        };
+        let payload = vox_phon::to_vec(&Ok::<_, vox::VoxError<TerminalError>>(snapshot))
+            .expect("encode terminal snapshot response");
+        let _: WireResponse =
+            vox_phon::from_slice(&payload).expect("decode terminal snapshot response");
+    }
+
+    #[test]
+    fn terminal_content_witness_round_trips_through_phon() {
+        let content = TerminalContentResult {
+            session_id: "session-01".to_string(),
+            sequence: 42,
+            text: "PS C:\\work> 100\\n".to_string(),
+            complete: true,
+            truncated: false,
+            prompt: TerminalPromptMetadata {
+                prompt_present: true,
+                prompt: TerminalRange {
+                    start_x: 0,
+                    start_y: 0,
+                    end_x: 11,
+                    end_y: 0,
+                },
+                command_present: false,
+                command: TerminalRange {
+                    start_x: 0,
+                    start_y: 0,
+                    end_x: 0,
+                    end_y: 0,
+                },
+                command_status_present: false,
+                command_status: 0,
+            },
+        };
+        let bytes = vox_phon::to_vec(&content).expect("encode terminal content witness");
+        let decoded: TerminalContentResult =
+            vox_phon::from_slice(&bytes).expect("decode terminal content witness");
+        assert_eq!(decoded, content);
+    }
+
+    #[test]
+    fn terminal_content_response_wire_schema_matches_generated_java_root() {
+        type WireResponse = Result<TerminalContentResult, vox::VoxError<TerminalError>>;
+
+        let schema_id = vox_phon::schema_id_for_shape(<WireResponse as Facet>::SHAPE)
+            .expect("terminal content response wire schema id");
+        assert_eq!(schema_id.as_u64(), 0x3797_c299_da28_aebf);
+        let schema = vox_phon::schema_bytes_for_shape(<WireResponse as Facet>::SHAPE)
+            .expect("terminal content response wire schema bytes");
+        assert!(!schema.is_empty(), "terminal content response schema bytes");
+        let wire = Ok::<_, vox::VoxError<TerminalError>>(TerminalContentResult {
+            session_id: "sfm-terminal-1".to_string(),
+            sequence: 7,
+            text: "PS C:\\work> hello\\n".to_string(),
+            complete: true,
+            truncated: false,
+            prompt: TerminalPromptMetadata {
+                prompt_present: true,
+                prompt: TerminalRange {
+                    start_x: 0,
+                    start_y: 0,
+                    end_x: 13,
+                    end_y: 0,
+                },
+                command_present: false,
+                command: TerminalRange {
+                    start_x: 0,
+                    start_y: 0,
+                    end_x: 0,
+                    end_y: 0,
+                },
+                command_status_present: false,
+                command_status: 0,
+            },
+        });
+        let payload = vox_phon::to_vec(&wire).expect("encode terminal content response");
+        let decoded: WireResponse =
+            vox_phon::from_slice(&payload).expect("decode terminal content response");
+        assert!(matches!(
+            decoded,
+            Ok(TerminalContentResult { complete: true, .. })
+        ));
+
+        let error = Err::<TerminalContentResult, _>(vox::VoxError::User(Box::new(TerminalError {
+            code: TerminalErrorCode::Internal,
+            message: "pty output unavailable".to_string(),
+            retryable: true,
+            server_sequence: 8,
+            tuning_rejection_present: false,
+            tuning_rejection: TerminalTuningRejection::default(),
+        })));
+        let error_payload =
+            vox_phon::to_vec(&error).expect("encode terminal content application error");
+        let decoded_error: WireResponse = vox_phon::from_slice(&error_payload)
+            .expect("decode terminal content application error");
+        assert!(matches!(decoded_error, Err(vox::VoxError::User(error))
+            if error.code == TerminalErrorCode::Internal
+                && error.retryable
+                && error.server_sequence == 8));
+    }
+
+    #[test]
+    fn terminal_v5_presentation_capabilities_round_trip_with_unavailable_gpu() {
+        let mut modes = Vec::new();
+        let pixel_transports = [
+            (
+                "full",
+                "full-png",
+                TerminalFrameEncoding::Png,
+                TerminalRasterFrameKind::Full,
+            ),
+            (
+                "full",
+                "full-raw-rgba",
+                TerminalFrameEncoding::Rgba8,
+                TerminalRasterFrameKind::Full,
+            ),
+            (
+                "dirty",
+                "dirty-raw-rgba",
+                TerminalFrameEncoding::Rgba8,
+                TerminalRasterFrameKind::DirtyRegions,
+            ),
+        ];
+        for (damage_mode_id, transport_id, encoding, steady_frame_kind) in pixel_transports {
+            modes.push(TerminalPresentationMode {
+                renderer_id: "rust-cpu-fontdue".to_string(),
+                rasterization_owner: TerminalRasterizationOwner::Server,
+                damage_mode_id: damage_mode_id.to_string(),
+                transport_id: transport_id.to_string(),
+                transport_version: 1,
+                encoding,
+                steady_frame_kind,
+                frame_contract_version: 1,
+                origin: TerminalFrameOrigin::TopLeft,
+                alpha_mode: TerminalAlphaMode::Straight,
+                color_space: TerminalColorSpace::Srgb,
+                max_pixel_width: 4096,
+                max_pixel_height: 4096,
+                max_frame_bytes: 16 * 1024 * 1024,
+                max_regions: 64,
+            });
+        }
+        let gpu_error = TerminalError {
+            code: TerminalErrorCode::UnsupportedCapability,
+            message: "rust-gpu-slug unavailable: no Vulkan 1.2 compute device was found"
+                .to_string(),
+            retryable: false,
+            server_sequence: 7,
+            tuning_rejection_present: false,
+            tuning_rejection: TerminalTuningRejection::default(),
+        };
+        let unavailable_presentations = pixel_transports
+            .iter()
+            .map(
+                |(damage_mode_id, transport_id, _encoding, _steady_frame_kind)| {
+                    TerminalPresentationUnavailable {
+                        renderer_id: "rust-gpu-slug".to_string(),
+                        rasterization_owner: TerminalRasterizationOwner::Server,
+                        damage_mode_id: (*damage_mode_id).to_string(),
+                        transport_id: (*transport_id).to_string(),
+                        transport_version: 1,
+                        error: gpu_error.clone(),
+                    }
+                },
+            )
+            .collect();
+        let result = TerminalPresentationCapabilitiesResult {
+            session_id: "session-v5".to_string(),
+            default_renderer_id: "rust-cpu-fontdue".to_string(),
+            default_transport_id: "full-png".to_string(),
+            modes,
+            unavailable_presentations,
+            server_sequence: 7,
+        };
+        let bytes = vox_phon::to_vec(&result).expect("encode V5 capabilities");
+        let decoded: TerminalPresentationCapabilitiesResult =
+            vox_phon::from_slice(&bytes).expect("decode V5 capabilities");
+        assert_eq!(decoded, result);
+        assert_eq!(decoded.modes.len(), 3);
+        assert!(decoded.modes.iter().all(|mode| {
+            mode.renderer_id == "rust-cpu-fontdue"
+                && mode.rasterization_owner == TerminalRasterizationOwner::Server
+                && mode.frame_contract_version == 1
+        }));
+        assert!(decoded.modes.iter().any(|mode| {
+            mode.renderer_id == decoded.default_renderer_id
+                && mode.transport_id == decoded.default_transport_id
+        }));
+        assert_eq!(decoded.unavailable_presentations.len(), 3);
+        assert!(decoded.unavailable_presentations.iter().all(|unavailable| {
+            unavailable.renderer_id == "rust-gpu-slug"
+                && unavailable.rasterization_owner == TerminalRasterizationOwner::Server
+                && unavailable.transport_version == 1
+                && unavailable.error.code == TerminalErrorCode::UnsupportedCapability
+                && unavailable
+                    .error
+                    .message
+                    .contains("Vulkan 1.2 compute device")
+                && !unavailable.error.retryable
+                && unavailable.error.server_sequence == decoded.server_sequence
+                && !decoded.modes.iter().any(|mode| {
+                    mode.renderer_id == unavailable.renderer_id
+                        && mode.rasterization_owner == unavailable.rasterization_owner
+                        && mode.damage_mode_id == unavailable.damage_mode_id
+                        && mode.transport_id == unavailable.transport_id
+                        && mode.transport_version == unavailable.transport_version
+                })
+        }));
+        for transport_id in ["full-png", "full-raw-rgba", "dirty-raw-rgba"] {
+            assert!(decoded.modes.iter().any(|mode| {
+                mode.renderer_id == "rust-cpu-fontdue" && mode.transport_id == transport_id
+            }));
+            assert!(decoded.unavailable_presentations.iter().any(|unavailable| {
+                unavailable.renderer_id == "rust-gpu-slug"
+                    && unavailable.transport_id == transport_id
+            }));
+        }
+    }
+
+    #[test]
+    fn terminal_rasterization_owner_is_closed_and_round_trips() {
+        for owner in [
+            TerminalRasterizationOwner::Server,
+            TerminalRasterizationOwner::Client,
+        ] {
+            let bytes = vox_phon::to_vec(&owner).expect("encode rasterization owner");
+            let decoded: TerminalRasterizationOwner =
+                vox_phon::from_slice(&bytes).expect("decode rasterization owner");
+            assert_eq!(decoded, owner);
+        }
+        assert!(
+            vox_phon::from_slice::<TerminalRasterizationOwner>(&[2, 0, 0, 0]).is_err(),
+            "unknown rasterization owner discriminants must be rejected"
+        );
+    }
+
+    #[test]
+    fn terminal_v4_presentation_request_and_event_generation_round_trip() {
+        let request = TerminalRasterSubscribeRequest {
+            session_id: "session-v4".to_string(),
+            requested_renderer_id: "rust-gpu-slug".to_string(),
+            requested_damage_mode_id: "dirty".to_string(),
+            requested_transport_id: "dirty-raw-rgba".to_string(),
+            requested_transport_version: 1,
+            presentation_generation: "panel-2-presentation-3".to_string(),
+            after_terminal_sequence: 18,
+            after_frame_sequence: 3,
+            max_frame_bytes: 16 * 1024 * 1024,
+            max_regions: 64,
+            client_sequence: 20,
+            correlation_id: "subscribe-v4-3".to_string(),
+        };
+        let request_bytes = vox_phon::to_vec(&request).expect("encode V4 raster request");
+        let decoded_request: TerminalRasterSubscribeRequest =
+            vox_phon::from_slice(&request_bytes).expect("decode V4 raster request");
+        assert_eq!(decoded_request, request);
+
+        let event = TerminalRasterFrameEvent {
+            session_id: "session-v4".to_string(),
+            connection_epoch: "connection-1".to_string(),
+            session_epoch: "session-epoch-1".to_string(),
+            presentation_generation: request.presentation_generation.clone(),
+            terminal_sequence: 19,
+            frame_sequence: 4,
+            base_frame_sequence: 3,
+            full_resync: false,
+            renderer_id: request.requested_renderer_id.clone(),
+            damage_mode_id: "dirty".to_string(),
+            transport_id: "dirty-raw-rgba".to_string(),
+            transport_version: 1,
+            frame_contract_version: 1,
+            max_frame_bytes: 16 * 1024 * 1024,
+            max_regions: 64,
+            correlation_id: "frame-v4-4".to_string(),
+            frame: TerminalRasterFrame {
+                logical_columns: 2,
+                logical_rows: 1,
+                width: 2,
+                height: 1,
+                surface: TerminalSurfaceMetrics {
+                    columns: 2,
+                    rows: 1,
+                    panel_width: 2,
+                    panel_height: 1,
+                    cell_width: 1,
+                    cell_height: 1,
+                    font_pixel_size: 16,
+                },
+                encoding: TerminalFrameEncoding::Rgba8,
+                kind: TerminalRasterFrameKind::DirtyRegions,
+                stride: 0,
+                origin: TerminalFrameOrigin::TopLeft,
+                alpha_mode: TerminalAlphaMode::Straight,
+                color_space: TerminalColorSpace::Srgb,
+                font_id: "CaskaydiaCoveNerdFontMono-Regular".to_string(),
+                font_sha256: "32aa528c1d9be2240ceac90aa05f4e554679cabeb11b93684eb24ec4930bd0ea"
+                    .to_string(),
+                payload: vec![1, 2, 3, 255, 4, 5, 6, 255],
+                regions: vec![
+                    TerminalRasterRegion {
+                        x: 0,
+                        y: 0,
+                        width: 1,
+                        height: 1,
+                        stride: 4,
+                        payload_offset: 0,
+                        payload_length: 4,
+                    },
+                    TerminalRasterRegion {
+                        x: 1,
+                        y: 0,
+                        width: 1,
+                        height: 1,
+                        stride: 4,
+                        payload_offset: 4,
+                        payload_length: 4,
+                    },
+                ],
+                complete: true,
+                cursor: TerminalCursor {
+                    x: 1,
+                    y: 0,
+                    visible: true,
+                },
+                selection_present: false,
+                selection: TerminalSelection {
+                    anchor_x: 0,
+                    anchor_y: 0,
+                    focus_x: 0,
+                    focus_y: 0,
+                },
+                prompt: TerminalPromptMetadata {
+                    prompt_present: false,
+                    prompt: TerminalRange {
+                        start_x: 0,
+                        start_y: 0,
+                        end_x: 0,
+                        end_y: 0,
+                    },
+                    command_present: false,
+                    command: TerminalRange {
+                        start_x: 0,
+                        start_y: 0,
+                        end_x: 0,
+                        end_y: 0,
+                    },
+                    command_status_present: false,
+                    command_status: 0,
+                },
+                timing: TerminalRasterSnapshotTiming::default(),
+                renderer: TerminalRasterRendererTelemetry {
+                    device_identity: "vendor=0x10de;device=0x2684;NVIDIA RTX".to_string(),
+                    shader_identity: "fnv1a64:0123456789abcdef".to_string(),
+                    gpu_stages_present: true,
+                    full_rgba_pack_present: false,
+                    dirty_region_pack_present: true,
+                    raw_packet_pack_present: true,
+                    geometry_build_us: 13,
+                    upload_bytes: 4096,
+                    requested_pixels: 2,
+                    readback_bytes: 8,
+                    target_allocation_id: 4,
+                    geometry_hits: 7,
+                    geometry_misses: 1,
+                    target_reuses: 2,
+                    ..TerminalRasterRendererTelemetry::default()
+                },
+                tuning_present: false,
+                tuning: TerminalTuningMetrics::default(),
+            },
+            publication: TerminalPublicationTelemetry::default(),
+        };
+        let bytes = vox_phon::to_vec(&event).expect("encode V4 raster event");
+        let decoded: TerminalRasterFrameEvent =
+            vox_phon::from_slice(&bytes).expect("decode V4 raster event");
+        assert_eq!(decoded, event);
+        assert_eq!(
+            decoded.presentation_generation,
+            request.presentation_generation
+        );
+        assert_eq!(decoded.renderer_id, request.requested_renderer_id);
+        assert_eq!(decoded.transport_id, request.requested_transport_id);
+    }
+
+    #[test]
+    fn terminal_v7_tuning_request_metrics_and_rejection_round_trip() {
+        let request = TerminalTuningRequest {
+            renderer_id: "rust-gpu-slug".to_string(),
+            surface_mode: TerminalTuningMode::Auto,
+            surface_width: 3_840,
+            surface_height: 2_054,
+            font_mode: TerminalTuningMode::Manual,
+            font_pixel_size: 24,
+            cells_mode: TerminalTuningMode::Manual,
+            columns: 120,
+            rows: 40,
+        };
+        let metrics = TerminalTuningMetrics {
+            request: request.clone(),
+            surface_width: 3_840,
+            surface_height: 2_054,
+            columns: 120,
+            rows: 40,
+            cell_width: 15,
+            cell_height: 29,
+            effective_font_pixel_size_milli: 24_000,
+            raster_width: 1_800,
+            raster_height: 1_160,
+            remainder_width: 2_040,
+            remainder_height: 894,
+            adjustments: TerminalTuningAdjustments::default(),
+        };
+        let metrics_bytes = vox_phon::to_vec(&metrics).expect("encode terminal tuning metrics");
+        let decoded_metrics: TerminalTuningMetrics =
+            vox_phon::from_slice(&metrics_bytes).expect("decode terminal tuning metrics");
+        assert_eq!(decoded_metrics, metrics);
+
+        let error = TerminalError {
+            code: TerminalErrorCode::InvalidRequest,
+            message: "exact font cannot fit the requested grid".to_string(),
+            retryable: false,
+            server_sequence: 19,
+            tuning_rejection_present: true,
+            tuning_rejection: TerminalTuningRejection {
+                axis: TerminalTuningAxis::Combination,
+                reason: TerminalTuningRejectionReason::OverConstrained,
+                request,
+            },
+        };
+        let error_bytes = vox_phon::to_vec(&error).expect("encode terminal tuning rejection");
+        let decoded_error: TerminalError =
+            vox_phon::from_slice(&error_bytes).expect("decode terminal tuning rejection");
+        assert_eq!(decoded_error, error);
+    }
+
+    #[test]
+    fn terminal_mouse_motion_round_trips_through_phon() {
+        let input = TerminalMouseInput {
+            session_id: "session-01".to_string(),
+            x: 4,
+            y: 5,
+            buttons: 1,
+            button: 0,
+            pressed: true,
+            motion: true,
+            wheel_x: 0,
+            wheel_y: 0,
+            client_sequence: 7,
+            correlation_id: "mouse-01".to_string(),
+        };
+        let bytes = vox_phon::to_vec(&input).expect("encode terminal mouse motion");
+        let decoded: TerminalMouseInput =
+            vox_phon::from_slice(&bytes).expect("decode terminal mouse motion");
+        assert_eq!(decoded, input);
+        assert!(decoded.motion);
+    }
+
+    #[test]
+    fn terminal_selection_copy_and_paste_round_trip_through_phon() {
+        let input_result = TerminalInputResult {
+            session_id: "session-01".to_string(),
+            server_sequence: 8,
+            frame_sequence: 5,
+            correlation_id: "mouse-01".to_string(),
+            disposition: TerminalInputDisposition::SelectionChanged,
+            selection_present: true,
+            selection: TerminalSelection {
+                anchor_x: 2,
+                anchor_y: 3,
+                focus_x: 7,
+                focus_y: 4,
+            },
+        };
+        let bytes = vox_phon::to_vec(&input_result).expect("encode terminal input result");
+        let decoded: TerminalInputResult =
+            vox_phon::from_slice(&bytes).expect("decode terminal input result");
+        assert_eq!(decoded, input_result);
+
+        let copy = TerminalCopySelectionResult {
+            session_id: "session-01".to_string(),
+            disposition: TerminalCopySelectionDisposition::Copied,
+            text: "99\n100".to_string(),
+            server_sequence: 9,
+            frame_sequence: 5,
+            selection_present: false,
+            selection: TerminalSelection::default(),
+            correlation_id: "copy-01".to_string(),
+        };
+        let bytes = vox_phon::to_vec(&copy).expect("encode terminal copy result");
+        let decoded: TerminalCopySelectionResult =
+            vox_phon::from_slice(&bytes).expect("decode terminal copy result");
+        assert_eq!(decoded, copy);
+
+        let paste = TerminalPasteRequest {
+            session_id: "session-01".to_string(),
+            policy: TerminalPastePolicy::GuardMultiline,
+            source: TerminalPasteSource::Supplied,
+            supplied_text: "99\n100".to_string(),
+            approved_content_id: String::new(),
+            client_sequence: 10,
+            correlation_id: "paste-01".to_string(),
+        };
+        let bytes = vox_phon::to_vec(&paste).expect("encode terminal paste request");
+        let decoded: TerminalPasteRequest =
+            vox_phon::from_slice(&bytes).expect("decode terminal paste request");
+        assert_eq!(decoded, paste);
+    }
+
+    #[test]
+    fn terminal_contract_fixture_matches_method_ids_and_bounds() {
+        let v1 = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test-fixtures/terminal/terminal-contract-v1.json"
+        ));
+        let v2 = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test-fixtures/terminal/terminal-contract-v2.json"
+        ));
+        let v3 = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test-fixtures/terminal/terminal-contract-v3.json"
+        ));
+        let v4 = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test-fixtures/terminal/terminal-contract-v4.json"
+        ));
+        let v5 = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test-fixtures/terminal/terminal-contract-v5.json"
+        ));
+        let v6 = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test-fixtures/terminal/terminal-contract-v6.json"
+        ));
+        let v7 = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test-fixtures/terminal/terminal-contract-v7.json"
+        ));
+        let v8 = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test-fixtures/terminal/terminal-contract-v8.json"
+        ));
+        let service = terminal_service_descriptor();
+        assert_eq!(service.service_name, "Terminal");
+        assert_eq!(service.methods.len(), 15);
+        let v1_methods = [
+            "connect",
+            "capabilities",
+            "resize",
+            "send_text",
+            "send_key",
+            "send_mouse",
+            "snapshot",
+            "get_content",
+            "cancel",
+            "disconnect",
+        ];
+        let v2_methods = [
+            "connect",
+            "capabilities",
+            "resize",
+            "send_text",
+            "send_key",
+            "send_mouse",
+            "snapshot",
+            "subscribe_frames",
+            "get_content",
+            "cancel",
+            "disconnect",
+        ];
+        for method in service.methods {
+            let expected = format!(
+                "\"name\": \"{}\", \"id\": \"{:016x}\"",
+                method.method_name, method.id.0
+            );
+            if v1_methods.contains(&method.method_name) {
+                assert!(
+                    v1.contains(&expected),
+                    "v1 fixture is missing immutable descriptor entry: {expected}"
+                );
+            }
+            if v2_methods.contains(&method.method_name) {
+                assert!(
+                    v2.contains(&expected),
+                    "v2 fixture is missing immutable descriptor entry: {expected}"
+                );
+            }
+            if !matches!(method.method_name, "copy_selection" | "paste") {
+                assert!(
+                    v3.contains(&expected),
+                    "v3 fixture is missing descriptor entry: {expected}"
+                );
+                assert!(
+                    v4.contains(&expected),
+                    "v4 fixture is missing descriptor entry: {expected}"
+                );
+                assert!(
+                    v5.contains(&expected),
+                    "v5 fixture is missing descriptor entry: {expected}"
+                );
+                assert!(
+                    v6.contains(&expected),
+                    "v6 fixture is missing descriptor entry: {expected}"
+                );
+                assert!(
+                    v7.contains(&expected),
+                    "v7 fixture is missing descriptor entry: {expected}"
+                );
+            }
+            assert!(
+                v8.contains(&expected),
+                "v8 fixture is missing descriptor entry: {expected}"
+            );
+        }
+        assert!(v2.contains("\"role\": \"channel.arg.1.tx.element\""));
+        assert!(v2.contains("\"producer_pending_bound\": 1"));
+        assert!(v2.contains("\"coalescing\": \"newest-full-state-wins\""));
+        assert!(v2.contains("\"polling\": \"recovery-only\""));
+        assert!(v2.contains("\"max_width\": 512"));
+        assert!(v2.contains("\"max_height\": 256"));
+        assert!(v2.contains("\"max_frame_bytes\": 16777216"));
+        assert!(v3.contains("\"transport_id\": \"full-png\""));
+        assert!(v3.contains("\"transport_id\": \"full-raw-rgba\""));
+        assert!(v3.contains("\"transport_id\": \"dirty-raw-rgba\""));
+        assert!(v3.contains("\"steady_frame_kind\": \"DirtyRegions\""));
+        assert!(v3.contains("\"generation\": \"client-chosen-opaque\""));
+        assert!(v3.contains("\"dirty_base\": \"exact-currently-composed-frame-sequence\""));
+        assert!(v4.contains("\"default_renderer_id\": \"rust-cpu-fontdue\""));
+        assert_eq!(
+            v4.matches("\"renderer_id\": \"rust-cpu-fontdue\"").count(),
+            3
+        );
+        assert_eq!(v4.matches("\"renderer_id\": \"rust-gpu-slug\"").count(), 3);
+        assert_eq!(v4.matches("\"rasterization_owner\": \"Server\"").count(), 6);
+        assert!(v4.contains("\"rasterization_owner_values\": [\"Server\", \"Client\"]"));
+        assert!(v4.contains("\"generation_field\": \"presentation_generation\""));
+        assert!(v4.contains("\"sequence_scope\": \"presentation-generation\""));
+        assert!(v4.contains("\"close\": \"terminates-bound-raster-subscriptions\""));
+        assert!(v4.contains("\"replacement\": \"fresh-lane-on-same-connection\""));
+        assert!(v5.contains("\"version\": 5"));
+        assert!(v5.contains("\"selectable_collection\": \"modes\""));
+        assert!(v5.contains("\"unavailable_collection\": \"unavailable_presentations\""));
+        assert!(v5.contains("\"defaults_must_identify_selectable_mode\": true"));
+        assert_eq!(
+            v5.matches("\"renderer_id\": \"rust-cpu-fontdue\"").count(),
+            3
+        );
+        assert_eq!(v5.matches("\"renderer_id\": \"rust-gpu-slug\"").count(), 3);
+        assert_eq!(v5.matches("\"code\": \"UnsupportedCapability\"").count(), 3);
+        assert_eq!(
+            v5.matches("rust-gpu-slug unavailable: no Vulkan 1.2 compute device was found")
+                .count(),
+            3
+        );
+        assert!(v5.contains("\"modes_semantics\": \"valid-selectable-only\""));
+        assert!(v5.contains("\"selection\": \"reject-with-advertised-error-without-fallback\""));
+        assert!(v6.contains("\"version\": 6"));
+        assert!(v6.contains("\"extends\": \"terminal-contract-v5.json\""));
+        assert!(v6.contains("\"scope\": \"per-raster-frame-evidence\""));
+        assert!(v6.contains("\"selection_axis\": false"));
+        assert!(v6.contains("\"compatibility\": \"defaulted-trailing-record\""));
+        assert!(v6.contains("\"not_applicable\": \"explicit-presence-flags\""));
+        assert!(v6.contains("\"gpu_completion_wait_us\""));
+        assert!(v6.contains("\"target_reuses\""));
+        assert!(v6.contains("\"font_renderer_cache_hits\""));
+        assert!(v7.contains("\"version\": 7"));
+        assert!(v7.contains("\"extends\": \"terminal-contract-v6.json\""));
+        assert!(v7.contains("\"manual_font\": \"exact-or-reject\""));
+        assert!(v7.contains("\"rejection_retention\": \"last-accepted-state-unchanged\""));
+        assert!(v7.contains("\"font_precision\": \"milli-pixels\""));
+        assert!(v8.contains("\"version\": 8"));
+        assert!(v8.contains("\"extends\": \"terminal-contract-v7.json\""));
+        assert!(v8.contains("\"guard_trigger\": \"contains-cr-or-lf\""));
+        assert!(v8.contains("\"guard_no_write\": true"));
+        assert!(v8.contains("\"remote_clipboard\": \"caller-resolves-auto-and-sends-supplied\""));
+        assert!(v8.contains(
+            "\"remote_raster_selection\": \"base-pixels-selection-free-client-overlay\""
+        ));
+    }
+}

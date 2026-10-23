@@ -1602,8 +1602,14 @@ impl Connection {
                         Ok(Some(msg)) => {
                             // Capture the frame's descriptors before the next
                             // recv overwrites them; thread them with the msg.
+                            #[cfg(unix)]
                             let fds = self.rx.take_frame_fds();
+                            #[cfg(not(unix))]
+                            self.rx.take_frame_fds();
+                            #[cfg(unix)]
                             self.handle_message(msg, fds, &mut keepalive_runtime).await;
+                            #[cfg(not(unix))]
+                            self.handle_message(msg, (), &mut keepalive_runtime).await;
                         }
                         Ok(None) => {
                             vox_types::dlog!(

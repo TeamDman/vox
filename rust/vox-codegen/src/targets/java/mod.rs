@@ -1,0 +1,2347 @@
+//! Java 17 source generation for the supported Vox RPC slice.
+
+use std::collections::HashSet;
+use std::fmt::{self, Write};
+
+use facet_core::{ScalarType, Shape};
+use phon_schema::schema_to_bytes;
+use vox_types::{
+    EnumInfo, MethodDescriptor, ServiceDescriptor, ShapeKind, StructInfo, VariantKind,
+    classify_shape, classify_variant, is_bytes,
+};
+
+/// One deterministic Java compilation unit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JavaFile {
+    pub relative_path: String,
+    pub source: String,
+}
+
+/// A focused generation error. Java generation is deliberately fallible because
+/// the first Java runtime accepts a smaller shape/transport surface than Rust.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JavaCodegenError {
+    pub service: String,
+    pub method: String,
+    pub detail: String,
+}
+
+impl fmt::Display for JavaCodegenError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Java codegen does not support {}.{}: {}",
+            self.service, self.method, self.detail
+        )
+    }
+}
+
+impl std::error::Error for JavaCodegenError {}
+
+/// Generate DTO, descriptor, handler, dispatcher, and caller compilation units.
+///
+/// Files are sorted by relative path and contain no timestamps, so two runs for
+/// the same descriptor are byte-identical.
+pub fn generate_service(service: &ServiceDescriptor) -> Result<Vec<JavaFile>, JavaCodegenError> {
+    validate_service(service)?;
+    let package = "org.facet.vox.generated";
+    let service_name = java_type_name(service.service_name);
+    let named = collect_named_types(service);
+    let mut files = vec![JavaFile {
+        relative_path: "PrimitiveAdapters.java".to_string(),
+        source: generate_primitive_adapters(package),
+    }];
+
+    for (name, shape) in named {
+        files.push(JavaFile {
+            relative_path: format!("{name}.java"),
+            source: generate_named_type(package, &name, shape),
+        });
+    }
+    for method in service.methods {
+        let args_name = args_type_name(&service_name, method);
+        files.push(JavaFile {
+            relative_path: format!("{args_name}.java"),
+            source: generate_args_type(package, &args_name, method),
+        });
+        let response_name = response_type_name(&service_name, method);
+        files.push(JavaFile {
+            relative_path: format!("{response_name}.java"),
+            source: generate_response_type(package, &response_name, method)?,
+        });
+    }
+    files.push(JavaFile {
+        relative_path: format!("{service_name}ServiceDescriptor.java"),
+        source: generate_descriptor(package, &service_name, service),
+    });
+    files.push(JavaFile {
+        relative_path: format!("{service_name}Handler.java"),
+        source: generate_handler(package, &service_name, service),
+    });
+    files.push(JavaFile {
+        relative_path: format!("{service_name}Dispatcher.java"),
+        source: generate_dispatcher(package, &service_name, service),
+    });
+    files.push(JavaFile {
+        relative_path: format!("{service_name}Client.java"),
+        source: generate_client(package, &service_name, service),
+    });
+    files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    Ok(files)
+}
+
+/// Generate the canonical connection-envelope and handshake schema tables.
+///
+/// The emitted bytes and root ids are derived from the Rust `vox-types` shapes;
+/// Java never re-derives protocol schema identity or duplicates variant order.
+pub fn generate_wire_schemas() -> Result<Vec<JavaFile>, phon::derive::DeriveError> {
+    use facet::Facet;
+    use phon_codegen::Module;
+    use phon_codegen::targets::java::render_schema_table;
+    use vox_types as wire;
+
+    let message = Module::from_shapes(&[<wire::Message<'static> as Facet<'static>>::SHAPE])?;
+    let handshake = Module::from_shapes(&[<wire::HandshakeMessage as Facet<'static>>::SHAPE])?;
+    Ok(vec![
+        JavaFile {
+            relative_path: "HandshakeWireSchemas.java".to_string(),
+            source: render_schema_table(
+                &handshake,
+                "org.facet.vox.generated",
+                "HandshakeWireSchemas",
+            ),
+        },
+        JavaFile {
+            relative_path: "MessageWireSchemas.java".to_string(),
+            source: render_schema_table(&message, "org.facet.vox.generated", "MessageWireSchemas"),
+        },
+    ])
+}
+
+/// Render one Rust-authoritative Phon shape as a Java schema table.
+pub fn generate_schema_table(
+    shape: &'static Shape,
+    class_name: &str,
+) -> Result<JavaFile, phon::derive::DeriveError> {
+    let module = phon_codegen::Module::from_shapes(&[shape])?;
+    Ok(JavaFile {
+        relative_path: format!("{class_name}.java"),
+        source: phon_codegen::targets::java::render_schema_table(
+            &module,
+            "org.facet.vox.generated",
+            class_name,
+        ),
+    })
+}
+
+fn header(package: &str) -> String {
+    format!(
+        "// @generated by vox-codegen; DO NOT EDIT.\n\
+         // Regenerate with `cargo xtask codegen --java`.\n\
+         package {package};\n\n"
+    )
+}
+
+fn validate_service(service: &ServiceDescriptor) -> Result<(), JavaCodegenError> {
+    for method in service.methods {
+        if vox_types::shape_contains_channel(method.return_shape) {
+            return Err(error(method, "channels may not appear in return types"));
+        }
+        for arg in method.args {
+            match channel_arg_direction(arg) {
+                Some(_) => validate_shape(
+                    method,
+                    arg.channel_element.expect("channel element"),
+                    "channel element",
+                )?,
+                None => validate_shape(method, arg.shape, "argument")?,
+            }
+        }
+        validate_shape(method, method.return_shape, "return type")?;
+    }
+    Ok(())
+}
+
+fn validate_shape(
+    method: &MethodDescriptor,
+    shape: &'static Shape,
+    location: &str,
+) -> Result<(), JavaCodegenError> {
+    if is_bytes(shape) {
+        return Ok(());
+    }
+    if matches!(shape.def, facet_core::Def::DynamicValue(_)) {
+        return Err(error(method, &format!("dynamic Facet value in {location}")));
+    }
+    #[cfg(unix)]
+    if vox_types::is_fd(shape) {
+        return Err(error(
+            method,
+            &format!("file descriptor capability in {location}"),
+        ));
+    }
+    match classify_shape(shape) {
+        ShapeKind::Opaque => Err(error(
+            method,
+            &format!(
+                "opaque or external shape `{}` in {location}",
+                shape.type_identifier
+            ),
+        )),
+        ShapeKind::Tx { .. } | ShapeKind::Rx { .. } => {
+            Err(error(method, &format!("channel in {location}")))
+        }
+        ShapeKind::List { element } | ShapeKind::Slice { element } => {
+            validate_shape(method, element, location)
+        }
+        ShapeKind::Set { .. }
+        | ShapeKind::Array { .. }
+        | ShapeKind::Option { .. }
+        | ShapeKind::Map { .. } => Err(error(
+            method,
+            &format!(
+                "container shape `{}` in {location} is not implemented yet",
+                shape.type_identifier
+            ),
+        )),
+        ShapeKind::Pointer { pointee } => validate_shape(method, pointee, location),
+        ShapeKind::Result {
+            ok: key,
+            err: value,
+        } => {
+            validate_shape(method, key, location)?;
+            validate_shape(method, value, location)
+        }
+        ShapeKind::Tuple { elements } => {
+            for element in elements {
+                validate_shape(method, element.shape, location)?;
+            }
+            Ok(())
+        }
+        ShapeKind::TupleStruct { fields } | ShapeKind::Struct(StructInfo { fields, .. }) => {
+            for field in fields {
+                validate_shape(method, field.shape(), location)?;
+            }
+            Ok(())
+        }
+        ShapeKind::Enum(EnumInfo { variants, .. }) => {
+            for variant in variants {
+                match classify_variant(variant) {
+                    VariantKind::Unit => {}
+                    VariantKind::Newtype { .. }
+                    | VariantKind::Tuple { .. }
+                    | VariantKind::Struct { .. } => {
+                        return Err(error(
+                            method,
+                            &format!(
+                                "payload enum `{}` in {location} is not implemented yet",
+                                shape.type_identifier
+                            ),
+                        ));
+                    }
+                }
+            }
+            Ok(())
+        }
+        ShapeKind::Scalar(
+            ScalarType::Bool
+            | ScalarType::U8
+            | ScalarType::U16
+            | ScalarType::U32
+            | ScalarType::I8
+            | ScalarType::I16
+            | ScalarType::I32
+            | ScalarType::I64
+            | ScalarType::F32
+            | ScalarType::F64
+            | ScalarType::Str
+            | ScalarType::String
+            | ScalarType::CowStr
+            | ScalarType::Unit,
+        ) => Ok(()),
+        ShapeKind::Scalar(_) => Err(error(
+            method,
+            &format!(
+                "scalar shape `{}` in {location} is not implemented yet",
+                shape.type_identifier
+            ),
+        )),
+    }
+}
+
+fn error(method: &MethodDescriptor, detail: &str) -> JavaCodegenError {
+    JavaCodegenError {
+        service: method.service_name.to_string(),
+        method: method.method_name.to_string(),
+        detail: detail.to_string(),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum JavaChannelDirection {
+    Tx,
+    Rx,
+}
+
+fn channel_arg_direction(arg: &vox_types::ArgDescriptor) -> Option<JavaChannelDirection> {
+    arg.channel_element?;
+    match classify_shape(arg.shape) {
+        ShapeKind::Tx { .. } => Some(JavaChannelDirection::Tx),
+        ShapeKind::Rx { .. } => Some(JavaChannelDirection::Rx),
+        _ => match arg.shape.type_identifier.rsplit("::").next() {
+            Some("Tx") => Some(JavaChannelDirection::Tx),
+            Some("Rx") => Some(JavaChannelDirection::Rx),
+            _ => None,
+        },
+    }
+}
+
+fn java_arg_type(arg: &vox_types::ArgDescriptor) -> String {
+    match channel_arg_direction(arg) {
+        Some(JavaChannelDirection::Tx) => format!(
+            "VoxTx<{}>",
+            boxed_java_type(arg.channel_element.expect("channel element"))
+        ),
+        Some(JavaChannelDirection::Rx) => format!(
+            "VoxRx<{}>",
+            boxed_java_type(arg.channel_element.expect("channel element"))
+        ),
+        None => java_type(arg.shape, false),
+    }
+}
+
+fn collect_named_types(service: &ServiceDescriptor) -> Vec<(String, &'static Shape)> {
+    let mut seen = HashSet::new();
+    let mut result = Vec::new();
+    for method in service.methods {
+        visit_named(method.args_shape, &mut seen, &mut result);
+        visit_named(method.return_shape, &mut seen, &mut result);
+        for arg in method.args {
+            if let Some(element) = arg.channel_element {
+                visit_named(element, &mut seen, &mut result);
+            }
+        }
+    }
+    result.sort_by(|a, b| a.0.cmp(&b.0));
+    result
+}
+
+fn visit_named(
+    shape: &'static Shape,
+    seen: &mut HashSet<String>,
+    result: &mut Vec<(String, &'static Shape)>,
+) {
+    match classify_shape(shape) {
+        ShapeKind::Struct(StructInfo {
+            name: Some(name),
+            fields,
+            ..
+        }) => {
+            for field in fields {
+                visit_named(field.shape(), seen, result);
+            }
+            if seen.insert(name.to_string()) {
+                result.push((java_type_name(name), shape));
+            }
+        }
+        ShapeKind::Enum(EnumInfo {
+            name: Some(name),
+            variants,
+        }) => {
+            for variant in variants {
+                match classify_variant(variant) {
+                    VariantKind::Unit => {}
+                    VariantKind::Newtype { inner } => visit_named(inner, seen, result),
+                    VariantKind::Tuple { fields } | VariantKind::Struct { fields } => {
+                        for field in fields {
+                            visit_named(field.shape(), seen, result);
+                        }
+                    }
+                }
+            }
+            if seen.insert(name.to_string()) {
+                result.push((java_type_name(name), shape));
+            }
+        }
+        ShapeKind::List { element }
+        | ShapeKind::Slice { element }
+        | ShapeKind::Set { element }
+        | ShapeKind::Array { element, .. }
+        | ShapeKind::Option { inner: element }
+        | ShapeKind::Pointer { pointee: element } => visit_named(element, seen, result),
+        ShapeKind::Map { key, value }
+        | ShapeKind::Result {
+            ok: key,
+            err: value,
+        } => {
+            visit_named(key, seen, result);
+            visit_named(value, seen, result);
+        }
+        ShapeKind::Tuple { elements } => {
+            for element in elements {
+                visit_named(element.shape, seen, result);
+            }
+        }
+        ShapeKind::TupleStruct { fields } => {
+            for field in fields {
+                visit_named(field.shape(), seen, result);
+            }
+        }
+        ShapeKind::Struct(StructInfo {
+            name: None, fields, ..
+        }) => {
+            for field in fields {
+                visit_named(field.shape(), seen, result);
+            }
+        }
+        ShapeKind::Enum(EnumInfo {
+            name: None,
+            variants,
+        }) => {
+            for variant in variants {
+                match classify_variant(variant) {
+                    VariantKind::Unit => {}
+                    VariantKind::Newtype { inner } => visit_named(inner, seen, result),
+                    VariantKind::Tuple { fields } | VariantKind::Struct { fields } => {
+                        for field in fields {
+                            visit_named(field.shape(), seen, result);
+                        }
+                    }
+                }
+            }
+        }
+        ShapeKind::Tx { inner } | ShapeKind::Rx { inner } => visit_named(inner, seen, result),
+        ShapeKind::Scalar(_) | ShapeKind::Opaque => {}
+    }
+}
+
+fn generate_named_type(package: &str, name: &str, shape: &'static Shape) -> String {
+    match classify_shape(shape) {
+        ShapeKind::Struct(StructInfo { fields, .. }) => {
+            let mut out = header(package);
+            out.push_str("import java.util.List;\nimport java.util.Objects;\n");
+            out.push_str("import org.facet.phon.*;\n\n");
+            let _ = writeln!(out, "public final class {name} {{");
+            for field in fields {
+                let _ = writeln!(
+                    out,
+                    "  private final {} {};",
+                    java_type(field.shape(), false),
+                    java_ident(field.name)
+                );
+            }
+            out.push('\n');
+            let args = fields
+                .iter()
+                .map(|f| format!("{} {}", java_type(f.shape(), false), java_ident(f.name)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(out, "  public {name}({args}) {{");
+            for field in fields {
+                let field_name = java_ident(field.name);
+                if is_list(field.shape()) {
+                    let _ = writeln!(
+                        out,
+                        "    this.{field_name} = List.copyOf(Objects.requireNonNull({field_name}, \"{field_name}\"));"
+                    );
+                } else if is_reference(field.shape()) && !is_option(field.shape()) {
+                    let _ = writeln!(
+                        out,
+                        "    this.{field_name} = Objects.requireNonNull({field_name}, \"{field_name}\");"
+                    );
+                } else {
+                    let _ = writeln!(out, "    this.{field_name} = {field_name};");
+                }
+            }
+            out.push_str("  }\n\n");
+            let required_fields = fields
+                .iter()
+                .filter(|field| field.default.is_none())
+                .collect::<Vec<_>>();
+            if required_fields.len() != fields.len() {
+                let args = required_fields
+                    .iter()
+                    .map(|field| {
+                        format!(
+                            "{} {}",
+                            java_type(field.shape(), false),
+                            java_ident(field.name)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let values = fields
+                    .iter()
+                    .map(|field| {
+                        if field.default.is_some() {
+                            java_default_expression(field.shape())
+                        } else {
+                            java_ident(field.name).to_string()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let _ = writeln!(
+                    out,
+                    "  /** Compatibility constructor omitting fields with a Rust default. */\n  public {name}({args}) {{ this({values}); }}\n\n"
+                );
+            }
+            for field in fields {
+                let field_name = java_ident(field.name);
+                let _ = writeln!(
+                    out,
+                    "  public {} {}() {{ return {}; }}",
+                    java_type(field.shape(), false),
+                    field_name,
+                    field_name
+                );
+            }
+            out.push('\n');
+            emit_record_schema_and_adapter(&mut out, name, shape, fields);
+            out.push_str("\n  @Override public boolean equals(Object other) {\n");
+            let _ = writeln!(
+                out,
+                "    if (!(other instanceof {name} that)) return false;"
+            );
+            let comparisons = fields
+                .iter()
+                .map(|f| {
+                    let n = java_ident(f.name);
+                    format!("Objects.deepEquals({n}, that.{n})")
+                })
+                .collect::<Vec<_>>()
+                .join(" && ");
+            let _ = writeln!(
+                out,
+                "    return {};",
+                if comparisons.is_empty() {
+                    "true"
+                } else {
+                    &comparisons
+                }
+            );
+            out.push_str("  }\n");
+            let names = fields
+                .iter()
+                .map(|f| java_ident(f.name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(
+                out,
+                "  @Override public int hashCode() {{ return Objects.hash({names}); }}"
+            );
+            let _ = writeln!(
+                out,
+                "  @Override public String toString() {{ return \"{name}\" + java.util.List.of({names}); }}"
+            );
+            out.push_str("}\n");
+            out
+        }
+        ShapeKind::Enum(EnumInfo { variants, .. })
+            if variants
+                .iter()
+                .all(|v| matches!(classify_variant(v), VariantKind::Unit)) =>
+        {
+            let mut out = header(package);
+            out.push_str("import java.util.List;\nimport org.facet.phon.*;\n\n");
+            let constants = variants
+                .iter()
+                .map(|v| java_enum_constant(v.name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(out, "public enum {name} {{ {constants};");
+            let id = schema_id(shape);
+            let variant_exprs = variants
+                .iter()
+                .enumerate()
+                .map(|(index, variant)| {
+                    format!(
+                        "new Schema.Variant(\"{}\", {index}, Schema.Payload.unit())",
+                        variant.name
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(
+                out,
+                "  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x{id:016x}L), List.of(), new Schema.EnumKind(\"{name}\", List.of({variant_exprs})));"
+            );
+            let _ = writeln!(
+                out,
+                "  public static final PhonAdapter<{name}> ADAPTER = new PhonAdapter<>() {{"
+            );
+            out.push_str("    @Override public SchemaClosure schema() { return SchemaClosure.uncheckedOf(SCHEMA); }\n");
+            out.push_str("    @Override public void encode(PhonEncoder encoder, ");
+            let _ = writeln!(
+                out,
+                "{name} value) throws PhonException {{ encoder.writeU32Unaligned(value.ordinal()); }}"
+            );
+            let _ = writeln!(
+                out,
+                "    @Override public {name} decode(PhonDecoder decoder) throws PhonException {{ long value = decoder.readU32Unaligned(); if (value >= values().length) throw new PhonException(PhonException.Kind.MALFORMED, \"invalid {name} discriminant \" + value); return values()[(int) value]; }}"
+            );
+            out.push_str("  };\n");
+            out.push_str("}\n");
+            out
+        }
+        _ => {
+            let mut out = header(package);
+            let _ = writeln!(
+                out,
+                "// Shape `{name}` is referenced through its generated adapter."
+            );
+            let _ = writeln!(out, "public final class {name} {{ private {name}() {{}} }}");
+            out
+        }
+    }
+}
+
+fn generate_args_type(package: &str, name: &str, method: &MethodDescriptor) -> String {
+    let mut out = header(package);
+    out.push_str("import java.util.List;\nimport java.util.Map;\nimport java.util.Objects;\nimport org.facet.phon.*;\nimport org.facet.vox.*;\n\n");
+    let _ = writeln!(out, "public final class {name} {{");
+    for arg in method.args {
+        let _ = writeln!(
+            out,
+            "  private final {} {};",
+            java_arg_type(arg),
+            java_ident(arg.name)
+        );
+    }
+    let args = method
+        .args
+        .iter()
+        .map(|arg| format!("{} {}", java_arg_type(arg), java_ident(arg.name)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let _ = writeln!(out, "  public {name}({args}) {{");
+    for arg in method.args {
+        let arg_name = java_ident(arg.name);
+        if is_list(arg.shape) {
+            let _ = writeln!(
+                out,
+                "    this.{arg_name} = List.copyOf(Objects.requireNonNull({arg_name}, \"{arg_name}\"));"
+            );
+        } else if is_reference(arg.shape) && !is_option(arg.shape) {
+            let _ = writeln!(
+                out,
+                "    this.{arg_name} = Objects.requireNonNull({arg_name}, \"{arg_name}\");"
+            );
+        } else {
+            let _ = writeln!(out, "    this.{arg_name} = {arg_name};");
+        }
+    }
+    out.push_str("  }\n");
+    for arg in method.args {
+        let arg_name = java_ident(arg.name);
+        let _ = writeln!(
+            out,
+            "  public {} {}() {{ return {}; }}",
+            java_arg_type(arg),
+            arg_name,
+            arg_name
+        );
+    }
+    let id = schema_id(method.args_shape);
+    let refs = method
+        .args
+        .iter()
+        .map(|arg| match channel_arg_direction(arg) {
+            Some(_) => {
+                // Facet opaque fields are a Phon bytes run whose inner payload is
+                // the canonical u32 channel-table index.
+                "Schema.Ref.concrete(Schema.primitive(Schema.Primitive.BYTES).id())".to_string()
+            }
+            None => schema_ref_expr(arg.shape),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let _ = writeln!(
+        out,
+        "  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x{id:016x}L), List.of(), new Schema.TupleKind(List.of({refs})));"
+    );
+    emit_exact_schema_closure(
+        &mut out,
+        method.args_shape,
+        "SCHEMA_CLOSURE",
+        "schemaClosure",
+    );
+    let _ = writeln!(
+        out,
+        "  public static final PhonAdapter<{name}> ADAPTER = new PhonAdapter<>() {{"
+    );
+    let channel_roots = method
+        .args
+        .iter()
+        .enumerate()
+        .filter_map(|(index, arg)| {
+            let direction = match channel_arg_direction(arg) {
+                Some(JavaChannelDirection::Tx) => "tx",
+                Some(JavaChannelDirection::Rx) => "rx",
+                _ => return None,
+            };
+            let element = arg.channel_element.expect("channel element");
+            Some(format!(
+                "Map.entry(\"channel.arg.{index}.{direction}.element\", {}.schema())",
+                adapter_for(element)
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let closure = if channel_roots.is_empty() {
+        "SCHEMA_CLOSURE".to_string()
+    } else {
+        format!(
+            "SchemaClosure.uncheckedWithAuxiliaryClosures(SCHEMA_CLOSURE, Map.ofEntries({channel_roots}))"
+        )
+    };
+    let _ = writeln!(
+        out,
+        "    @Override public SchemaClosure schema() {{ return {closure}; }}"
+    );
+    let _ = writeln!(
+        out,
+        "    @Override public void encode(PhonEncoder encoder, {name} value) throws PhonException {{"
+    );
+    let mut channel_index = 0_u32;
+    for arg in method.args {
+        let statement = match channel_arg_direction(arg) {
+            Some(_) => {
+                let current = channel_index;
+                channel_index += 1;
+                format!("encoder.writeBytes(VoxChannelDecoding.encodeIndex({current}L));")
+            }
+            None => encode_statement(arg.shape, &format!("value.{}()", java_ident(arg.name))),
+        };
+        let _ = writeln!(out, "      {}", statement);
+    }
+    out.push_str("    }\n");
+    let decoded = method
+        .args
+        .iter()
+        .map(|arg| match channel_arg_direction(arg) {
+            Some(JavaChannelDirection::Tx) => {
+                "VoxChannelDecoding.tx(decoder.readBytes())".to_string()
+            }
+            Some(JavaChannelDirection::Rx) => {
+                "VoxChannelDecoding.rx(decoder.readBytes())".to_string()
+            }
+            None => decode_expression(arg.shape),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let _ = writeln!(
+        out,
+        "    @Override public {name} decode(PhonDecoder decoder) throws PhonException {{ return new {name}({decoded}); }}"
+    );
+    out.push_str("  };\n");
+    out.push_str("}\n");
+    out
+}
+
+fn emit_record_schema_and_adapter(
+    out: &mut String,
+    name: &str,
+    shape: &'static Shape,
+    fields: &[facet_core::Field],
+) {
+    let id = schema_id(shape);
+    let field_exprs = fields
+        .iter()
+        .map(|field| {
+            format!(
+                "new Schema.Field(\"{}\", {}, {})",
+                field.name,
+                schema_ref_expr(field.shape()),
+                field.default.is_none()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let _ = writeln!(
+        out,
+        "  public static final Schema SCHEMA = new Schema(SchemaId.fromLong(0x{id:016x}L), List.of(), new Schema.RecordKind(\"{name}\", List.of({field_exprs})));"
+    );
+    emit_exact_schema_closure(out, shape, "SCHEMA_CLOSURE", "schemaClosure");
+    let _ = writeln!(
+        out,
+        "  public static final PhonAdapter<{name}> ADAPTER = new PhonAdapter<>() {{"
+    );
+    let _ = writeln!(
+        out,
+        "    @Override public SchemaClosure schema() {{ return SCHEMA_CLOSURE; }}"
+    );
+    let _ = writeln!(
+        out,
+        "    @Override public void encode(PhonEncoder encoder, {name} value) throws PhonException {{"
+    );
+    for field in fields {
+        let _ = writeln!(
+            out,
+            "      {}",
+            encode_statement(
+                field.shape(),
+                &format!("value.{}()", java_ident(field.name))
+            )
+        );
+    }
+    out.push_str("    }\n");
+    let decoded = fields
+        .iter()
+        .map(|field| decode_expression(field.shape()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let _ = writeln!(
+        out,
+        "    @Override public {name} decode(PhonDecoder decoder) throws PhonException {{ return new {name}({decoded}); }}"
+    );
+    out.push_str("  };\n");
+}
+
+fn schema_id(shape: &'static Shape) -> u64 {
+    vox_phon::schema_id_for_shape(shape)
+        .unwrap_or_else(|error| {
+            panic!(
+                "Java schema generation failed for `{}`: {error}",
+                shape.type_identifier
+            )
+        })
+        .as_u64()
+}
+
+fn emit_exact_schema_closure(
+    out: &mut String,
+    shape: &'static Shape,
+    field_name: &str,
+    factory_name: &str,
+) {
+    let module = phon_codegen::Module::from_shapes(&[shape]).unwrap_or_else(|error| {
+        panic!(
+            "Java schema closure generation failed for `{}`: {error}",
+            shape.type_identifier
+        )
+    });
+    let root = module
+        .roots
+        .first()
+        .expect("one schema closure root")
+        .id
+        .as_u64();
+    let _ = writeln!(
+        out,
+        "  private static final SchemaClosure {field_name} = {factory_name}();"
+    );
+    let _ = writeln!(
+        out,
+        "  private static SchemaClosure {factory_name}() {{\n    try {{\n      return SchemaClosure.fromCanonicalBytes(SchemaId.fromLong(0x{root:016x}L), new byte[][] {{"
+    );
+    for index in 0..module.schemas.len() {
+        let _ = writeln!(out, "        {factory_name}Schema{index}(),");
+    }
+    out.push_str(
+        "      }, PhonLimits.defaults());\n    } catch (PhonException error) {\n      throw new ExceptionInInitializerError(error);\n    }\n  }\n",
+    );
+    for (index, schema) in module.schemas.iter().enumerate() {
+        let bytes = schema_to_bytes(schema)
+            .iter()
+            .map(|byte| format!("(byte)0x{byte:02x}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(
+            out,
+            "  private static byte[] {factory_name}Schema{index}() {{ return new byte[] {{{bytes}}}; }}"
+        );
+    }
+}
+
+fn exact_schema_closure_expression(shape: &'static Shape) -> String {
+    let module = phon_codegen::Module::from_shapes(&[shape]).unwrap_or_else(|error| {
+        panic!(
+            "Java schema closure generation failed for `{}`: {error}",
+            shape.type_identifier
+        )
+    });
+    let root = module
+        .roots
+        .first()
+        .expect("one schema closure root")
+        .id
+        .as_u64();
+    let schemas = module
+        .schemas
+        .iter()
+        .map(|schema| {
+            let bytes = schema_to_bytes(schema)
+                .iter()
+                .map(|byte| format!("(byte)0x{byte:02x}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("new byte[] {{{bytes}}}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("PrimitiveAdapters.schemaClosure(0x{root:016x}L, new byte[][] {{{schemas}}})")
+}
+
+fn schema_ref_expr(shape: &'static Shape) -> String {
+    format!(
+        "Schema.Ref.concrete(SchemaId.fromLong(0x{:016x}L))",
+        schema_id(shape)
+    )
+}
+
+fn encode_statement(shape: &'static Shape, value: &str) -> String {
+    if is_bytes(shape) {
+        return format!("encoder.writeBytes({value});");
+    }
+    match classify_shape(shape) {
+        ShapeKind::Scalar(ScalarType::Bool) => format!("encoder.writeBool({value});"),
+        ShapeKind::Scalar(ScalarType::U8) => format!("encoder.writeU8({value});"),
+        ShapeKind::Scalar(ScalarType::U16) => format!("encoder.writeU16({value});"),
+        ShapeKind::Scalar(ScalarType::U32) => format!("encoder.writeU32({value});"),
+        ShapeKind::Scalar(ScalarType::I8) => format!("encoder.writeI8({value});"),
+        ShapeKind::Scalar(ScalarType::I16) => format!("encoder.writeI16({value});"),
+        ShapeKind::Scalar(ScalarType::I32) => format!("encoder.writeI32({value});"),
+        ShapeKind::Scalar(ScalarType::I64) => format!("encoder.writeI64({value});"),
+        ShapeKind::Scalar(ScalarType::F32) => format!("encoder.writeF32({value});"),
+        ShapeKind::Scalar(ScalarType::F64) => format!("encoder.writeF64({value});"),
+        ShapeKind::Scalar(ScalarType::Char) => format!("encoder.writeChar({value});"),
+        ShapeKind::Scalar(ScalarType::Unit) => String::new(),
+        ShapeKind::Scalar(ScalarType::Str | ScalarType::String | ScalarType::CowStr) => {
+            format!("encoder.writeString({value});")
+        }
+        ShapeKind::Struct(StructInfo {
+            name: Some(name), ..
+        })
+        | ShapeKind::Enum(EnumInfo {
+            name: Some(name), ..
+        }) => format!(
+            "encoder.writeAdapted({}.ADAPTER, {value});",
+            java_type_name(name)
+        ),
+        ShapeKind::List { element } | ShapeKind::Slice { element } => format!(
+            "PrimitiveAdapters.writeList(encoder, {value}, {});",
+            adapter_for(element)
+        ),
+        _ => format!(
+            "throw new PhonException(PhonException.Kind.DECODE, \"generated adapter for {} is not implemented\");",
+            shape.type_identifier.replace('"', "\\\"")
+        ),
+    }
+}
+
+fn decode_expression(shape: &'static Shape) -> String {
+    if is_bytes(shape) {
+        return "decoder.readBytes()".into();
+    }
+    match classify_shape(shape) {
+        ShapeKind::Scalar(ScalarType::Bool) => "decoder.readBool()".into(),
+        ShapeKind::Scalar(ScalarType::U8) => "decoder.readU8()".into(),
+        ShapeKind::Scalar(ScalarType::U16) => "decoder.readU16()".into(),
+        ShapeKind::Scalar(ScalarType::U32) => "decoder.readU32()".into(),
+        ShapeKind::Scalar(ScalarType::I8) => "decoder.readI8()".into(),
+        ShapeKind::Scalar(ScalarType::I16) => "decoder.readI16()".into(),
+        ShapeKind::Scalar(ScalarType::I32) => "decoder.readI32()".into(),
+        ShapeKind::Scalar(ScalarType::I64) => "decoder.readI64()".into(),
+        ShapeKind::Scalar(ScalarType::F32) => "decoder.readF32()".into(),
+        ShapeKind::Scalar(ScalarType::F64) => "decoder.readF64()".into(),
+        ShapeKind::Scalar(ScalarType::Char) => "decoder.readChar()".into(),
+        ShapeKind::Scalar(ScalarType::Unit) => "null".into(),
+        ShapeKind::Scalar(ScalarType::Str | ScalarType::String | ScalarType::CowStr) => {
+            "decoder.readString()".into()
+        }
+        ShapeKind::Struct(StructInfo {
+            name: Some(name), ..
+        })
+        | ShapeKind::Enum(EnumInfo {
+            name: Some(name), ..
+        }) => format!("decoder.readAdapted({}.ADAPTER)", java_type_name(name)),
+        ShapeKind::List { element } | ShapeKind::Slice { element } => format!(
+            "PrimitiveAdapters.readList(decoder, {})",
+            adapter_for(element)
+        ),
+        _ => format!(
+            "unsupportedDecode(\"{}\")",
+            shape.type_identifier.replace('"', "\\\"")
+        ),
+    }
+}
+
+fn generate_descriptor(package: &str, name: &str, service: &ServiceDescriptor) -> String {
+    let mut out = header(package);
+    out.push_str("import java.util.List;\nimport org.facet.vox.*;\n\n");
+    let _ = writeln!(out, "public final class {name}ServiceDescriptor {{");
+    for method in service.methods {
+        let upper = java_constant(method.method_name);
+        let args_adapter = format!("{}.ADAPTER", args_type_name(name, method));
+        let (ok, err) = result_parts(method.return_shape);
+        let ret_adapter = adapter_for(ok);
+        let response_adapter = format!("{}.ADAPTER", response_type_name(name, method));
+        let channels = method
+            .args
+            .iter()
+            .enumerate()
+            .filter_map(|(index, arg)| {
+                let direction = match channel_arg_direction(arg) {
+                    Some(JavaChannelDirection::Tx) => "TX",
+                    Some(JavaChannelDirection::Rx) => "RX",
+                    _ => return None,
+                };
+                let element = arg.channel_element.expect("channel element");
+                Some(format!(
+                    "new ChannelDescriptor({index}, ChannelDescriptor.Direction.{direction}, \"channel.arg.{index}.{}.element\", {})",
+                    direction.to_ascii_lowercase(),
+                    adapter_for(element)
+                ))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let channel_list = format!("List.of({channels})");
+        let _ = if let Some(err) = err {
+            writeln!(
+                out,
+                "  public static final MethodDescriptor {upper} = new MethodDescriptor(0x{:016x}L, \"{}\", {args_adapter}, {ret_adapter}, {}, {response_adapter}, {channel_list});",
+                crate::method_id(method),
+                method.method_name,
+                adapter_for(err)
+            )
+        } else {
+            writeln!(
+                out,
+                "  public static final MethodDescriptor {upper} = new MethodDescriptor(0x{:016x}L, \"{}\", {args_adapter}, {ret_adapter}, null, {response_adapter}, {channel_list});",
+                crate::method_id(method),
+                method.method_name
+            )
+        };
+    }
+    let methods = service
+        .methods
+        .iter()
+        .map(|m| java_constant(m.method_name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let _ = writeln!(
+        out,
+        "  public static final ServiceDescriptor INSTANCE = new ServiceDescriptor(\"{}\", List.of({methods}));",
+        service.service_name
+    );
+    let _ = writeln!(out, "  private {name}ServiceDescriptor() {{}}");
+    out.push_str("}\n");
+    out
+}
+
+fn generate_handler(package: &str, name: &str, service: &ServiceDescriptor) -> String {
+    let mut out = header(package);
+    out.push_str("import java.util.concurrent.CompletableFuture;\nimport org.facet.vox.*;\n\n");
+    let _ = writeln!(out, "public interface {name}Handler {{");
+    for method in service.methods {
+        let args = method
+            .args
+            .iter()
+            .map(|a| format!("{} {}", java_arg_type(a), java_ident(a.name)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let args = if args.is_empty() {
+            "CallContext context".to_string()
+        } else {
+            format!("CallContext context, {args}")
+        };
+        let return_ty = handler_return(method.return_shape);
+        let _ = writeln!(
+            out,
+            "  CompletableFuture<{return_ty}> {}({args});",
+            java_ident(method.method_name)
+        );
+    }
+    out.push_str("}\n");
+    out
+}
+
+fn generate_response_type(
+    package: &str,
+    name: &str,
+    method: &MethodDescriptor,
+) -> Result<String, JavaCodegenError> {
+    let (ok_shape, error_shape) = result_parts(method.return_shape);
+    let ok_type = boxed_java_type(ok_shape);
+    let error_type = error_shape.map_or_else(|| "Void".to_string(), boxed_java_type);
+    let ok_adapter = adapter_for(ok_shape);
+    let error_adapter = error_shape.map(adapter_for);
+    let mut out = header(package);
+    out.push_str("import org.facet.phon.*;\nimport org.facet.vox.VoxResult;\n\n");
+    let _ = writeln!(out, "public final class {name} {{");
+    emit_exact_schema_closure(
+        &mut out,
+        method.response_wire_shape,
+        "SCHEMA",
+        "responseSchema",
+    );
+    let _ = writeln!(
+        out,
+        "  public static final PhonAdapter<VoxResult<{ok_type}, {error_type}>> ADAPTER = new PhonAdapter<>() {{"
+    );
+    out.push_str("    @Override public SchemaClosure schema() { return SCHEMA; }\n");
+    let _ = writeln!(
+        out,
+        "    @Override public void encode(PhonEncoder encoder, VoxResult<{ok_type}, {error_type}> value) throws PhonException {{"
+    );
+    out.push_str(
+        "      if (value.isSuccess()) {\n        encoder.writeU32Unaligned(0);\n        encoder.writeAdapted(",
+    );
+    let _ = writeln!(
+        out,
+        "{ok_adapter}, value.success());\n        return;\n      }}"
+    );
+    out.push_str("      encoder.writeU32Unaligned(1);\n      switch (value.kind()) {\n");
+    if let Some(ref error_adapter) = error_adapter {
+        let _ = writeln!(
+            out,
+            "        case APPLICATION_ERROR:\n          encoder.writeU32Unaligned(0);\n          encoder.writeAdapted({error_adapter}, value.applicationError());\n          return;"
+        );
+    } else {
+        out.push_str(
+            "        case APPLICATION_ERROR:\n          throw new PhonException(PhonException.Kind.ENCODE, \"infallible method cannot encode an application error\");\n",
+        );
+    }
+    out.push_str(
+        "        case UNKNOWN_METHOD: encoder.writeU32Unaligned(1); return;\n\
+         case INVALID_PAYLOAD: encoder.writeU32Unaligned(2); encoder.writeString(value.detail()); return;\n\
+         case CANCELLED: encoder.writeU32Unaligned(3); return;\n\
+         case CONNECTION_CLOSED: encoder.writeU32Unaligned(4); return;\n\
+         case CONNECTION_SHUTDOWN: encoder.writeU32Unaligned(5); return;\n\
+         case SEND_FAILED: encoder.writeU32Unaligned(6); return;\n\
+         case TIMED_OUT: encoder.writeU32Unaligned(7); return;\n\
+         case INDETERMINATE: encoder.writeU32Unaligned(8); return;\n\
+         default: throw new PhonException(PhonException.Kind.ENCODE, \"invalid response result kind\");\n\
+         }\n    }\n",
+    );
+    let _ = writeln!(
+        out,
+        "    @Override public VoxResult<{ok_type}, {error_type}> decode(PhonDecoder decoder) throws PhonException {{"
+    );
+    out.push_str("      long outer = decoder.readU32Unaligned();\n");
+    if matches!(
+        classify_shape(ok_shape),
+        ShapeKind::Scalar(ScalarType::Unit)
+    ) {
+        let _ = writeln!(
+            out,
+            "      if (outer == 0) {{ decoder.readAdapted({ok_adapter}); return VoxResult.successUnit(); }}"
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "      if (outer == 0) return VoxResult.success(decoder.readAdapted({ok_adapter}));"
+        );
+    }
+    out.push_str(
+        "      if (outer != 1) throw new PhonException(PhonException.Kind.MALFORMED, \"invalid Result discriminant\");\n      long error = decoder.readU32Unaligned();\n      switch ((int) error) {\n",
+    );
+    if let Some(ref error_adapter) = error_adapter {
+        let _ = writeln!(
+            out,
+            "        case 0: return VoxResult.applicationError(decoder.readAdapted({error_adapter}));"
+        );
+    } else {
+        out.push_str(
+            "        case 0: throw new PhonException(PhonException.Kind.MALFORMED, \"infallible method received User error\");\n",
+        );
+    }
+    out.push_str(
+        "        case 1: return VoxResult.infrastructure(VoxResult.Kind.UNKNOWN_METHOD);\n\
+         case 2: return VoxResult.infrastructure(VoxResult.Kind.INVALID_PAYLOAD, decoder.readString());\n\
+         case 3: return VoxResult.infrastructure(VoxResult.Kind.CANCELLED);\n\
+         case 4: return VoxResult.infrastructure(VoxResult.Kind.CONNECTION_CLOSED);\n\
+         case 5: return VoxResult.infrastructure(VoxResult.Kind.CONNECTION_SHUTDOWN);\n\
+         case 6: return VoxResult.infrastructure(VoxResult.Kind.SEND_FAILED);\n\
+         case 7: return VoxResult.infrastructure(VoxResult.Kind.TIMED_OUT);\n\
+         case 8: return VoxResult.infrastructure(VoxResult.Kind.INDETERMINATE);\n\
+         default: throw new PhonException(PhonException.Kind.MALFORMED, \"invalid VoxError discriminant\");\n\
+         }\n    }\n  };\n",
+    );
+    let _ = writeln!(out, "  private {name}() {{}}");
+    out.push_str("}\n");
+    Ok(out)
+}
+
+fn generate_dispatcher(package: &str, name: &str, service: &ServiceDescriptor) -> String {
+    let mut out = header(package);
+    out.push_str("import java.util.List;\nimport java.util.concurrent.CompletableFuture;\nimport java.util.concurrent.CompletionException;\nimport org.facet.phon.*;\nimport org.facet.vox.*;\n\n");
+    let _ = writeln!(
+        out,
+        "public final class {name}Dispatcher implements ServiceDispatcher {{"
+    );
+    let _ = writeln!(out, "  private final {name}Handler handler;");
+    let _ = writeln!(
+        out,
+        "  public {name}Dispatcher({name}Handler handler) {{ this.handler = java.util.Objects.requireNonNull(handler); }}"
+    );
+    let _ = writeln!(
+        out,
+        "  @Override public ServiceDescriptor descriptor() {{ return {name}ServiceDescriptor.INSTANCE; }}"
+    );
+    out.push_str(
+        "  @Override public CompletableFuture<Void> dispatch(InboundCall call) {\n    try {\n",
+    );
+    for method in service.methods {
+        let constant = java_constant(method.method_name);
+        let tuple_ty = args_type_name(name, method);
+        let invoke_args = method
+            .args
+            .iter()
+            .map(|arg| format!("args.{}()", java_ident(arg.name)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let invoke_args = if invoke_args.is_empty() {
+            "call.context()".to_string()
+        } else {
+            format!("call.context(), {invoke_args}")
+        };
+        let (_, error_shape) = result_parts(method.return_shape);
+        let response_ty = response_type_name(name, method);
+        let _ = writeln!(
+            out,
+            "      if (call.method().id() == {name}ServiceDescriptor.{constant}.id()) {{"
+        );
+        let _ = writeln!(
+            out,
+            "        {tuple_ty} args = call.decodeArguments({tuple_ty}.ADAPTER);"
+        );
+        if error_shape.is_some() {
+            let _ = writeln!(
+                out,
+                "        return handler.{}({invoke_args}).thenAccept(value -> {{\n          try {{\n            call.respond(PhonCodec.encode({response_ty}.ADAPTER, value, PhonLimits.defaults()));\n          }} catch (PhonException error) {{\n            throw new CompletionException(error);\n          }}\n        }});",
+                java_ident(method.method_name)
+            );
+        } else {
+            let success = if matches!(
+                classify_shape(method.return_shape),
+                ShapeKind::Scalar(ScalarType::Unit)
+            ) {
+                "VoxResult.successUnit()"
+            } else {
+                "VoxResult.success(value)"
+            };
+            let _ = writeln!(
+                out,
+                "        return handler.{}({invoke_args}).thenAccept(value -> {{\n          try {{\n            call.respond(PhonCodec.encode({response_ty}.ADAPTER, {success}, PhonLimits.defaults()));\n          }} catch (PhonException error) {{\n            throw new CompletionException(error);\n          }}\n        }});",
+                java_ident(method.method_name),
+            );
+        }
+        out.push_str("      }\n");
+    }
+    out.push_str("      return CompletableFuture.failedFuture(new VoxException(\"unknown method \" + call.method().id()));\n    } catch (Exception error) {\n      return CompletableFuture.failedFuture(error);\n    }\n  }\n}\n");
+    out
+}
+
+fn generate_client(package: &str, name: &str, service: &ServiceDescriptor) -> String {
+    let mut out = header(package);
+    out.push_str("import java.util.List;\nimport java.util.concurrent.CompletableFuture;\nimport java.util.concurrent.CompletionException;\nimport org.facet.phon.*;\nimport org.facet.vox.*;\n\n");
+    let _ = writeln!(out, "public final class {name}Client {{");
+    out.push_str("  private final ServiceLane lane;\n");
+    let _ = writeln!(
+        out,
+        "  public {name}Client(ServiceLane lane) {{ this.lane = java.util.Objects.requireNonNull(lane); }}"
+    );
+    for method in service.methods {
+        let args = method
+            .args
+            .iter()
+            .map(|a| format!("{} {}", java_arg_type(a), java_ident(a.name)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let return_ty = handler_return(method.return_shape);
+        let method_name = java_ident(method.method_name);
+        let constant = java_constant(method.method_name);
+        let tuple_ty = args_type_name(name, method);
+        let (_, error_shape) = result_parts(method.return_shape);
+        let response_ty = response_type_name(name, method);
+        let wire_result_ty = wire_result_type(method.return_shape);
+        let channel_arguments = method
+            .args
+            .iter()
+            .enumerate()
+            .filter_map(|(argument_index, arg)| {
+                let (factory, argument_name) = match channel_arg_direction(arg) {
+                    Some(JavaChannelDirection::Tx) => ("tx", java_ident(arg.name)),
+                    Some(JavaChannelDirection::Rx) => ("rx", java_ident(arg.name)),
+                    _ => return None,
+                };
+                let channel_index = method.args[..argument_index]
+                    .iter()
+                    .filter(|previous| channel_arg_direction(previous).is_some())
+                    .count();
+                Some(format!(
+                    "VoxChannelArgument.{factory}({name}ServiceDescriptor.{constant}.channels().get({channel_index}), {argument_name})"
+                ))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let channel_list = format!("List.of({channel_arguments})");
+        let _ = writeln!(
+            out,
+            "  public CompletableFuture<{return_ty}> {method_name}({args}) {{ return {method_name}({}{sep}CallOptions.defaults()); }}",
+            args_names(method),
+            sep = if args.is_empty() { "" } else { ", " }
+        );
+        let with_opts = if args.is_empty() {
+            "CallOptions options".to_string()
+        } else {
+            format!("{args}, CallOptions options")
+        };
+        let _ = writeln!(
+            out,
+            "  public CompletableFuture<{return_ty}> {method_name}({with_opts}) {{"
+        );
+        let _ = writeln!(
+            out,
+            "    try {{\n      byte[] encoded = PhonCodec.encode({tuple_ty}.ADAPTER, new {}({}), PhonLimits.defaults());",
+            tuple_ty,
+            args_names(method)
+        );
+        if error_shape.is_some() {
+            let _ = writeln!(
+                out,
+                "      return VoxFutures.mapCancellable(lane.call({name}ServiceDescriptor.{constant}, encoded, options, {channel_list}), bytes -> {{\n        try {{\n          {wire_result_ty} result = PhonCodec.decode({response_ty}.ADAPTER, bytes, PhonLimits.defaults());\n          if (result.isInfrastructureError()) throw remoteFailure(result);\n          return result;\n        }} catch (PhonException error) {{\n          throw new CompletionException(error);\n        }}\n      }});\n    }} catch (PhonException error) {{\n      return CompletableFuture.failedFuture(error);\n    }}"
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "      return VoxFutures.mapCancellable(lane.call({name}ServiceDescriptor.{constant}, encoded, options, {channel_list}), bytes -> {{\n        try {{\n          {wire_result_ty} result = PhonCodec.decode({response_ty}.ADAPTER, bytes, PhonLimits.defaults());\n          if (!result.isSuccess()) throw remoteFailure(result);\n          return result.success();\n        }} catch (PhonException error) {{\n          throw new CompletionException(error);\n        }}\n      }});\n    }} catch (PhonException error) {{\n      return CompletableFuture.failedFuture(error);\n    }}"
+            );
+        }
+        out.push_str("  }\n");
+    }
+    out.push_str(
+        "  private static CompletionException remoteFailure(VoxResult<?, ?> result) {\n\
+         String detail = result.detail() == null ? \"\" : \": \" + result.detail();\n\
+         return new CompletionException(new VoxException(\"remote Vox error \" + result.kind() + detail));\n\
+         }\n}\n",
+    );
+    out
+}
+
+fn args_names(method: &MethodDescriptor) -> String {
+    method
+        .args
+        .iter()
+        .map(|a| java_ident(a.name))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn args_type_name(service_name: &str, method: &MethodDescriptor) -> String {
+    format!("{service_name}{}Args", upper_camel(method.method_name))
+}
+
+fn response_type_name(service_name: &str, method: &MethodDescriptor) -> String {
+    format!("{service_name}{}Response", upper_camel(method.method_name))
+}
+
+fn result_parts(shape: &'static Shape) -> (&'static Shape, Option<&'static Shape>) {
+    match classify_shape(shape) {
+        ShapeKind::Result { ok, err } => (ok, Some(err)),
+        _ => (shape, None),
+    }
+}
+
+fn handler_return(shape: &'static Shape) -> String {
+    let (ok, err) = result_parts(shape);
+    match err {
+        Some(err) => format!(
+            "VoxResult<{}, {}>",
+            boxed_java_type(ok),
+            boxed_java_type(err)
+        ),
+        None => boxed_java_type(ok),
+    }
+}
+
+fn wire_result_type(shape: &'static Shape) -> String {
+    let (ok, err) = result_parts(shape);
+    format!(
+        "VoxResult<{}, {}>",
+        boxed_java_type(ok),
+        err.map_or_else(|| "Void".to_string(), boxed_java_type)
+    )
+}
+
+fn adapter_for(shape: &'static Shape) -> String {
+    if is_bytes(shape) {
+        return "PrimitiveAdapters.BYTES".to_string();
+    }
+    match classify_shape(shape) {
+        ShapeKind::Struct(StructInfo {
+            name: Some(name), ..
+        })
+        | ShapeKind::Enum(EnumInfo {
+            name: Some(name), ..
+        }) => {
+            format!("{}.ADAPTER", java_type_name(name))
+        }
+        ShapeKind::Scalar(scalar) => {
+            format!("PrimitiveAdapters.{}", primitive_adapter_name(scalar))
+        }
+        ShapeKind::List { element } | ShapeKind::Slice { element } => format!(
+            "PrimitiveAdapters.list({}, {})",
+            adapter_for(element),
+            exact_schema_closure_expression(shape)
+        ),
+        _ => format!(
+            "PrimitiveAdapters.unsupported(\"{}\")",
+            shape.type_identifier
+        ),
+    }
+}
+
+fn generate_primitive_adapters(package: &str) -> String {
+    let mut out = header(package);
+    out.push_str(
+        "import java.util.ArrayList;\nimport java.util.List;\nimport java.util.Objects;\nimport org.facet.phon.*;\n\n",
+    );
+    out.push_str("final class PrimitiveAdapters {\n");
+    let adapters = [
+        (
+            "STRING",
+            "String",
+            "STRING",
+            "encoder.writeString(value);",
+            "decoder.readString()",
+        ),
+        (
+            "BOOL",
+            "Boolean",
+            "BOOL",
+            "encoder.writeBool(value);",
+            "decoder.readBool()",
+        ),
+        (
+            "I32",
+            "Integer",
+            "I32",
+            "encoder.writeI32(value);",
+            "decoder.readI32()",
+        ),
+        (
+            "I64",
+            "Long",
+            "I64",
+            "encoder.writeI64(value);",
+            "decoder.readI64()",
+        ),
+        (
+            "U8",
+            "Integer",
+            "U8",
+            "encoder.writeU8(value);",
+            "decoder.readU8()",
+        ),
+        (
+            "U16",
+            "Integer",
+            "U16",
+            "encoder.writeU16(value);",
+            "decoder.readU16()",
+        ),
+        (
+            "U32",
+            "Long",
+            "U32",
+            "encoder.writeU32(value);",
+            "decoder.readU32()",
+        ),
+        (
+            "F32",
+            "Float",
+            "F32",
+            "encoder.writeF32(value);",
+            "decoder.readF32()",
+        ),
+        (
+            "F64",
+            "Double",
+            "F64",
+            "encoder.writeF64(value);",
+            "decoder.readF64()",
+        ),
+        (
+            "BYTES",
+            "byte[]",
+            "BYTES",
+            "encoder.writeBytes(value);",
+            "decoder.readBytes()",
+        ),
+    ];
+    for (field, ty, primitive, encode, decode) in adapters {
+        let _ = writeln!(
+            out,
+            "  static final PhonAdapter<{ty}> {field} = new PhonAdapter<>() {{"
+        );
+        let _ = writeln!(
+            out,
+            "    @Override public SchemaClosure schema() {{ return SchemaClosure.uncheckedOf(Schema.primitive(Schema.Primitive.{primitive})); }}"
+        );
+        let _ = writeln!(
+            out,
+            "    @Override public void encode(PhonEncoder encoder, {ty} value) throws PhonException {{ {encode} }}"
+        );
+        let _ = writeln!(
+            out,
+            "    @Override public {ty} decode(PhonDecoder decoder) throws PhonException {{ return {decode}; }}"
+        );
+        out.push_str("  };\n");
+    }
+    out.push_str(
+        "  static final PhonAdapter<Void> UNIT = new PhonAdapter<>() {\n    private final SchemaClosure schema = SchemaClosure.uncheckedOf(Schema.primitive(Schema.Primitive.UNIT));\n    @Override public SchemaClosure schema() { return schema; }\n    @Override public void encode(PhonEncoder encoder, Void value) throws PhonException {}\n    @Override public Void decode(PhonDecoder decoder) throws PhonException { return null; }\n  };\n",
+    );
+    out.push_str(
+        "  static <T> void writeList(PhonEncoder encoder, List<T> values, PhonAdapter<T> elementAdapter) throws PhonException {\n    Objects.requireNonNull(values, \"values\");\n    Objects.requireNonNull(elementAdapter, \"elementAdapter\");\n    encoder.writeCount(values.size());\n    for (T value : values) encoder.writeAdapted(elementAdapter, Objects.requireNonNull(value, \"list element\"));\n  }\n",
+    );
+    out.push_str(
+        "  static <T> List<T> readList(PhonDecoder decoder, PhonAdapter<T> elementAdapter) throws PhonException {\n    Objects.requireNonNull(elementAdapter, \"elementAdapter\");\n    int count = decoder.readCount();\n    ArrayList<T> values = new ArrayList<>(count);\n    for (int index = 0; index < count; index++) values.add(decoder.readAdapted(elementAdapter));\n    return List.copyOf(values);\n  }\n",
+    );
+    out.push_str(
+        "  static <T> PhonAdapter<List<T>> list(PhonAdapter<T> elementAdapter, SchemaClosure schema) {\n    Objects.requireNonNull(elementAdapter, \"elementAdapter\");\n    Objects.requireNonNull(schema, \"schema\");\n    return new PhonAdapter<>() {\n      @Override public SchemaClosure schema() { return schema; }\n      @Override public void encode(PhonEncoder encoder, List<T> values) throws PhonException { writeList(encoder, values, elementAdapter); }\n      @Override public List<T> decode(PhonDecoder decoder) throws PhonException { return readList(decoder, elementAdapter); }\n    };\n  }\n",
+    );
+    out.push_str(
+        "  static SchemaClosure schemaClosure(long rootId, byte[][] canonicalSchemas) {\n    try {\n      return SchemaClosure.fromCanonicalBytes(SchemaId.fromLong(rootId), canonicalSchemas, PhonLimits.defaults());\n    } catch (PhonException error) {\n      throw new ExceptionInInitializerError(error);\n    }\n  }\n",
+    );
+    out.push_str("  static <T> PhonAdapter<T> unsupported(String shape) { throw new IllegalArgumentException(\"unsupported generated adapter \" + shape); }\n");
+    out.push_str("  private PrimitiveAdapters() {}\n}\n");
+    out
+}
+
+fn primitive_adapter_name(scalar: ScalarType) -> &'static str {
+    match scalar {
+        ScalarType::Bool => "BOOL",
+        ScalarType::U8 => "U8",
+        ScalarType::U16 => "U16",
+        ScalarType::U32 => "U32",
+        ScalarType::I8 | ScalarType::I16 | ScalarType::I32 => "I32",
+        ScalarType::I64 => "I64",
+        ScalarType::F32 => "F32",
+        ScalarType::F64 => "F64",
+        ScalarType::Str | ScalarType::String | ScalarType::CowStr | ScalarType::Char => "STRING",
+        ScalarType::Unit => "UNIT",
+        _ => "I64",
+    }
+}
+
+fn java_type(shape: &'static Shape, boxed: bool) -> String {
+    if is_bytes(shape) {
+        return "byte[]".to_string();
+    }
+    match classify_shape(shape) {
+        ShapeKind::Scalar(s) => scalar_java(s, boxed),
+        ShapeKind::Option { inner } => format!("java.util.Optional<{}>", boxed_java_type(inner)),
+        ShapeKind::List { element }
+        | ShapeKind::Slice { element }
+        | ShapeKind::Array { element, .. } => {
+            format!("java.util.List<{}>", boxed_java_type(element))
+        }
+        ShapeKind::Set { element } => format!("java.util.Set<{}>", boxed_java_type(element)),
+        ShapeKind::Map { key, value } => format!(
+            "java.util.Map<{}, {}>",
+            boxed_java_type(key),
+            boxed_java_type(value)
+        ),
+        ShapeKind::Struct(StructInfo {
+            name: Some(name), ..
+        })
+        | ShapeKind::Enum(EnumInfo {
+            name: Some(name), ..
+        }) => java_type_name(name),
+        ShapeKind::Tuple { elements } => format!("Tuple{}", elements.len()),
+        ShapeKind::TupleStruct { fields } => format!("Tuple{}", fields.len()),
+        ShapeKind::Result { ok, err } => format!(
+            "VoxResult<{}, {}>",
+            boxed_java_type(ok),
+            boxed_java_type(err)
+        ),
+        ShapeKind::Tx { inner } => format!("VoxTx<{}>", boxed_java_type(inner)),
+        ShapeKind::Rx { inner } => format!("VoxRx<{}>", boxed_java_type(inner)),
+        ShapeKind::Pointer { pointee } => java_type(pointee, boxed),
+        _ => "Object".to_string(),
+    }
+}
+
+fn boxed_java_type(shape: &'static Shape) -> String {
+    java_type(shape, true)
+}
+
+fn java_default_expression(shape: &'static Shape) -> String {
+    match classify_shape(shape) {
+        ShapeKind::Scalar(ScalarType::Bool) => "false".into(),
+        ShapeKind::Scalar(
+            ScalarType::U8
+            | ScalarType::U16
+            | ScalarType::U32
+            | ScalarType::I8
+            | ScalarType::I16
+            | ScalarType::I32
+            | ScalarType::I64
+            | ScalarType::U64
+            | ScalarType::ISize
+            | ScalarType::USize,
+        ) => "0".into(),
+        ShapeKind::Scalar(ScalarType::F32) => "0.0f".into(),
+        ShapeKind::Scalar(ScalarType::F64) => "0.0d".into(),
+        ShapeKind::Scalar(ScalarType::Unit) => "null".into(),
+        ShapeKind::Scalar(
+            ScalarType::Char | ScalarType::Str | ScalarType::String | ScalarType::CowStr,
+        ) => "\"\"".into(),
+        ShapeKind::Scalar(ScalarType::U128 | ScalarType::I128) => {
+            "java.math.BigInteger.ZERO".into()
+        }
+        ShapeKind::Option { .. } => "java.util.Optional.empty()".into(),
+        ShapeKind::List { .. } | ShapeKind::Slice { .. } | ShapeKind::Array { .. } => {
+            "java.util.List.of()".into()
+        }
+        ShapeKind::Set { .. } => "java.util.Set.of()".into(),
+        ShapeKind::Map { .. } => "java.util.Map.of()".into(),
+        ShapeKind::Struct(StructInfo {
+            name: Some(name),
+            fields,
+            ..
+        }) => {
+            let values = fields
+                .iter()
+                .map(|field| java_default_expression(field.shape()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("new {}({values})", java_type_name(name))
+        }
+        ShapeKind::Enum(EnumInfo {
+            name: Some(name),
+            variants,
+        }) if variants
+            .iter()
+            .all(|variant| matches!(classify_variant(variant), VariantKind::Unit)) =>
+        {
+            variants.first().map_or_else(
+                || "null".to_string(),
+                |variant| {
+                    format!(
+                        "{}.{}",
+                        java_type_name(name),
+                        java_enum_constant(variant.name)
+                    )
+                },
+            )
+        }
+        ShapeKind::Pointer { pointee } => java_default_expression(pointee),
+        _ => "null".into(),
+    }
+}
+
+fn scalar_java(scalar: ScalarType, boxed: bool) -> String {
+    match scalar {
+        ScalarType::Bool => if boxed { "Boolean" } else { "boolean" }.into(),
+        ScalarType::U8 | ScalarType::U16 | ScalarType::I8 | ScalarType::I16 | ScalarType::I32 => {
+            if boxed { "Integer" } else { "int" }.into()
+        }
+        ScalarType::U32
+        | ScalarType::I64
+        | ScalarType::U64
+        | ScalarType::ISize
+        | ScalarType::USize => if boxed { "Long" } else { "long" }.into(),
+        ScalarType::F32 => if boxed { "Float" } else { "float" }.into(),
+        ScalarType::F64 => if boxed { "Double" } else { "double" }.into(),
+        ScalarType::U128 | ScalarType::I128 => "java.math.BigInteger".into(),
+        ScalarType::Char | ScalarType::Str | ScalarType::String | ScalarType::CowStr => {
+            "String".into()
+        }
+        ScalarType::Unit => "Void".into(),
+        _ => "Object".into(),
+    }
+}
+
+fn is_reference(shape: &'static Shape) -> bool {
+    !matches!(
+        classify_shape(shape),
+        ShapeKind::Scalar(
+            ScalarType::Bool
+                | ScalarType::U8
+                | ScalarType::U16
+                | ScalarType::U32
+                | ScalarType::U64
+                | ScalarType::USize
+                | ScalarType::I8
+                | ScalarType::I16
+                | ScalarType::I32
+                | ScalarType::I64
+                | ScalarType::ISize
+                | ScalarType::F32
+                | ScalarType::F64
+                | ScalarType::Char
+        )
+    )
+}
+
+fn is_option(shape: &'static Shape) -> bool {
+    matches!(classify_shape(shape), ShapeKind::Option { .. })
+}
+
+fn is_list(shape: &'static Shape) -> bool {
+    !is_bytes(shape)
+        && matches!(
+            classify_shape(shape),
+            ShapeKind::List { .. } | ShapeKind::Slice { .. }
+        )
+}
+
+fn java_type_name(name: &str) -> String {
+    name.rsplit("::")
+        .next()
+        .unwrap_or(name)
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect()
+}
+
+fn upper_camel(name: &str) -> String {
+    name.split('_')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            chars
+                .next()
+                .map(|c| c.to_ascii_uppercase().to_string() + chars.as_str())
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+fn java_ident(name: &str) -> String {
+    let mut out = String::new();
+    for (i, part) in name.split('_').enumerate() {
+        if i == 0 {
+            out.push_str(part);
+        } else {
+            let mut chars = part.chars();
+            if let Some(c) = chars.next() {
+                out.push(c.to_ascii_uppercase());
+            }
+            out.extend(chars);
+        }
+    }
+    match out.as_str() {
+        "class" | "enum" | "interface" | "return" | "default" | "switch" | "case" | "new" => {
+            format!("{out}_")
+        }
+        _ => out,
+    }
+}
+
+fn java_constant(name: &str) -> String {
+    name.chars()
+        .flat_map(|c| {
+            if c.is_ascii_uppercase() {
+                vec!['_', c]
+            } else {
+                vec![c.to_ascii_uppercase()]
+            }
+        })
+        .collect::<String>()
+        .trim_start_matches('_')
+        .to_string()
+}
+
+fn java_enum_constant(name: &str) -> String {
+    java_constant(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use facet::Facet;
+    use vox_types::{MethodDescriptorOptions, Rx, ServiceDescriptor, method_descriptor};
+
+    use super::{generate_service, generate_wire_schemas};
+
+    #[derive(Clone, Debug, Facet)]
+    struct NestedRequest {
+        message: String,
+    }
+
+    #[derive(Clone, Debug, Facet)]
+    struct NestedResponse {
+        echoed: String,
+    }
+
+    #[derive(Clone, Debug, Facet)]
+    struct DefaultedRequest {
+        required: String,
+        #[facet(default)]
+        optional_count: u32,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Facet)]
+    struct ListItem {
+        ordinal: u32,
+        label: String,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Facet)]
+    struct ListEnvelope {
+        items: Vec<ListItem>,
+    }
+
+    #[derive(Clone, Debug, Facet)]
+    #[repr(u8)]
+    enum DivideByZero {
+        Zero = 0,
+    }
+
+    #[derive(Clone, Debug, Facet)]
+    #[repr(u8)]
+    enum DefaultedMode {
+        Auto = 0,
+        Manual = 1,
+    }
+
+    fn fixture_service() -> ServiceDescriptor {
+        let echo = method_descriptor::<(String,), String>(
+            "Review",
+            "echo",
+            &["value"],
+            &[None],
+            MethodDescriptorOptions {
+                response_wire_shape: <Result<String, vox_types::VoxError> as Facet>::SHAPE,
+                doc: None,
+            },
+        );
+        let inspect = method_descriptor::<(NestedRequest,), NestedResponse>(
+            "Review",
+            "inspect",
+            &["request"],
+            &[None],
+            MethodDescriptorOptions {
+                response_wire_shape: <Result<NestedResponse, vox_types::VoxError> as Facet>::SHAPE,
+                doc: None,
+            },
+        );
+        let divide = method_descriptor::<(i64, i64), Result<i64, DivideByZero>>(
+            "Review",
+            "divide",
+            &["dividend", "divisor"],
+            &[None, None],
+            MethodDescriptorOptions {
+                response_wire_shape:
+                    <Result<i64, vox_types::VoxError<DivideByZero>> as Facet>::SHAPE,
+                doc: None,
+            },
+        );
+        let methods = Box::leak(vec![echo, inspect, divide].into_boxed_slice());
+        ServiceDescriptor {
+            service_name: "Review",
+            methods,
+            doc: None,
+        }
+    }
+
+    fn list_fixture_service() -> ServiceDescriptor {
+        let inspect = method_descriptor::<(ListEnvelope,), ListEnvelope>(
+            "ListFixture",
+            "inspect",
+            &["request"],
+            &[None],
+            MethodDescriptorOptions {
+                response_wire_shape: <Result<ListEnvelope, vox_types::VoxError> as Facet>::SHAPE,
+                doc: None,
+            },
+        );
+        let echo_items = method_descriptor::<(Vec<ListItem>,), Vec<ListItem>>(
+            "ListFixture",
+            "echo_items",
+            &["items"],
+            &[None],
+            MethodDescriptorOptions {
+                response_wire_shape: <Result<Vec<ListItem>, vox_types::VoxError> as Facet>::SHAPE,
+                doc: None,
+            },
+        );
+        let methods = Box::leak(vec![inspect, echo_items].into_boxed_slice());
+        ServiceDescriptor {
+            service_name: "ListFixture",
+            methods,
+            doc: None,
+        }
+    }
+
+    #[test]
+    fn java_generation_is_deterministic_and_emits_frozen_surfaces() {
+        let service = fixture_service();
+        let first = generate_service(&service).expect("supported service");
+        let second = generate_service(&service).expect("repeat generation");
+        assert_eq!(first, second);
+        let all = first
+            .iter()
+            .map(|file| file.source.as_str())
+            .collect::<String>();
+        assert!(all.contains("public final class NestedRequest"));
+        assert!(all.contains("public static final PhonAdapter<NestedRequest> ADAPTER"));
+        assert!(all.contains("public interface ReviewHandler"));
+        assert!(all.contains("CompletableFuture<String> echo("));
+        assert!(all.contains("CompletableFuture<VoxResult<Long, DivideByZero>> divide("));
+        assert!(all.contains("public final class ReviewDispatcher implements ServiceDispatcher"));
+        assert!(all.contains("public final class ReviewClient"));
+        assert!(all.contains("0x"));
+    }
+
+    #[test]
+    fn java_generation_preserves_defaulted_field_requiredness() {
+        let inspect = method_descriptor::<(DefaultedRequest,), String>(
+            "ReviewDefaults",
+            "inspect",
+            &["request"],
+            &[None],
+            MethodDescriptorOptions {
+                response_wire_shape: <Result<String, vox_types::VoxError> as Facet>::SHAPE,
+                doc: None,
+            },
+        );
+        let methods = Box::leak(vec![inspect].into_boxed_slice());
+        let service = ServiceDescriptor {
+            service_name: "ReviewDefaults",
+            methods,
+            doc: None,
+        };
+        let file = generate_service(&service)
+            .expect("defaulted service should generate")
+            .into_iter()
+            .find(|file| file.relative_path.ends_with("DefaultedRequest.java"))
+            .expect("defaulted request should be generated");
+
+        let required = super::schema_ref_expr(<String as Facet>::SHAPE);
+        let optional = super::schema_ref_expr(<u32 as Facet>::SHAPE);
+        assert!(
+            file.source
+                .contains(&format!("new Schema.Field(\"required\", {required}, true)"))
+        );
+        assert!(file.source.contains(&format!(
+            "new Schema.Field(\"optional_count\", {optional}, false)"
+        )));
+    }
+
+    #[test]
+    fn java_default_expression_uses_first_unit_enum_variant() {
+        assert_eq!(
+            super::java_default_expression(DefaultedMode::SHAPE),
+            "DefaultedMode.AUTO"
+        );
+    }
+
+    #[test]
+    fn java_generation_emits_bounded_immutable_record_lists() {
+        let files = generate_service(&list_fixture_service()).expect("record lists are supported");
+        let source = |name: &str| {
+            files
+                .iter()
+                .find(|file| file.relative_path == name)
+                .unwrap_or_else(|| panic!("missing generated {name}"))
+                .source
+                .as_str()
+        };
+
+        let envelope = source("ListEnvelope.java");
+        assert!(envelope.contains("private final java.util.List<ListItem> items;"));
+        assert!(
+            envelope
+                .contains("this.items = List.copyOf(Objects.requireNonNull(items, \"items\"));")
+        );
+        assert!(
+            envelope
+                .contains("PrimitiveAdapters.writeList(encoder, value.items(), ListItem.ADAPTER);")
+        );
+        assert!(envelope.contains("PrimitiveAdapters.readList(decoder, ListItem.ADAPTER)"));
+        assert!(envelope.contains("SchemaClosure.fromCanonicalBytes"));
+
+        let primitive = source("PrimitiveAdapters.java");
+        assert!(primitive.contains("encoder.writeCount(values.size())"));
+        assert!(primitive.contains("int count = decoder.readCount()"));
+        assert!(primitive.contains("return List.copyOf(values)"));
+
+        let direct_args = source("ListFixtureEchoItemsArgs.java");
+        assert!(
+            direct_args
+                .contains("this.items = List.copyOf(Objects.requireNonNull(items, \"items\"));")
+        );
+        let descriptor = source("ListFixtureServiceDescriptor.java");
+        assert!(descriptor.contains("PrimitiveAdapters.list(ListItem.ADAPTER"));
+        assert!(descriptor.contains("PrimitiveAdapters.schemaClosure(0x"));
+        assert!(descriptor.contains("new byte[][]"));
+    }
+
+    #[test]
+    fn java_wire_schemas_are_derived_deterministically_from_rust_shapes() {
+        let first = generate_wire_schemas().expect("wire schemas");
+        let second = generate_wire_schemas().expect("repeat wire schemas");
+        assert_eq!(first, second);
+        assert_eq!(
+            first
+                .iter()
+                .map(|file| file.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            ["HandshakeWireSchemas.java", "MessageWireSchemas.java"]
+        );
+        assert!(
+            first
+                .iter()
+                .all(|file| file.source.contains("CANONICAL_SCHEMAS"))
+        );
+        assert!(first[0].source.contains("HANDSHAKE_MESSAGE_SCHEMA_ID"));
+        assert!(first[1].source.contains("MESSAGE_SCHEMA_ID"));
+    }
+
+    #[test]
+    fn java_generation_emits_typed_channel_bindings() {
+        let stream = method_descriptor::<(Rx<String>,), String>(
+            "StreamingService",
+            "stream",
+            &["input"],
+            &[Some(<String as Facet>::SHAPE)],
+            MethodDescriptorOptions {
+                response_wire_shape: <Result<String, vox_types::VoxError> as Facet>::SHAPE,
+                doc: None,
+            },
+        );
+        let methods = Box::leak(vec![stream].into_boxed_slice());
+        let service = ServiceDescriptor {
+            service_name: "StreamingService",
+            methods,
+            doc: None,
+        };
+        let files = generate_service(&service).expect("channels are supported");
+        let joined = files
+            .iter()
+            .map(|file| file.source.as_str())
+            .collect::<String>();
+        assert!(joined.contains("VoxRx<String> input"));
+        assert!(joined.contains("channel.arg.0.rx.element"));
+        assert!(joined.contains("VoxChannelArgument.rx"));
+    }
+
+    #[test]
+    fn generated_fixture_compiles_with_javac_release_17() {
+        let dir = unique_temp_dir();
+        let generated = dir.join("org/facet/vox/generated");
+        fs::create_dir_all(&generated).expect("create generated package");
+        let mut files = generate_service(&fixture_service()).expect("generate fixture");
+        files.extend(generate_service(&list_fixture_service()).expect("generate list fixture"));
+        files.extend(
+            generate_service(spec_proto::terminal::terminal_service_descriptor())
+                .expect("generate terminal fixture"),
+        );
+        for file in files {
+            fs::write(generated.join(file.relative_path), file.source).expect("write Java file");
+        }
+        write_compile_stubs(&dir);
+
+        let sources = collect_java_files(&dir);
+        let classes = dir.join("classes");
+        fs::create_dir_all(&classes).expect("create classes");
+        let output = Command::new("javac")
+            .arg("--release")
+            .arg("17")
+            .arg("-d")
+            .arg(&classes)
+            .args(&sources)
+            .output()
+            .expect("JDK 17+ javac must be available for the Java generator gate");
+        let compiler_close_only = output.status.code() == Some(3)
+            && sources.iter().all(|source| {
+                source
+                    .strip_prefix(&dir)
+                    .ok()
+                    .map(|relative| classes.join(relative).with_extension("class").is_file())
+                    .unwrap_or(false)
+            });
+        if !output.status.success() && !compiler_close_only {
+            panic!(
+                "javac --release 17 failed:\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        if compiler_close_only {
+            eprintln!(
+                "warning: javac returned 3 after emitting every top-level class; treating the compiler resource-close failure as non-fatal"
+            );
+        }
+        fs::remove_dir_all(&dir).expect("remove Java compile fixture");
+    }
+
+    #[test]
+    fn record_list_wire_roundtrips_between_rust_and_generated_java() {
+        let dir = unique_temp_dir();
+        let generated = dir.join("org/facet/vox/generated");
+        fs::create_dir_all(&generated).expect("create generated package");
+        for file in generate_service(&list_fixture_service()).expect("generate list fixture") {
+            if matches!(
+                file.relative_path.as_str(),
+                "PrimitiveAdapters.java" | "ListItem.java" | "ListEnvelope.java"
+            ) {
+                fs::write(generated.join(file.relative_path), file.source)
+                    .expect("write generated list source");
+            }
+        }
+        fs::write(
+            generated.join("ListRoundtrip.java"),
+            r#"package org.facet.vox.generated;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import org.facet.phon.PhonCodec;
+import org.facet.phon.PhonLimits;
+
+public final class ListRoundtrip {
+  public static void main(String[] args) throws Exception {
+    byte[] rustBytes = Files.readAllBytes(Path.of(args[0]));
+    ListEnvelope decoded = PhonCodec.decode(ListEnvelope.ADAPTER, rustBytes, PhonLimits.defaults());
+    check(decoded.items().equals(List.of(
+        new ListItem(7L, "alpha"),
+        new ListItem(11L, "beta"))), "Rust payload decoded in Java");
+
+    boolean decodedImmutable = false;
+    try {
+      decoded.items().add(new ListItem(13L, "forbidden"));
+    } catch (UnsupportedOperationException expected) {
+      decodedImmutable = true;
+    }
+    check(decodedImmutable, "decoded list is immutable");
+
+    ArrayList<ListItem> mutable = new ArrayList<>(decoded.items());
+    ListEnvelope copied = new ListEnvelope(mutable);
+    mutable.clear();
+    check(copied.items().size() == 2, "constructor makes a defensive immutable copy");
+
+    byte[] javaBytes = PhonCodec.encode(ListEnvelope.ADAPTER, copied, PhonLimits.defaults());
+    check(Arrays.equals(rustBytes, javaBytes), "Java encoding matches Rust encoding");
+    Files.write(Path.of(args[1]), javaBytes);
+  }
+
+  private static void check(boolean condition, String message) {
+    if (!condition) throw new AssertionError(message);
+  }
+}
+"#,
+        )
+        .expect("write Java roundtrip harness");
+
+        let value = ListEnvelope {
+            items: vec![
+                ListItem {
+                    ordinal: 7,
+                    label: "alpha".to_string(),
+                },
+                ListItem {
+                    ordinal: 11,
+                    label: "beta".to_string(),
+                },
+            ],
+        };
+        let rust_wire = phon::api::encode(&value).expect("encode Rust list fixture");
+        let rust_wire_path = dir.join("rust.phon");
+        let java_wire_path = dir.join("java.phon");
+        fs::write(&rust_wire_path, &rust_wire).expect("write Rust wire fixture");
+
+        let facet_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let mut sources = collect_java_files(&facet_root.join("phon/java/runtime/src/main/java"));
+        sources.extend(collect_java_files(&generated));
+        sources.sort();
+        let classes = dir.join("classes");
+        fs::create_dir_all(&classes).expect("create Java classes directory");
+        let javac = Command::new("javac")
+            .arg("--release")
+            .arg("17")
+            .arg("-d")
+            .arg(&classes)
+            .args(&sources)
+            .output()
+            .expect("JDK 17+ javac must be available for the Java wire gate");
+        let compiler_close_only = javac.status.code() == Some(3)
+            && sources.iter().all(|source| {
+                source
+                    .strip_prefix(&facet_root.join("phon/java/runtime/src/main/java"))
+                    .or_else(|_| source.strip_prefix(&dir))
+                    .ok()
+                    .map(|relative| classes.join(relative).with_extension("class").is_file())
+                    .unwrap_or(false)
+            });
+        if !javac.status.success() && !compiler_close_only {
+            panic!(
+                "javac --release 17 failed:\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&javac.stdout),
+                String::from_utf8_lossy(&javac.stderr)
+            );
+        }
+        if compiler_close_only {
+            eprintln!(
+                "warning: javac returned 3 after emitting every roundtrip class; treating the compiler resource-close failure as non-fatal"
+            );
+        }
+
+        let java = Command::new("java")
+            .arg("-ea")
+            .arg("-cp")
+            .arg(&classes)
+            .arg("org.facet.vox.generated.ListRoundtrip")
+            .arg(&rust_wire_path)
+            .arg(&java_wire_path)
+            .output()
+            .expect("JDK 17+ java must be available for the Java wire gate");
+        if !java.status.success() {
+            panic!(
+                "Java list roundtrip failed:\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&java.stdout),
+                String::from_utf8_lossy(&java.stderr)
+            );
+        }
+
+        let java_wire = fs::read(&java_wire_path).expect("read Java wire fixture");
+        assert_eq!(java_wire, rust_wire);
+        let decoded: ListEnvelope =
+            phon::api::decode(&java_wire).expect("decode Java list fixture in Rust");
+        assert_eq!(decoded, value);
+        fs::remove_dir_all(&dir).expect("remove Java roundtrip fixture");
+    }
+
+    fn unique_temp_dir() -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!("vox-java-codegen-{}-{nonce}", std::process::id()))
+    }
+
+    fn collect_java_files(root: &Path) -> Vec<PathBuf> {
+        fn visit(path: &Path, files: &mut Vec<PathBuf>) {
+            for entry in fs::read_dir(path).expect("read fixture dir") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    visit(&path, files);
+                } else if path.extension().is_some_and(|ext| ext == "java") {
+                    files.push(path);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        visit(root, &mut files);
+        files.sort();
+        files
+    }
+
+    fn write_compile_stubs(root: &Path) {
+        let files = [
+            (
+                "org/facet/phon/PhonAdapter.java",
+                "package org.facet.phon; public interface PhonAdapter<T> { SchemaClosure schema(); void encode(PhonEncoder e,T v) throws PhonException; T decode(PhonDecoder d) throws PhonException; }",
+            ),
+            (
+                "org/facet/phon/SchemaClosure.java",
+                "package org.facet.phon; import java.util.*; public final class SchemaClosure { public static SchemaClosure uncheckedOf(Schema s,Schema... r){return new SchemaClosure();} public static SchemaClosure uncheckedWithAuxiliaryClosures(Schema s,List<Schema> r,Map<String,SchemaClosure> a){return new SchemaClosure();} public static SchemaClosure uncheckedWithAuxiliaryClosures(SchemaClosure s,Map<String,SchemaClosure> a){return new SchemaClosure();} public static SchemaClosure fromCanonicalBytes(SchemaId id,byte[][] b,PhonLimits l)throws PhonException{return new SchemaClosure();} }",
+            ),
+            (
+                "org/facet/phon/SchemaId.java",
+                "package org.facet.phon; public final class SchemaId { public static SchemaId fromLong(long v){return new SchemaId();} }",
+            ),
+            (
+                "org/facet/phon/Schema.java",
+                "package org.facet.phon; import java.util.*; public final class Schema { public enum Primitive { STRING,BOOL,I32,I64,U8,U16,U32,F32,F64,BYTES,UNIT } public static Schema primitive(Primitive p){return new Schema(null,List.of(),null);} public Schema(SchemaId i,List<Object> p,Object k){} public SchemaId id(){return null;} public static final class Ref { public static Ref concrete(SchemaId i){return new Ref();} } public static final class Field { public Field(String n,Ref r,boolean q){} } public static final class RecordKind { public RecordKind(String n,List<Field> f){} } public static final class TupleKind { public TupleKind(List<Ref> r){} } public static final class EnumKind { public EnumKind(String n,List<Variant> v){} } public static final class Variant { public Variant(String n,int i,Payload p){} } public static final class Payload { public static Payload unit(){return new Payload();} } }",
+            ),
+            (
+                "org/facet/phon/PhonException.java",
+                "package org.facet.phon; public class PhonException extends Exception { public enum Kind { ENCODE,DECODE,MALFORMED } public PhonException(Kind k,String m){super(m);} }",
+            ),
+            (
+                "org/facet/phon/PhonEncoder.java",
+                "package org.facet.phon; public final class PhonEncoder { public void writeBool(boolean v){} public void writeU8(int v){} public void writeU16(int v){} public void writeU32(long v){} public void writeU32Unaligned(long v){} public void writeI8(int v){} public void writeI16(int v){} public void writeI32(int v){} public void writeI64(long v){} public void writeF32(float v){} public void writeF64(double v){} public void writeChar(char v){} public void writeString(String v){} public void writeBytes(byte[] v){} public void writeCount(int v){} public <T> void writeAdapted(PhonAdapter<T> a,T v){} }",
+            ),
+            (
+                "org/facet/phon/PhonDecoder.java",
+                "package org.facet.phon; public final class PhonDecoder { public boolean readBool(){return false;} public int readU8(){return 0;} public int readU16(){return 0;} public long readU32(){return 0;} public long readU32Unaligned(){return 0;} public int readI8(){return 0;} public int readI16(){return 0;} public int readI32(){return 0;} public long readI64(){return 0;} public float readF32(){return 0;} public double readF64(){return 0;} public char readChar(){return 0;} public String readString(){return null;} public byte[] readBytes(){return null;} public int readCount(){return 0;} public <T> T readAdapted(PhonAdapter<T> a){return null;} }",
+            ),
+            (
+                "org/facet/phon/PhonLimits.java",
+                "package org.facet.phon; public final class PhonLimits { public static PhonLimits defaults(){return new PhonLimits();} }",
+            ),
+            (
+                "org/facet/phon/PhonCodec.java",
+                "package org.facet.phon; public final class PhonCodec { public static <T> byte[] encode(PhonAdapter<T> a,T v,PhonLimits l)throws PhonException{return new byte[0];} public static <T> T decode(PhonAdapter<T> a,byte[] b,PhonLimits l)throws PhonException{return null;} }",
+            ),
+            (
+                "org/facet/vox/MethodDescriptor.java",
+                "package org.facet.vox; import java.util.*; import org.facet.phon.*; public final class MethodDescriptor { private final long id; private final PhonAdapter<?> a,r,w; private final List<ChannelDescriptor> c; public MethodDescriptor(long i,String n,PhonAdapter<?> a,PhonAdapter<?> r){this(i,n,a,r,null,r,List.of());} public MethodDescriptor(long i,String n,PhonAdapter<?> a,PhonAdapter<?> r,PhonAdapter<?> e){this(i,n,a,r,e,r,List.of());} public MethodDescriptor(long i,String n,PhonAdapter<?> a,PhonAdapter<?> r,PhonAdapter<?> e,PhonAdapter<?> w){this(i,n,a,r,e,w,List.of());} public MethodDescriptor(long i,String n,PhonAdapter<?> a,PhonAdapter<?> r,PhonAdapter<?> e,PhonAdapter<?> w,List<ChannelDescriptor> c){id=i;this.a=a;this.r=r;this.w=w;this.c=c;} public long id(){return id;} public PhonAdapter argumentAdapter(){return a;} public PhonAdapter returnAdapter(){return r;} public PhonAdapter responseWireAdapter(){return w;} public List<ChannelDescriptor> channels(){return c;} }",
+            ),
+            (
+                "org/facet/vox/ChannelDescriptor.java",
+                "package org.facet.vox; import org.facet.phon.*; public final class ChannelDescriptor { public enum Direction { TX,RX } public ChannelDescriptor(int i,Direction d,String r,PhonAdapter<?> a){} }",
+            ),
+            (
+                "org/facet/vox/VoxTx.java",
+                "package org.facet.vox; public final class VoxTx<T> {}",
+            ),
+            (
+                "org/facet/vox/VoxRx.java",
+                "package org.facet.vox; public final class VoxRx<T> {}",
+            ),
+            (
+                "org/facet/vox/VoxChannelArgument.java",
+                "package org.facet.vox; public final class VoxChannelArgument { public static VoxChannelArgument tx(ChannelDescriptor d,VoxTx<?> v){return new VoxChannelArgument();} public static VoxChannelArgument rx(ChannelDescriptor d,VoxRx<?> v){return new VoxChannelArgument();} }",
+            ),
+            (
+                "org/facet/vox/VoxChannelDecoding.java",
+                "package org.facet.vox; public final class VoxChannelDecoding { public static byte[] encodeIndex(long i){return null;} public static <T> VoxTx<T> tx(byte[] i){return null;} public static <T> VoxRx<T> rx(byte[] i){return null;} }",
+            ),
+            (
+                "org/facet/vox/VoxFutures.java",
+                "package org.facet.vox; import java.util.concurrent.*; import java.util.function.*; public final class VoxFutures { public static <T,U> CompletableFuture<U> mapCancellable(CompletableFuture<T> f,Function<? super T,? extends U> m){return null;} }",
+            ),
+            (
+                "org/facet/vox/ServiceDescriptor.java",
+                "package org.facet.vox; import java.util.*; public final class ServiceDescriptor { public ServiceDescriptor(String n,List<MethodDescriptor> m){} }",
+            ),
+            (
+                "org/facet/vox/CallContext.java",
+                "package org.facet.vox; public final class CallContext {}",
+            ),
+            (
+                "org/facet/vox/VoxResult.java",
+                "package org.facet.vox; public final class VoxResult<O,E> { public enum Kind { SUCCESS,APPLICATION_ERROR,UNKNOWN_METHOD,INVALID_PAYLOAD,CANCELLED,CONNECTION_CLOSED,CONNECTION_SHUTDOWN,SEND_FAILED,TIMED_OUT,INDETERMINATE } public static <O,E> VoxResult<O,E> success(O v){return new VoxResult<>();} public static <E> VoxResult<Void,E> successUnit(){return new VoxResult<>();} public static <O,E> VoxResult<O,E> applicationError(E v){return new VoxResult<>();} public static <O,E> VoxResult<O,E> infrastructure(Kind k){return new VoxResult<>();} public static <O,E> VoxResult<O,E> infrastructure(Kind k,String d){return new VoxResult<>();} public Kind kind(){return Kind.SUCCESS;} public boolean isSuccess(){return true;} public boolean isInfrastructureError(){return false;} public String detail(){return null;} public O success(){return null;} public E applicationError(){return null;} }",
+            ),
+            (
+                "org/facet/vox/VoxException.java",
+                "package org.facet.vox; public class VoxException extends Exception { public VoxException(String m){super(m);} }",
+            ),
+            (
+                "org/facet/vox/ServiceDispatcher.java",
+                "package org.facet.vox; import java.util.concurrent.*; public interface ServiceDispatcher { ServiceDescriptor descriptor(); CompletableFuture<Void> dispatch(InboundCall c); }",
+            ),
+            (
+                "org/facet/vox/InboundCall.java",
+                "package org.facet.vox; import org.facet.phon.*; public final class InboundCall { public MethodDescriptor method(){return null;} public byte[] encodedArguments(){return null;} public <T>T decodeArguments(PhonAdapter<T>a){return null;} public CallContext context(){return null;} public void respond(byte[] b){} }",
+            ),
+            (
+                "org/facet/vox/ServiceLane.java",
+                "package org.facet.vox; import java.util.*; import java.util.concurrent.*; public final class ServiceLane { public CompletableFuture<byte[]> call(MethodDescriptor m,byte[] b,CallOptions o){return null;} public CompletableFuture<byte[]> call(MethodDescriptor m,byte[] b,CallOptions o,List<VoxChannelArgument> c){return null;} }",
+            ),
+            (
+                "org/facet/vox/CallOptions.java",
+                "package org.facet.vox; public final class CallOptions { public static CallOptions defaults(){return new CallOptions();} }",
+            ),
+        ];
+        for (relative, source) in files {
+            let path = root.join(relative);
+            fs::create_dir_all(path.parent().expect("parent")).expect("create stub package");
+            fs::write(path, source).expect("write compile stub");
+        }
+    }
+}

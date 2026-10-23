@@ -1,0 +1,95 @@
+{
+  "version": 4,
+  "extends": "terminal-contract-v3.json",
+  "service": "Terminal",
+  "methods": [
+    {"name": "connect", "id": "9e81b88f62f1eb60", "request": "TerminalConnectRequest", "success": "TerminalConnectResult", "error": "TerminalError"},
+    {"name": "capabilities", "id": "56523a97a4da5b64", "request": "TerminalCapabilitiesRequest", "success": "TerminalCapabilitiesResult", "error": "TerminalError"},
+    {"name": "presentation_capabilities", "id": "7082a10164d7758a", "request": "TerminalPresentationCapabilitiesRequest", "success": "TerminalPresentationCapabilitiesResult", "error": "TerminalError"},
+    {"name": "resize", "id": "ffd4c5752861fc1f", "request": "TerminalResizeRequest", "success": "TerminalResizeResult", "error": "TerminalError"},
+    {"name": "send_text", "id": "a0f86a8a39ae0dcb", "request": "TerminalTextInput", "success": "TerminalInputResult", "error": "TerminalError"},
+    {"name": "send_key", "id": "e0e1cb7a111dc0c7", "request": "TerminalKeyInput", "success": "TerminalInputResult", "error": "TerminalError"},
+    {"name": "send_mouse", "id": "fd17ea461870349a", "request": "TerminalMouseInput", "success": "TerminalInputResult", "error": "TerminalError"},
+    {"name": "snapshot", "id": "4648749132a0ebb8", "request": "TerminalSnapshotRequest", "success": "TerminalSnapshot", "error": "TerminalError"},
+    {"name": "subscribe_frames", "id": "4f1b9f66093e3e90", "request": "TerminalSubscribeRequest", "channel": {"argument": 1, "direction": "tx", "role": "channel.arg.1.tx.element", "element": "TerminalFrameEvent"}, "success": "TerminalOperationResult", "error": "TerminalError"},
+    {"name": "subscribe_raster_frames", "id": "905b8a1a40087760", "request": "TerminalRasterSubscribeRequest", "channel": {"argument": 1, "direction": "tx", "role": "channel.arg.1.tx.element", "element": "TerminalRasterFrameEvent"}, "success": "TerminalOperationResult", "error": "TerminalError"},
+    {"name": "get_content", "id": "6f1917e81fe9c050", "request": "TerminalContentRequest", "success": "TerminalContentResult", "error": "TerminalError"},
+    {"name": "cancel", "id": "94967d6dfd5fa677", "request": "TerminalCancelRequest", "success": "TerminalOperationResult", "error": "TerminalError"},
+    {"name": "disconnect", "id": "babc04d89ee3e7a7", "request": "TerminalDisconnectRequest", "success": "TerminalOperationResult", "error": "TerminalError"}
+  ],
+  "presentation_contract": {
+    "version": 2,
+    "default_renderer_id": "rust-cpu-fontdue",
+    "default_transport_id": "full-png",
+    "selection": "atomic-advertised-tuple",
+    "tuple_fields": ["renderer_id", "damage_mode_id", "transport_id", "transport_version"],
+    "rasterization_owner_values": ["Server", "Client"],
+    "unknown_rasterization_owner": "reject",
+    "renderer_identity_field": "renderer_id",
+    "legacy_snapshot_identity_field": "backend_id"
+  },
+  "presentation_capabilities": [
+    {"renderer_id": "rust-cpu-fontdue", "rasterization_owner": "Server", "damage_mode_id": "full", "transport_id": "full-png", "transport_version": 1, "encoding": "Png", "steady_frame_kind": "Full", "frame_contract_version": 1, "max_pixel_width": 4096, "max_pixel_height": 4096},
+    {"renderer_id": "rust-cpu-fontdue", "rasterization_owner": "Server", "damage_mode_id": "full", "transport_id": "full-raw-rgba", "transport_version": 1, "encoding": "Rgba8", "steady_frame_kind": "Full", "frame_contract_version": 1, "max_pixel_width": 4096, "max_pixel_height": 4096},
+    {"renderer_id": "rust-cpu-fontdue", "rasterization_owner": "Server", "damage_mode_id": "dirty", "transport_id": "dirty-raw-rgba", "transport_version": 1, "encoding": "Rgba8", "steady_frame_kind": "DirtyRegions", "frame_contract_version": 1, "max_pixel_width": 4096, "max_pixel_height": 4096},
+    {"renderer_id": "rust-gpu-slug", "rasterization_owner": "Server", "damage_mode_id": "full", "transport_id": "full-png", "transport_version": 1, "encoding": "Png", "steady_frame_kind": "Full", "frame_contract_version": 1, "max_pixel_width": 4096, "max_pixel_height": 4096},
+    {"renderer_id": "rust-gpu-slug", "rasterization_owner": "Server", "damage_mode_id": "full", "transport_id": "full-raw-rgba", "transport_version": 1, "encoding": "Rgba8", "steady_frame_kind": "Full", "frame_contract_version": 1, "max_pixel_width": 4096, "max_pixel_height": 4096},
+    {"renderer_id": "rust-gpu-slug", "rasterization_owner": "Server", "damage_mode_id": "dirty", "transport_id": "dirty-raw-rgba", "transport_version": 1, "encoding": "Rgba8", "steady_frame_kind": "DirtyRegions", "frame_contract_version": 1, "max_pixel_width": 4096, "max_pixel_height": 4096}
+  ],
+  "raw_raster_contract": {
+    "version": 1,
+    "pixel_order": "RGBA8",
+    "coordinate_origin": "top-left",
+    "row_order": "top-to-bottom",
+    "alpha": "straight-unassociated",
+    "region_order": "top-to-bottom-then-left-to-right",
+    "region_payload": "single-packed-buffer",
+    "region_ranges": "ordered-contiguous-non-overlapping"
+  },
+  "presentation_switch": {
+    "scope": "panel-request-subscription",
+    "generation_field": "presentation_generation",
+    "generation": "client-chosen-opaque",
+    "changes_on": ["renderer", "damage-mode", "transport", "transport-version"],
+    "first_event": "full-resync",
+    "preserves": ["terminal-session", "pty", "input-stream"],
+    "retired_generation": "stale",
+    "unsupported_tuple": "reject-without-retiring-active-presentation"
+  },
+  "incremental_sequence": {
+    "full_base_frame_sequence": 0,
+    "dirty_base": "exact-currently-composed-frame-sequence",
+    "missing_base": "full-resync-required",
+    "producer_base_advance": "successful-channel-delivery"
+  },
+  "subscription": {
+    "scope": "request",
+    "delivery": "bounded-credit",
+    "producer_pending_bound": 1,
+    "coalescing": "newest-state-relative-to-last-delivered-base",
+    "initial_event": "full-resync",
+    "sequence_scope": "presentation-generation",
+    "epochs": ["connection_epoch", "session_epoch", "presentation_generation"],
+    "terminal_event": "pty-state-mutation",
+    "polling": "recovery-only"
+  },
+  "lane_lifecycle": {
+    "presentation_lane": "nonzero-service-lane",
+    "close": "terminates-bound-raster-subscriptions",
+    "preserves": ["control-lane", "independent-sibling-lanes", "terminal-session-until-disconnect"],
+    "replacement": "fresh-lane-on-same-connection"
+  },
+  "validation": [
+    "presentation-capability-exact-tuple-match",
+    "closed-rasterization-owner",
+    "frame-contract-version",
+    "presentation-generation-match",
+    "payload-bound",
+    "non-zero-in-bounds-regions",
+    "stride-equals-width-times-four",
+    "ordered-regions",
+    "contiguous-non-overlapping-payload-ranges",
+    "exact-base-frame-sequence"
+  ],
+  "bounds": {"max_logical_width": 512, "max_logical_height": 256, "max_pixel_width": 4096, "max_pixel_height": 4096, "max_frame_bytes": 16777216, "max_regions": 64}
+}

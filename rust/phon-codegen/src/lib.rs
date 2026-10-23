@@ -16,6 +16,7 @@
 //! Spec: `docs/content/spec.md` — "Codegen".
 
 pub mod source;
+pub mod targets;
 pub mod typescript;
 
 pub use source::{Builder, Module, Root};

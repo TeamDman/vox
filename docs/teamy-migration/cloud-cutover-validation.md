@@ -4,6 +4,39 @@ This continuation starts at `b6c2cd752c417d70d6c22feb5a3334f69c1cd7d9`.
 It retains the current protocol exclusively; peers must upgrade together.
 The prior checkpoint and historical credit implementation remain in Git history.
 
+## Recorded validation result
+
+The full final gate passed on clean source commit
+[`5628c00d9f3816199f324a9ccc081de8a3a1b1bc`](https://github.com/TeamDman/vox/commit/5628c00d9f3816199f324a9ccc081de8a3a1b1bc).
+The durable [machine-readable receipt](cloud-cutover-receipt.json) records exact
+commands, exit codes, tool versions, dependency identities, input digests, artifact
+digest, test counts, limitations and hashes of the original local logs. Raw logs
+are not embedded because they contain environment-specific paths. Their hashes
+identify those original logs; they are not expected to match newly generated logs.
+
+This receipt was added in a documentation-only follow-up. **The tested-source SHA
+above is the runtime qualification SHA; the report commit is not a new runtime
+test run.** Obtain the report's commit separately with
+`git log -1 --format=%H -- docs/teamy-migration/cloud-cutover-receipt.json`.
+
+| Final gate | Result |
+| --- | --- |
+| Phon codegen / corpus / seven-fixture oracle / schema | 5 / 2 / 1 / 44 tests passed |
+| Vox codegen | 48 tests passed |
+| Vox core / Phon adapter / types | 88 / 15 / 103 tests passed |
+| Java conformance | 1,934 bundle assertions and 86 existing Phon assertions passed |
+| Java framing / runtime / generated integration | All passed |
+| Actual Rust–Java TCP RPC | All 12 tests passed |
+| Deterministic Java generation and TypeScript checks | Passed |
+| Pinned-JDK packaging, twice, and hash comparison | Passed |
+
+Both package runs produced `java/target/teamy-vox-java-0.10.0-rc.7.jar` with SHA-256
+`be441a57e11d4981d283306fe471874e625bf2f423c83a91ce8f44dde623d062`.
+The JAR was built locally, not published as a package. Recreate it from the tested
+source with the pinned toolchain and runner below; verify its digest before any
+consumer transfer. Check out the tested SHA in a fresh checkout for exact
+reproduction, rather than treating a later documentation HEAD as tested source.
+
 ## Changes
 
 - Java schema tables, DTO closures and inline list closures use bounded hexadecimal
@@ -25,6 +58,21 @@ The prior checkpoint and historical credit implementation remain in Git history.
 The root and nested locked graphs use one registry `taxon 0.2.0-rc.5` and registry
 `teamy-facet` / `teamy-facet-core 0.50.0-rc.7`. There is no legacy `teamy-taxon`
 identity or compatibility adapter. Locks and all seven Rust fixture bytes are unchanged.
+
+Cargo metadata resolved `teamy-facet-core` and `teamy-phon-schema` directly to the
+**same registry Taxon package ID in each graph**. `phon-schema` re-exports Taxon's
+schema types and identity functions (`schema.rs` and `identity.rs`). This is an
+actual shared Rust type identity, not two similarly named types connected by an
+adapter. The dependency aliases `facet` and `facet-core` denote registry packages
+`teamy-facet` and `teamy-facet-core`; they do not denote a second upstream Facet
+package. Phon's local packages are `teamy-phon` and its family at 0.2.0-rc.7,
+with `teamy-phon-schema` at 0.2.0-rc.6, pinned by the tested repository commit.
+
+Registry Taxon versus the removed Teamy Taxon is therefore **not a deliberate
+remaining split**. Separate consumer graphs remain unqualified: this result does
+not unify the old terminal's git Facet pins or establish identity compatibility
+with an unseen SFM graph. A consumer must resolve its own lockfile and verify the
+shared Facet and Taxon identities before selecting the tested Vox source pin.
 
 ## Reproduction and evidence
 
@@ -85,3 +133,24 @@ SFM source is absent here. Continue from the fresh
 current instructions, update the main-source projection and artifact provenance,
 and regenerate and validate the affected contexts. Do not use an older desktop
 checkout. Consumer branch publication still requires separate confirmation.
+
+## Continuation once consumer source is available
+
+1. Resolve and transfer the actual terminal control/streaming lineage and SFM's
+   current capture checkpoint into their authorized cloud environments. Their
+   source paths/revisions remain pending; do not substitute the terminal template
+   or infer SFM source access from the library receipt.
+2. Read each consumer's current repository and source-projection instructions.
+   Preserve its baseline. Prepare changes locally against tested Vox commit
+   `5628c00d9f3816199f324a9ccc081de8a3a1b1bc`, not merely the report HEAD.
+3. Reconcile terminal control and streaming dependency identities together;
+   inspect both normal and test/build dependency paths. Resolve the cancellation
+   Facet mismatch in that actual graph. Do not add Vox to mover.
+4. For SFM, update the main-source projection, generated binding workflow and
+   Java artifact provenance/digest. Run the affected projection, compilation,
+   runtime and cross-language consumer checks. A library result alone is not
+   proof of either consumer's integration.
+5. Report exact consumer source SHAs, artifact digest, executed checks and
+   remaining failures. Obtain separate confirmation before publishing consumer
+   branches. No default-branch merge, force-push or package release is authorized
+   by this receipt.

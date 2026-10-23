@@ -1,0 +1,233 @@
+{
+  "format_version": 1,
+  "validation_date": "2026-10-23",
+  "repository": "https://github.com/TeamDman/vox",
+  "tested_source_commit": "5628c00d9f3816199f324a9ccc081de8a3a1b1bc",
+  "tested_source_worktree_clean": true,
+  "baseline_commit": "b6c2cd752c417d70d6c22feb5a3334f69c1cd7d9",
+  "feature_branch": "migration/phon-java-cloud-completion-2026-10-23",
+  "report_scope": "Documentation-only follow-up; runtime results apply to tested_source_commit, not to a rerun on the report commit.",
+  "toolchain": {
+    "platform": "Linux x86_64",
+    "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)",
+    "java": "Eclipse Adoptium Temurin 21.0.8+9-LTS",
+    "javac_release": 17
+  },
+  "runner": "tools/migration/validate-java-cutover.sh",
+  "stages": {
+    "phon": {
+      "command_argv": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "--manifest-path",
+        "phon/Cargo.toml",
+        "-p",
+        "teamy-phon-conformance",
+        "-p",
+        "teamy-phon-schema",
+        "-p",
+        "teamy-phon-codegen"
+      ],
+      "exit_code": 0,
+      "retained_raw_log_sha256": "938c2aeaf634e7749fe8ad03d8ff8f7c965064b85c0c2fbacecfb4bd71e933ea"
+    },
+    "codegen": {
+      "command_argv": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "teamy-vox-codegen",
+        "--lib"
+      ],
+      "exit_code": 0,
+      "retained_raw_log_sha256": "8262d6a07b8e83896c1c6f0d017d2082ca791d75ee31cef31ec5c85d603935eb"
+    },
+    "rust": {
+      "command_argv": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "teamy-vox-core",
+        "-p",
+        "teamy-vox-types",
+        "-p",
+        "teamy-vox-phon",
+        "--lib"
+      ],
+      "exit_code": 0,
+      "retained_raw_log_sha256": "d1ee6cf06abfbba1658b1220ba90b7e1de4c5905a76ac08c49b715ca3c03bfd6"
+    },
+    "java": {
+      "command_argv": [
+        "cargo",
+        "run",
+        "--offline",
+        "--locked",
+        "-p",
+        "teamy-vox-xtask",
+        "--",
+        "test-java"
+      ],
+      "exit_code": 0,
+      "retained_raw_log_sha256": "19cfb706890357fa8e49e415cf4276a3f7b460497975fd776c5484a39b944472"
+    },
+    "wire": {
+      "command_argv": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "spec-tests",
+        "--test",
+        "java_wire",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit_code": 0,
+      "retained_raw_log_sha256": "419cf8369e6d6b82304fc60738a694cdb575e34994846d21cea08a5dd28de416"
+    },
+    "typescript": {
+      "command_argv": [
+        "bash",
+        "-c",
+        "cd typescript && pnpm check"
+      ],
+      "exit_code": 0,
+      "retained_raw_log_sha256": "93afcfa50590833cd986ed5b7e7b88674add9b8574d548ad62298b9276ab7186"
+    },
+    "package-first": {
+      "command_argv": [
+        "cargo",
+        "run",
+        "--offline",
+        "--locked",
+        "-p",
+        "teamy-vox-xtask",
+        "--",
+        "package-java"
+      ],
+      "exit_code": 0,
+      "retained_raw_log_sha256": "207be049c568e04609010696af88ef3bba2f2a57eedb440a31ca44f23ae72983"
+    },
+    "package-second": {
+      "command_argv": [
+        "cargo",
+        "run",
+        "--offline",
+        "--locked",
+        "-p",
+        "teamy-vox-xtask",
+        "--",
+        "package-java"
+      ],
+      "exit_code": 0,
+      "retained_raw_log_sha256": "90d6459a8bbbef8119ade92492c4637a5281e9ed45ed15f309d06635e91206cb"
+    },
+    "reproducibility": {
+      "command_argv": [
+        "cmp",
+        "<receipt-directory>/jar-first.sha256",
+        "<receipt-directory>/jar-second.sha256"
+      ],
+      "exit_code": 0,
+      "retained_raw_log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "artifact": {
+    "path": "java/target/teamy-vox-java-0.10.0-rc.7.jar",
+    "sha256": "be441a57e11d4981d283306fe471874e625bf2f423c83a91ce8f44dde623d062",
+    "independent_package_builds": 2,
+    "hashes_equal": true,
+    "published_package": false
+  },
+  "test_counts": {
+    "phon_codegen": 5,
+    "phon_corpus": 2,
+    "rust_java_fixture_oracle": 1,
+    "phon_schema": 44,
+    "vox_codegen": 48,
+    "vox_core": 88,
+    "vox_phon": 15,
+    "vox_types": 103,
+    "rust_java_tcp": 12,
+    "java_bundle_assertions": 1934,
+    "java_existing_phon_assertions": 86
+  },
+  "additional_observations": {
+    "java_runtime_repetitions": 10,
+    "historical_credit": {
+      "cases": 19,
+      "passed": 15,
+      "unchanged_baseline_differences": 4
+    },
+    "transients": [
+      "One initial Java runtime local request cancelled failure, not reproduced in later ten repetitions or full gates.",
+      "Timeout test scheduler race reproduced and test synchronized without modifying runtime."
+    ]
+  },
+  "dependency_identity": {
+    "graphs": [
+      "Cargo.lock",
+      "phon/Cargo.lock"
+    ],
+    "facet": {
+      "alias": "facet",
+      "package": "teamy-facet",
+      "version": "0.50.0-rc.7",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    "facet_core": {
+      "alias": "facet-core",
+      "package": "teamy-facet-core",
+      "version": "0.50.0-rc.7",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    "phon": "Local teamy-phon family 0.2.0-rc.7; teamy-phon-schema 0.2.0-rc.6, paths pinned by tested source commit",
+    "taxon": {
+      "package": "taxon",
+      "version": "0.2.0-rc.5",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "direct_consumers_verified": [
+        "teamy-facet-core",
+        "teamy-phon-schema"
+      ],
+      "same_package_id_in_each_graph": true,
+      "teamy_taxon_present": false
+    },
+    "consumer_graphs_qualified": false
+  },
+  "unchanged_from_baseline": [
+    "Cargo.lock",
+    "phon/Cargo.lock",
+    "phon/conformance/java-cutover/*",
+    "java/runtime/src/main/java/org/facet/vox/*"
+  ],
+  "input_sha256": {
+    "Cargo.lock": "42ccc78d8e8b76b7ba952f8e39ebb9a37b31d5abb172970a648628afc1abf0d9",
+    "phon/Cargo.lock": "d82ea0b92bbf52f563bc899ee2da7ba1593eeaaf1b8e635895430805b243d189",
+    "phon/conformance/java-cutover/channel-rx.phon": "a75c1fa18dc512b831809a21fea35b5743d2fb3414ba4b124f9fe96b0edc7c44",
+    "phon/conformance/java-cutover/channel-tx.phon": "19a5cd1ad4c960287b8120f94b6f236658a8acfed524dba9a4b96f9e40f55067",
+    "phon/conformance/java-cutover/external-metadata.phon": "515a36cec7033c7fe3beead74b6380b18a7a14691bd941c32fd865d8fdb0215e",
+    "phon/conformance/java-cutover/external-none.phon": "f51b439d028755c5e32be70a9abf03ed777a20b7f3d98592185a05d0ccfa400d",
+    "phon/conformance/java-cutover/generic-tuple.phon": "cb322f4dfbcbd19a858df96a84477ef400821ab56967f9bd2fbccb98d8d9d1f1",
+    "phon/conformance/java-cutover/region-ref.phon": "3133fbfb3181b859a4fcfcf1f4ba8311ee83b5e140892e50944f0f7409b417d8",
+    "phon/conformance/java-cutover/semantic-u32.phon": "ef38fbfc2c32ac882796662cd064b87e7a26e559050f794cb538f42192717fe0"
+  },
+  "unrun": [
+    "Tracey synchronization: skill/MCP unavailable",
+    "consumer integration: available terminal source has no Vox consumer; SFM absent",
+    "Windows/macOS native JIT/Swift runtime/Minecraft/container recipe execution"
+  ],
+  "consumer_blockers": {
+    "terminal": "Checkout and fresh remote main 2b7833157d0cd7e5d4f2922bed2ee5f6ef112b53 contain no control/streaming Vox source. Need actual consumer lineage; no edits or publication. Existing Facet identity baseline defect retained.",
+    "sfm": "No source checkout in this environment. Need authorized capture/sfm435-issue610-cloud environment and current main-source projection workflow; no edits or publication."
+  },
+  "raw_log_note": "Hashes identify original local logs; logs are not embedded because they contain environment paths. Reproduction creates fresh logs; timing and paths may change their hashes."
+}

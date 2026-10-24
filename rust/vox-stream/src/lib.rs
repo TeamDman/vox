@@ -90,6 +90,12 @@ pub(crate) fn validate_link_prologue(
     Ok(())
 }
 
+/// Default local receive limit for one stream-frame payload: 16 MiB.
+///
+/// This is enforced before body allocation, including during handshakes. It is
+/// independent of peer limits, outbound queues, and application payload quotas.
+pub const DEFAULT_MAX_RECEIVE_FRAME_BYTES: u32 = 16 * 1024 * 1024;
+
 /// A [`Link`] over a byte stream with length-prefix framing.
 ///
 /// Wraps an `AsyncRead + AsyncWrite` pair. Each message is framed as
@@ -99,6 +105,7 @@ pub(crate) fn validate_link_prologue(
 pub struct StreamLink<R, W> {
     reader: R,
     writer: W,
+    max_receive_frame_bytes: u32,
 }
 
 #[derive(Debug)]
@@ -110,7 +117,24 @@ struct QueuedFrame {
 impl<R, W> StreamLink<R, W> {
     /// Construct from separate read and write halves.
     pub fn new(reader: R, writer: W) -> Self {
-        Self { reader, writer }
+        Self {
+            reader,
+            writer,
+            max_receive_frame_bytes: DEFAULT_MAX_RECEIVE_FRAME_BYTES,
+        }
+    }
+
+    /// Set the local maximum incoming payload size before splitting the link.
+    ///
+    /// Applies to both initiators and acceptors, including handshake frames.
+    /// Frames above this limit terminate receiving with `InvalidData`, before
+    /// allocating or reading their body. Zero permits only empty frames; it does
+    /// not disable the limit. Raising this value increases per-connection memory
+    /// exposure. This does not negotiate or change the peer's receive limit.
+    #[must_use]
+    pub fn max_receive_frame_bytes(mut self, max: u32) -> Self {
+        self.max_receive_frame_bytes = max;
+        self
     }
 }
 
@@ -129,6 +153,7 @@ pub struct TcpLinkSource {
     nodelay: bool,
     resolve_timeout: std::time::Duration,
     connect_timeout: std::time::Duration,
+    max_receive_frame_bytes: u32,
 }
 
 /// Default DNS resolution timeout.
@@ -151,7 +176,16 @@ impl TcpLinkSource {
             nodelay: true,
             resolve_timeout: DEFAULT_RESOLVE_TIMEOUT,
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+            max_receive_frame_bytes: DEFAULT_MAX_RECEIVE_FRAME_BYTES,
         }
+    }
+
+    /// Set the local receive limit on every link produced, including reconnects.
+    /// See [`StreamLink::max_receive_frame_bytes`] for the limit's semantics.
+    #[must_use]
+    pub fn max_receive_frame_bytes(mut self, max: u32) -> Self {
+        self.max_receive_frame_bytes = max;
+        self
     }
 
     pub fn nodelay(mut self, nodelay: bool) -> Self {
@@ -194,7 +228,9 @@ impl LinkSource for TcpLinkSource {
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "TCP connect timed out"))??;
         stream.set_nodelay(self.nodelay)?;
-        Ok(Attachment::initiator(StreamLink::tcp(stream)))
+        Ok(Attachment::initiator(
+            StreamLink::tcp(stream).max_receive_frame_bytes(self.max_receive_frame_bytes),
+        ))
     }
 }
 
@@ -235,12 +271,17 @@ where
     W: AsyncWrite + Send + Unpin + 'static,
 {
     type Tx = StreamLinkTx;
+    // Keep the historical associated type for source compatibility. The reader
+    // task now reads R directly: buffering here could read ahead into a rejected
+    // body while acquiring the fixed-size prefix.
     type Rx = StreamLinkRx<BufReader<R>>;
 
     fn split(self) -> (Self::Tx, Self::Rx) {
         let (tx_chan, mut rx_chan) = mpsc::channel::<QueuedFrame>("stream_link_tx", 128);
-        let (read_tx, read_rx) = mpsc::channel::<io::Result<Option<Backing>>>("stream_link_rx", 128);
-        let mut reader = BufReader::new(self.reader);
+        let (read_tx, read_rx) =
+            mpsc::channel::<io::Result<Option<Backing>>>("stream_link_rx", 128);
+        let mut reader = self.reader;
+        let max_receive_frame_bytes = self.max_receive_frame_bytes;
         let mut writer = BufWriter::new(self.writer);
 
         let reader_task = vox_rt::spawn(async move {
@@ -275,7 +316,14 @@ where
                     }
                 }
 
-                let len = u32::from_le_bytes(len_buf) as usize;
+                // r[impl transport.stream.receive-limit]
+                let len = match receive_frame_len(len_buf, max_receive_frame_bytes) {
+                    Ok(len) => len,
+                    Err(error) => {
+                        let _ = read_tx.send(Err(error)).await;
+                        break;
+                    }
+                };
                 let mut buf = vec![0u8; len];
                 if let Err(error) = read_frame_exact(&mut reader, &mut buf, "frame body").await {
                     let _ = read_tx.send(Err(error)).await;
@@ -366,6 +414,23 @@ impl LinkTx for StreamLinkTx {
         drop(self.tx);
         self.writer_task.await.map_err(io::Error::other)?
     }
+}
+
+// Decode as unsigned and check the local policy before narrowing or allocating.
+fn receive_frame_len(prefix: [u8; 4], max: u32) -> io::Result<usize> {
+    let len = u32::from_le_bytes(prefix);
+    if len > max {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("stream frame length {len} exceeds local receive limit {max}"),
+        ));
+    }
+    usize::try_from(len).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "stream frame length is not representable on this target",
+        )
+    })
 }
 
 // r[impl link.tx.alloc.limits]
@@ -931,6 +996,171 @@ mod tests {
     fn frame_len_prefix_rejects_payloads_that_exceed_u32_prefix() {
         let err = frame_len_prefix(u32::MAX as usize + 1).expect_err("payload should be too large");
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn explicit_larger_limit_accepts_its_boundary_without_allocating_a_body() {
+        let max = DEFAULT_MAX_RECEIVE_FRAME_BYTES + 1;
+        assert!(receive_frame_len(max.to_le_bytes(), DEFAULT_MAX_RECEIVE_FRAME_BYTES).is_err());
+        assert_eq!(
+            receive_frame_len(max.to_le_bytes(), max).unwrap(),
+            max as usize
+        );
+        assert!(receive_frame_len((max + 1).to_le_bytes(), max).is_err());
+    }
+
+    #[tokio::test]
+    async fn each_direction_uses_its_receivers_limit_not_its_senders() {
+        let (a, b) = duplex_pair();
+        let (tx_a, mut rx_a) = a.max_receive_frame_bytes(4).split();
+        let (tx_b, mut rx_b) = b.max_receive_frame_bytes(8).split();
+        tx_a.send(vec![1; 8]).await.unwrap();
+        assert_eq!(payload(&rx_b.recv().await.unwrap().unwrap()), [1; 8]);
+        tx_b.send(vec![2; 5]).await.unwrap();
+        assert_eq!(
+            rx_a.recv().await.err().unwrap().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    // r[verify transport.stream.receive-limit]
+    #[tokio::test]
+    async fn oversized_prefixes_fail_before_body_read_or_read_ahead() {
+        struct PrefixOnly {
+            bytes: [u8; 10],
+            consumed: usize,
+        }
+        impl AsyncRead for PrefixOnly {
+            fn poll_read(
+                mut self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+                buf: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<io::Result<()>> {
+                let remaining = self.bytes.len() - self.consumed;
+                assert!(remaining > 0, "must reject without requesting a body");
+                assert!(
+                    buf.remaining() <= remaining,
+                    "must not read ahead past the prefix"
+                );
+                let end = self.consumed + buf.remaining();
+                buf.put_slice(&self.bytes[self.consumed..end]);
+                self.consumed = end;
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+        for length in [DEFAULT_MAX_RECEIVE_FRAME_BYTES + 1, 0x8000_0000, u32::MAX] {
+            let mut bytes = [0u8; 10];
+            bytes[..6].copy_from_slice(&link_prologue(false));
+            bytes[6..].copy_from_slice(&length.to_le_bytes());
+            let link = StreamLink::new(PrefixOnly { bytes, consumed: 0 }, tokio::io::sink());
+            let (_tx, mut rx) = link.split();
+            let error = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+                .await
+                .unwrap()
+                .err()
+                .expect("prefix alone must be rejected");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert!(error.to_string().contains(&length.to_string()));
+            assert!(rx.recv().await.unwrap().is_none());
+        }
+    }
+
+    // r[verify transport.stream.receive-limit]
+    #[tokio::test]
+    async fn local_limits_accept_exact_boundary_and_zero_is_not_unlimited() {
+        assert_eq!(
+            StreamLink::new(tokio::io::empty(), tokio::io::sink()).max_receive_frame_bytes,
+            DEFAULT_MAX_RECEIVE_FRAME_BYTES
+        );
+        assert_eq!(
+            receive_frame_len(
+                DEFAULT_MAX_RECEIVE_FRAME_BYTES.to_le_bytes(),
+                DEFAULT_MAX_RECEIVE_FRAME_BYTES
+            )
+            .unwrap(),
+            16 * 1024 * 1024
+        );
+        for max in [0u32, 8] {
+            let (stream, mut peer) = tokio::io::duplex(64);
+            let (r, w) = split(stream);
+            let (_tx, mut rx) = StreamLink::new(r, w).max_receive_frame_bytes(max).split();
+            peer.write_all(&link_prologue(false)).await.unwrap();
+            peer.write_all(&max.to_le_bytes()).await.unwrap();
+            peer.write_all(&vec![42; max as usize]).await.unwrap();
+            let frame = rx.recv().await.unwrap().unwrap();
+            assert_eq!(payload(&frame), vec![42; max as usize]);
+            // Keep the peer open and send no body: rejection must not wait for EOF.
+            peer.write_all(&(max + 1).to_le_bytes()).await.unwrap();
+            let error = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+                .await
+                .unwrap()
+                .err()
+                .unwrap();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        }
+    }
+
+    #[tokio::test]
+    async fn truncated_prefix_and_body_preserve_errors_with_a_limit() {
+        for (bytes, expected) in [
+            (vec![4, 0], "frame header"),
+            (vec![4, 0, 0, 0], "frame body"),
+            (vec![4, 0, 0, 0, 42], "frame body"),
+        ] {
+            let (stream, mut peer) = tokio::io::duplex(64);
+            let (r, w) = split(stream);
+            let (_tx, mut rx) = StreamLink::new(r, w).max_receive_frame_bytes(4).split();
+            peer.write_all(&link_prologue(false)).await.unwrap();
+            peer.write_all(&bytes).await.unwrap();
+            drop(peer);
+            let error = rx.recv().await.err().unwrap();
+            assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+            assert!(error.to_string().contains(expected));
+            assert!(rx.recv().await.unwrap().is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn partial_prefix_cancellation_preserves_the_configured_boundary() {
+        let (stream, mut peer) = tokio::io::duplex(64);
+        let (r, w) = split(stream);
+        let (_tx, mut rx) = StreamLink::new(r, w).max_receive_frame_bytes(4).split();
+        peer.write_all(&link_prologue(false)).await.unwrap();
+        peer.write_all(&[4, 0]).await.unwrap();
+        // Poll then drop one receive future without consuming the partially read frame.
+        {
+            let mut receive = std::pin::pin!(rx.recv());
+            assert!(
+                std::future::poll_fn(|cx| std::task::Poll::Ready(receive.as_mut().poll(cx)))
+                    .await
+                    .is_pending()
+            );
+        }
+        peer.write_all(&[0, 0, 1, 2, 3, 4]).await.unwrap();
+        let frame = rx.recv().await.unwrap().unwrap();
+        assert_eq!(payload(&frame), [1, 2, 3, 4]);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn tcp_source_preserves_receive_limit_on_each_connection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut source =
+            tcp_link_source(listener.local_addr().unwrap().to_string()).max_receive_frame_bytes(4);
+        for _ in 0..2 {
+            let attachment = source.next_link().await.unwrap();
+            let (mut peer, _) = listener.accept().await.unwrap();
+            let (link, _) = attachment.into_parts();
+            let (_tx, mut rx) = link.split();
+            peer.write_all(&link_prologue(false)).await.unwrap();
+            peer.write_all(&5u32.to_le_bytes()).await.unwrap();
+            let error = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+                .await
+                .unwrap()
+                .err()
+                .unwrap();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        }
     }
 
     // r[verify link.tx.cancel-safe]

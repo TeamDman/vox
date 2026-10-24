@@ -26,6 +26,21 @@ Connection/Lane/RequestScope runtime contract.
 > Vox provides a stream transport via `StreamLink`, which prefixes each payload
 > with its length: a 32-bit LE unsigned integer.
 
+> r[transport.stream.receive-limit]
+>
+> An ordinary non-descriptor `StreamLink` receiver MUST enforce a locally configured
+> maximum payload length immediately after decoding the unsigned prefix and
+> before allocating or reading
+> the declared body. The default MUST be 16 MiB. This applies in both connection
+> roles, including transport and application handshake frames. An oversized frame
+> MUST terminate receiving with an error; it MUST NOT be silently truncated or
+> skipped. In the Rust configuration API, an explicit zero limit permits only
+> empty frames, not unlimited input. Descriptor-capable `FdStreamLink` framing
+> is a separate implementation and is not covered by this requirement.
+> Limits are local policy, not peer-negotiated; higher application quotas do not
+> override them. Caller-supplied buffered streams may perform their own bounded
+> read-ahead; the framing implementation MUST NOT add body read-ahead itself.
+
 > r[transport.stream.kinds]
 >
 > `StreamLink` must be constructible from arbitrary tokio `AsyncRead`/`AsyncWrite`

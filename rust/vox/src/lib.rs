@@ -326,7 +326,9 @@ pub mod transport {
     /// TCP byte-stream transport (`vox-stream`).
     #[cfg(all(feature = "transport-tcp", not(target_arch = "wasm32")))]
     pub mod tcp {
-        pub use vox_stream::{StreamLink, TcpLinkSource, tcp_link_source};
+        pub use vox_stream::{
+            DEFAULT_MAX_RECEIVE_FRAME_BYTES, StreamLink, TcpLinkSource, tcp_link_source,
+        };
     }
 
     /// Local IPC transport (`vox-stream`): Unix sockets / Windows named pipes.

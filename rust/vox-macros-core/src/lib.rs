@@ -821,6 +821,15 @@ fn generate_dispatch_arm(
         .map(Type::to_token_stream)
         .unwrap_or_else(|| quote! { ::core::convert::Infallible });
 
+    // r[impl schema.tracking.bindings]
+    // r[impl rpc.error.scope]
+    // The first response binds the method's response schema for the lane.
+    // Decode errors must retain its declared application-error type, even though
+    // InvalidPayload itself does not carry an application error.
+    let err_ty_dispatch = err_ty_ref
+        .map(to_static_type_tokens)
+        .unwrap_or_else(|| quote! { ::core::convert::Infallible });
+
     let decode_args = if args_need_retained_decode {
         quote! {
             let decoded_args_result = #vox::provide_channels_for_method(
@@ -838,8 +847,8 @@ fn generate_dispatch_arm(
                 Ok(v) => v,
                 Err(e) => {
                     reply
-                        .send_typed_error::<#ok_ty_dispatch, ::core::convert::Infallible>(
-                            #vox::VoxError::<::core::convert::Infallible>::InvalidPayload(e.to_string())
+                        .send_typed_error::<#ok_ty_dispatch, #err_ty_dispatch>(
+                            #vox::VoxError::<#err_ty_dispatch>::InvalidPayload(e.to_string())
                         )
                         .await;
                     return;
@@ -866,8 +875,8 @@ fn generate_dispatch_arm(
                 Ok(v) => v,
                 Err(e) => {
                     reply
-                        .send_typed_error::<#ok_ty_dispatch, ::core::convert::Infallible>(
-                            #vox::VoxError::<::core::convert::Infallible>::InvalidPayload(e.to_string())
+                        .send_typed_error::<#ok_ty_dispatch, #err_ty_dispatch>(
+                            #vox::VoxError::<#err_ty_dispatch>::InvalidPayload(e.to_string())
                         )
                         .await;
                     return;
@@ -1354,6 +1363,15 @@ mod tests {
         assert!(output.contains("pub struct PingDispatcher"));
         assert!(output.contains("pub struct PingClient"));
         assert_eq!(output.matches("#[cfg(feature = \"runtime\")]").count(), 6);
+    }
+
+    #[test]
+    fn retained_fallible_decode_error_preserves_response_schema() {
+        assert_snapshot!(generate(quote! {
+            trait CheckedText {
+                async fn classify(&self, word: &String) -> Result<u32, TextError>;
+            }
+        }));
     }
 
     #[test]

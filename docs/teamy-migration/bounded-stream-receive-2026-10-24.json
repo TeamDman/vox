@@ -1,0 +1,72 @@
+{
+  "source_commit": "20c08f7e7e04d0836e403cc3ba5ca0827fca8ee2",
+  "parent_commit": "86b218a192fbe10d59377a715cee039022214cb7",
+  "branch": "task/bounded-stream-receive-20261024",
+  "published": false,
+  "default_receive_payload_bytes": 16777216,
+  "limit_configuration": "StreamLink::max_receive_frame_bytes(u32), TcpLinkSource::max_receive_frame_bytes(u32); zero permits only empty frames",
+  "checks": [
+    {
+      "command": "cargo test --offline --locked -p teamy-vox-stream",
+      "status": "passed",
+      "test_count": 20,
+      "log_sha256": "29a5ced8bab8d66c7f404c54d8e29a9a67a3d3a31afe93f450b5b8d730140a1d"
+    },
+    {
+      "command": "cargo test --offline --locked -p teamy-vox-core -p teamy-vox-macros-core",
+      "status": "passed",
+      "test_count": 113,
+      "log_sha256": "3cc240de31d7ef447949ef134b3125566fd0cfc7cd3d23181b2c392fa57ab6f2"
+    },
+    {
+      "command": "cargo run --offline --locked -p teamy-vox-xtask -- test-java",
+      "status": "passed",
+      "test_count": null,
+      "log_sha256": "b867ef4338928202d2264eb5db31c1c09428f6b0ea41aa3d91962eb344084ae5"
+    },
+    {
+      "command": "cargo test --offline --locked -p spec-tests --test java_wire -- --test-threads=2",
+      "status": "passed",
+      "test_count": 12,
+      "log_sha256": "f8466a14285f17eca864f14f1f1da33c5e346efddb83fd5584edf28ca66f272e"
+    },
+    {
+      "command": "cargo clippy --offline --locked -p teamy-vox-stream --all-targets -- -D warnings",
+      "status": "passed",
+      "test_count": null,
+      "log_sha256": "59d892b1ddf9918831851a739a2d4f968202cc92943d33e1d06d4e4e0eaae22d"
+    },
+    {
+      "command": "rustfmt --edition 2024 --check rust/vox-stream/src/lib.rs rust/vox/src/lib.rs",
+      "status": "passed",
+      "test_count": null,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "java_assertions": {
+    "schema_bundle": 1934,
+    "phon": 86,
+    "framing": "passed",
+    "runtime": "passed",
+    "generated_response": "passed"
+  },
+  "review": "Independent read-only review at source commit; no remaining blocker",
+  "residual_bounds": [
+    "128 queued received frames plus one in flight and caller-retained frames; no aggregate byte budget",
+    "No new read deadline or connection-count bound",
+    "FdStreamLink/Unix LocalLink accumulator and descriptor-count bounds unchanged",
+    "Iroh/Windows LocalLink inherit default without new wrapper-specific overrides",
+    "WebSocket/browser transports separate"
+  ],
+  "unrun": [
+    "Tracey tool unavailable; spec annotations updated manually",
+    "Windows",
+    "32-bit",
+    "wasm",
+    "Iroh direct/relay runtime",
+    "throughput benchmark",
+    "New high-level oversized-handshake role-builder cases"
+  ],
+  "compatibility": "incoming frames above16MiB require explicit receiver override; outgoing limits and wireencoding unchanged",
+  "warnings": "java_wire shared harness emitted363 unused/dead-code warnings"
+}

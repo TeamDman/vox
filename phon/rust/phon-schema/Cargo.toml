@@ -1,5 +1,5 @@
 [package]
-publish = false
+publish = ["crates-io"]
 name = "teamy-phon-schema"
 version = "0.2.0-rc.6"
 edition.workspace = true

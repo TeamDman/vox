@@ -1,5 +1,5 @@
 [package]
-publish = false
+publish = ["crates-io"]
 name = "teamy-vox-proto"
 version = "0.2.2"
 edition = "2024"

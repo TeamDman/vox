@@ -1,5 +1,5 @@
 [package]
-publish = false
+publish = ["crates-io"]
 name = "teamy-vox-rt-macros"
 version = "0.10.0-rc.7"
 edition.workspace = true

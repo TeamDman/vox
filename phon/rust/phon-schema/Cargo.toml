@@ -1,7 +1,10 @@
 [package]
+homepage.workspace = true
+documentation = "https://docs.rs/teamy-phon-schema"
+readme = "README.md"
 publish = ["crates-io"]
 name = "teamy-phon-schema"
-version = "0.2.0-rc.6"
+version = "0.2.0-rc.7"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

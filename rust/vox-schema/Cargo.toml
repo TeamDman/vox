@@ -1,13 +1,14 @@
 [package]
+readme = "README.md"
 publish = ["crates-io"]
 name = "teamy-vox-schema"
-version = "0.10.0-rc.7"
+version = "0.10.0-rc.8"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-documentation.workspace = true
+documentation = "https://docs.rs/teamy-vox-schema"
 keywords.workspace = true
 categories.workspace = true
 description = "Canonical schema model for vox"

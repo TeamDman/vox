@@ -1,92 +1,67 @@
-# vox
+# Teamy Vox
 
-This is the Teamy fork. The standalone Java/terminal migration, dependency
-identities, preserved commit maps, and validation limits are documented in
-[the migration report](docs/teamy-migration/README.md). Migration packages are
-not published; the badges below describe upstream Vox.
+This is [TeamDman's independently maintained fork](https://github.com/TeamDman/vox)
+of [upstream Vox](https://github.com/bearcove/vox), with the matching
+[upstream Phon](https://github.com/bearcove/phon) history maintained under `phon/`.
+The crates.io packages are named `teamy-vox*` and `teamy-phon*`; they are separate
+from the upstream packages. Upstream authors and contributors retain their
+credits, copyright notices, and MIT OR Apache-2.0 licensing.
 
-[![crates.io](https://img.shields.io/crates/v/vox.svg)](https://crates.io/crates/vox)
-[![documentation](https://docs.rs/vox/badge.svg)](https://docs.rs/vox)
-[![MIT/Apache-2.0 licensed](https://img.shields.io/crates/l/vox.svg)](https://github.com/bearcove/vox/blob/main/LICENSE-MIT)
+Vox defines RPC services as Rust traits. The service macro generates clients and
+dispatchers; the matching Phon codec carries typed values and channels. This fork
+preserves Teamy's Java runtime/generator and terminal contracts, uses the published
+Teamy Facet graph, and includes reviewed fixes for malformed first RPC responses
+and bounded stream receives. These are fork changes, not a claim about the current
+status of upstream releases.
 
-vox is a Rust-native RPC framework where Rust traits *are*
-the schema. There is
-no separate IDL, no code-generation pipeline to wire up: you define an async
-trait, annotate it with `#[vox::service]`, and get a type-safe client and
-dispatcher that serializes with [Facet](https://facet.rs). Implementations for
-TypeScript and Swift are generated from those same Rust definitions.
+## Rust dependencies
+
+```toml
+[dependencies]
+facet = { package = "teamy-facet", version = "=0.50.0-rc.7" }
+vox = { package = "teamy-vox", version = "=0.10.0-rc.8" }
+```
+
+Keep the `vox` dependency alias: `#[vox::service]` emits paths through `::vox`.
+Use matching fork packages throughout the graph; upstream and Teamy Facet types
+are distinct Rust identities.
 
 ```rust
 #[vox::service]
-pub trait Calculator {
-    async fn add(&self, a: i32, b: i32) -> i32;
-    async fn divide(&self, a: i32, b: i32) -> Result<i32, MathError>;
+trait Echo {
+    async fn echo(&self, value: String) -> String;
+}
 
-    /// Client sends numbers, server returns the running sum.
-    async fn sum(&self, numbers: Rx<i32>) -> i64;
+struct EchoService;
 
-    /// Server streams results back to the client.
-    async fn generate(&self, count: u32, output: Tx<i32>);
+impl Echo for EchoService {
+    async fn echo(&self, value: String) -> String {
+        value
+    }
 }
 ```
 
-## Implementing a service
+This defines a service; starting a transport and driving a connection are separate
+steps. See the [crate overview](rust/vox/README.md), [Rust examples](rust-examples),
+and [API documentation](https://docs.rs/teamy-vox).
 
-```rust
-impl Calculator for MyCalculator {
-    async fn add(&self, _cx: &Context, a: i32, b: i32) -> i32 {
-        a + b
-    }
+## Protocol and release scope
 
-    async fn divide(&self, _cx: &Context, a: i32, b: i32) -> Result<i32, MathError> {
-        if b == 0 { Err(MathError::DivisionByZero) } else { Ok(a / b) }
-    }
+The modern Phon/Taxon protocol requires old Facet-monorepo peers to upgrade
+together. A Rust dependency update alone does not establish wire compatibility.
+Stream links default to a 16 MiB receive-frame bound checked before allocation;
+this is not a total queue or process-memory limit.
 
-    async fn sum(&self, _cx: &Context, mut numbers: Rx<i32>) -> i64 {
-        let mut total = 0i64;
-        while let Some(n) = numbers.recv().await.ok().flatten() {
-            total += n as i64;
-        }
-        total
-    }
-    // ...
-}
-```
+The [desktop release notes](docs/teamy-migration/desktop-registry-release.md)
+identify the selected package closure and Windows checks. The
+[completed cutover report](docs/teamy-migration/cloud-cutover-validation.md)
+records separate Linux/Java validation. Earlier migration handoffs remain in the
+repository as historical records; their unfinished/private-package status is not
+the status of this release preparation. Legacy `main` and `teamy-main` history has
+not been replaced by this release branch.
 
-## Using a client
-
-```rust
-let client = CalculatorClient::new(connection_handle);
-
-let result = client.add(2, 3).await?;
-
-match client.divide(10, 0).await? {
-    Ok(r)  => println!("result: {r}"),
-    Err(MathError::DivisionByZero) => println!("cannot divide by zero"),
-}
-```
-
-## Features
-
-- **Bidirectional RPC** — request/response with correlation ids
-- **Channels** — `Tx<T>` / `Rx<T>` with credit-based flow control
-- **Service lanes** — multiple independently routed services on one connection
-- **Transport-agnostic** — TCP, WebSocket, Unix sockets, and shared-memory hub
-- **Middleware** — intercept requests for auth, tracing, rate-limiting, etc.
-- **OpenTelemetry** — built-in distributed tracing via `vox_telemetry`
-
-## Language support
-
-| Language   | Status                    |
-|------------|---------------------------|
-| Rust       | Reference implementation  |
-| TypeScript | Generated client/server   |
-| Swift      | Generated client/server   |
-| Java       | Java 17 contract frozen; implementation in progress |
-
-## Specification
-
-See the [spec](https://github.com/bearcove/vox/tree/main/docs/content/spec) for the formal protocol definition.
+See [Phon](phon/README.md) for the binary-format layers and
+[upstream Vox](https://github.com/bearcove/vox) for upstream development.
 
 ## License
 

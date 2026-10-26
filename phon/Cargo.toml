@@ -24,13 +24,13 @@ copypatch = "0.2.0-rc.5"
 facet = { package = "teamy-facet", version = "=0.50.0-rc.7" }
 facet-json = { package = "teamy-facet-json", version = "=0.50.0-rc.9" }
 facet-value = { package = "teamy-facet-value", version = "=0.50.0-rc.9" }
-phon = { package = "teamy-phon", path = "rust/phon", version = "=0.2.0-rc.7" }
-phon-codegen = { package = "teamy-phon-codegen", path = "rust/phon-codegen", version = "=0.2.0-rc.7" }
+phon = { package = "teamy-phon", path = "rust/phon", version = "=0.2.0-rc.8" }
+phon-codegen = { package = "teamy-phon-codegen", path = "rust/phon-codegen", version = "=0.2.0-rc.8" }
 phon-conformance = { package = "teamy-phon-conformance", path = "rust/phon-conformance", version = "=0.2.0-rc.7" }
-phon-engine = { package = "teamy-phon-engine", path = "rust/phon-engine", version = "=0.2.0-rc.7" }
-phon-ir = { package = "teamy-phon-ir", path = "rust/phon-ir", version = "=0.2.0-rc.7" }
-phon-jit = { package = "teamy-phon-jit", path = "rust/phon-jit", version = "=0.2.0-rc.7" }
-phon-schema = { package = "teamy-phon-schema", path = "rust/phon-schema", version = "=0.2.0-rc.6" }
+phon-engine = { package = "teamy-phon-engine", path = "rust/phon-engine", version = "=0.2.0-rc.8" }
+phon-ir = { package = "teamy-phon-ir", path = "rust/phon-ir", version = "=0.2.0-rc.8" }
+phon-jit = { package = "teamy-phon-jit", path = "rust/phon-jit", version = "=0.2.0-rc.8" }
+phon-schema = { package = "teamy-phon-schema", path = "rust/phon-schema", version = "=0.2.0-rc.7" }
 taxon = "=0.2.0-rc.5"
 weavy = "0.2.3-rc.0"
 proptest = "1"

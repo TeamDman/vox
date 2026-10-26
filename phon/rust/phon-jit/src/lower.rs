@@ -122,6 +122,9 @@ pub fn compile_decode(program: &MemProgram) -> CompiledDecode {
             MemOp::Enum(_) => panic!("phon-jit: enums are interpreter-only for now"),
             MemOp::Map(_) => panic!("phon-jit: maps are interpreter-only for now"),
             MemOp::Result(_) => panic!("phon-jit: Result is interpreter-only for now"),
+            MemOp::Proxy(_) | MemOp::Managed(_) => {
+                panic!("phon-jit: scalar proxies require the fallible interpreter")
+            }
             MemOp::Pointer(p) => DecodeStep::Pointer {
                 field_offset: p.field_offset,
                 pointee_size: p.pointee_size,
@@ -182,6 +185,9 @@ pub fn compile_encode(program: &MemProgram) -> CompiledEncode {
             MemOp::Enum(_) => panic!("phon-jit: enums are interpreter-only for now"),
             MemOp::Map(_) => panic!("phon-jit: maps are interpreter-only for now"),
             MemOp::Result(_) => panic!("phon-jit: Result is interpreter-only for now"),
+            MemOp::Proxy(_) | MemOp::Managed(_) => {
+                panic!("phon-jit: scalar proxies require the fallible interpreter")
+            }
             MemOp::Pointer(p) => EncodeStep::Pointer {
                 field_offset: p.field_offset,
                 thunks: p.thunks,

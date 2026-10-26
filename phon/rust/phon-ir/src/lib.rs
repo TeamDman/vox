@@ -13,6 +13,9 @@
 
 // r[impl crates.engine-is-binding-free]
 pub mod descriptor;
+pub use descriptor::ProxyAccess;
+pub use ir::{ManagedOp, ProxyOp, ProxyThunks};
+pub use weavy::mem::DropBinding;
 
 pub use descriptor::{
     Access, ByteOwner, ByteRange, Construct, Descriptor, EnumAccess, FieldAccess, FieldDefault,

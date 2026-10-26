@@ -1,0 +1,92 @@
+[package]
+edition = "2024"
+rust-version = "1.92"
+name = "teamy-weavy"
+version = "0.2.3-rc.1"
+build = "build.rs"
+links = "weavy"
+exclude = [".cargo-ok", ".cargo_vcs_info.json", "Cargo.toml.orig"]
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+description = "Teamy fork: shared lowered-program substrate for interpreters and copy-and-patch backends."
+homepage = "https://github.com/TeamDman/vox"
+documentation = "https://docs.rs/teamy-weavy"
+publish = ["crates-io"]
+readme = "README.md"
+keywords = [
+    "bytecode",
+    "interpreter",
+    "jit",
+    "stencil",
+]
+categories = [
+    "encoding",
+    "compilers",
+]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/TeamDman/vox"
+
+[package.metadata.teamy-fork]
+upstream-repository = "https://github.com/bearcove/weavy"
+upstream-version = "0.2.3-rc.0"
+upstream-revision = "a4351cc71d110935907681f7678a0557b0fdd426"
+upstream-crate-sha256 = "02a7fcadcbd0f12cd098f64637c46d9b4195f36490cb5ad2ffa2f4e867d15abb"
+
+[package.metadata."docs.rs"]
+rustdoc-args = [
+    "--html-in-header",
+    "arborium-header.html",
+]
+
+[features]
+default = ["jit"]
+jit = [
+    "dep:copypatch",
+    "copypatch/build",
+]
+
+[lib]
+name = "weavy"
+path = "src/lib.rs"
+
+[[example]]
+name = "array_get_bench"
+path = "examples/array_get_bench.rs"
+
+[[test]]
+name = "jit_active"
+path = "tests/jit_active.rs"
+
+[dependencies.copypatch]
+version = "0.2.0-rc.5"
+optional = true
+
+[dev-dependencies.tokio]
+version = "1"
+features = [
+    "rt-multi-thread",
+    "macros",
+    "time",
+    "sync",
+]
+
+[build-dependencies.copypatch]
+version = "0.2.0-rc.5"
+features = ["build"]
+optional = true
+
+[lints.clippy]
+disallowed_methods = "deny"
+
+[lints.rust.unexpected_cfgs]
+level = "warn"
+priority = 0
+check-cfg = [
+    "cfg(facet_no_doc)",
+    "cfg(kani)",
+]
+
+[workspace]

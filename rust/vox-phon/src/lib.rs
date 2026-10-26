@@ -132,14 +132,15 @@ impl TypedProgram {
         }
     }
 
-    unsafe fn encode(&self, base: *const u8) -> Vec<u8> {
+    unsafe fn encode(&self, base: *const u8) -> Result<Vec<u8>, Error> {
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         {
             if let Some(native) = &self.native_encode {
-                return unsafe { native.0.run(base) };
+                return Ok(unsafe { native.0.run(base) });
             }
         }
-        unsafe { typed::encode_with(&self.lowered, base) }
+        unsafe { typed::try_encode_with(&self.lowered, base) }
+            .map_err(|error| Error(format!("encode proxy conversion: {error}")))
     }
 
     unsafe fn decode_into(
@@ -277,7 +278,7 @@ fn decode_program_supported(program: &[MemOp]) -> bool {
         | MemOp::Borrow(_)
         | MemOp::Default(_)
         | MemOp::SkipWire(_) => true,
-        MemOp::NativeInt { .. } => false,
+        MemOp::NativeInt { .. } | MemOp::Proxy(_) | MemOp::Managed(_) => false,
         MemOp::Sequence(s) => decode_program_supported(&s.element),
         MemOp::Set(s) => decode_program_supported(&s.element),
         MemOp::Option(o) => decode_program_supported(&o.some),
@@ -296,7 +297,7 @@ fn decode_program_supported(program: &[MemOp]) -> bool {
 fn encode_program_supported(program: &[MemOp]) -> bool {
     program.iter().all(|op| match op {
         MemOp::Scalar { .. } | MemOp::ScalarRun(_) | MemOp::Bytes(_) | MemOp::Borrow(_) => true,
-        MemOp::NativeInt { .. } => false,
+        MemOp::NativeInt { .. } | MemOp::Proxy(_) | MemOp::Managed(_) => false,
         MemOp::Sequence(s) => encode_program_supported(&s.element),
         MemOp::Set(s) => encode_program_supported(&s.element),
         MemOp::Option(o) => encode_program_supported(&o.some),
@@ -308,7 +309,8 @@ fn encode_program_supported(program: &[MemOp]) -> bool {
         MemOp::Result(r) => encode_program_supported(&r.ok) && encode_program_supported(&r.err),
         MemOp::Pointer(p) => encode_program_supported(&p.pointee),
         MemOp::SkipWire(_) | MemOp::Default(_) => false,
-        MemOp::Opaque(_) | MemOp::Dynamic { .. } | MemOp::CallBlock { .. } => true,
+        MemOp::Opaque(o) => o.thunks.try_encode.is_none(),
+        MemOp::Dynamic { .. } | MemOp::CallBlock { .. } => true,
     })
 }
 
@@ -320,7 +322,7 @@ fn encode_program_supported(program: &[MemOp]) -> bool {
 pub fn to_vec<'a, T: Facet<'a>>(value: &T) -> Result<Vec<u8>, Error> {
     let program = typed_program_for_shape(T::SHAPE)?;
     // Safety: `value` is a live `T`; `program` was built from `T`'s descriptor.
-    Ok(unsafe { program.encode((value as *const T).cast::<u8>()) })
+    unsafe { program.encode((value as *const T).cast::<u8>()) }
 }
 
 /// Encode a type-erased value `(ptr, shape)` to phon-compact bytes via its
@@ -338,7 +340,7 @@ pub fn to_vec_for_shape(ptr: PtrConst, shape: &'static Shape) -> Result<Vec<u8>,
     let program = typed_program_for_shape(shape)?;
     // Safety: `ptr` points to a live value of `shape`; `program` was built from
     // that shape's descriptor.
-    Ok(unsafe { program.encode(ptr.as_byte_ptr()) })
+    unsafe { program.encode(ptr.as_byte_ptr()) }
 }
 
 /// Report whether the shape-erased typed program for `shape` is backed by
@@ -522,7 +524,8 @@ mod tests {
             });
             assert_eq!(
                 status.fully_native(),
-                cfg!(all(target_os = "macos", target_arch = "aarch64")),
+                cfg!(all(target_os = "macos", target_arch = "aarch64"))
+                    && matches!(name, "SchemaMessage" | "DodecaParseResult"),
                 "{name} JIT status: {status:?}"
             );
         }
@@ -544,7 +547,18 @@ mod tests {
                     panic!("failed to build JIT fallback report for {name}: {err}");
                 });
             if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-                assert!(report.is_empty(), "{name} fallback report: {report:?}");
+                if matches!(name, "SchemaMessage" | "DodecaParseResult") {
+                    assert!(report.is_empty(), "{name} fallback report: {report:?}");
+                } else {
+                    assert!(!report.is_empty(), "{name} needs fallible opaque encode");
+                    assert!(
+                        report.records.iter().all(|record| {
+                            record.direction == "encode"
+                                && record.reason.contains("fallible opaque")
+                        }),
+                        "{name} fallback report: {report:?}"
+                    );
+                }
             } else {
                 assert!(!report.is_empty(), "{name} should report unavailable JIT");
                 for record in &report.records {
@@ -579,7 +593,11 @@ mod tests {
             assert_eq!(record.phase, "wire");
             if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
                 assert!(record.decode_native.is_some(), "{name} decode stats");
-                assert!(record.encode_native.is_some(), "{name} encode stats");
+                assert_eq!(
+                    record.encode_native.is_some(),
+                    matches!(name, "SchemaMessage" | "DodecaParseResult"),
+                    "{name} encode stats"
+                );
             } else {
                 assert!(record.decode_native.is_none(), "{name} decode stats");
                 assert!(record.encode_native.is_none(), "{name} encode stats");
@@ -593,9 +611,9 @@ mod tests {
         assert!(summary.lowered.total.scalar_op_count > 0);
         if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
             assert_eq!(summary.decode_native_count, summary.root_count);
-            assert_eq!(summary.encode_native_count, summary.root_count);
+            assert_eq!(summary.encode_native_count, 2);
             assert!(summary.decode_native.stencil_count >= summary.lowered.total.op_count);
-            assert!(summary.encode_native.stencil_count >= summary.lowered.total.op_count);
+            assert!(summary.encode_native.stencil_count > 0);
         } else {
             assert_eq!(summary.decode_native_count, 0);
             assert_eq!(summary.encode_native_count, 0);

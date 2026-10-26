@@ -816,8 +816,10 @@ impl Compiler {
                         runinfo,
                     });
                 }
-                MemOp::NativeInt { .. } => {
-                    panic!("phon-jit: native-sized integer casts are interpreter-only for now")
+                MemOp::NativeInt { .. } | MemOp::Proxy(_) | MemOp::Managed(_) => {
+                    panic!(
+                        "phon-jit: native-sized integer casts and proxy conversions are interpreter-only for now"
+                    )
                 }
                 MemOp::Pointer(p) => {
                     self.layout.emit_stencil(POINTER);
@@ -1132,8 +1134,10 @@ impl Compiler {
             let relocs = match &program[i] {
                 MemOp::Scalar { .. } => SCALAR_CONT,
                 MemOp::ScalarRun(_) => SCALAR_RUN_CONT,
-                MemOp::NativeInt { .. } => {
-                    panic!("phon-jit: native-sized integer casts are interpreter-only for now")
+                MemOp::NativeInt { .. } | MemOp::Proxy(_) | MemOp::Managed(_) => {
+                    panic!(
+                        "phon-jit: native-sized integer casts and proxy conversions are interpreter-only for now"
+                    )
                 }
                 MemOp::Sequence(_) => SEQUENCE_CONT,
                 MemOp::Set(_) => SET_CONT,
@@ -2118,8 +2122,10 @@ impl EncCompiler {
                         runinfo,
                     });
                 }
-                MemOp::NativeInt { .. } => {
-                    panic!("phon-jit: native-sized integer casts are interpreter-only for now")
+                MemOp::NativeInt { .. } | MemOp::Proxy(_) | MemOp::Managed(_) => {
+                    panic!(
+                        "phon-jit: native-sized integer casts and proxy conversions are interpreter-only for now"
+                    )
                 }
                 MemOp::Pointer(p) => {
                     self.layout.emit_stencil(POINTER_ENC);
@@ -2267,6 +2273,10 @@ impl EncCompiler {
                     });
                 }
                 MemOp::Opaque(o) => {
+                    assert!(
+                        o.thunks.try_encode.is_none(),
+                        "phon-jit: fallible opaque encoding requires the interpreter"
+                    );
                     self.layout.emit_stencil(OPAQUE_ENC);
                     let slot = self.layout.reserve_prog_slot(prog_index).slot;
                     let opaqueinfo = self.opaque_infos.len();
@@ -2372,8 +2382,10 @@ impl EncCompiler {
             let relocs = match &program[i] {
                 MemOp::Scalar { .. } => SCALAR_ENC_CONT,
                 MemOp::ScalarRun(_) => SCALAR_RUN_ENC_CONT,
-                MemOp::NativeInt { .. } => {
-                    panic!("phon-jit: native-sized integer casts are interpreter-only for now")
+                MemOp::NativeInt { .. } | MemOp::Proxy(_) | MemOp::Managed(_) => {
+                    panic!(
+                        "phon-jit: native-sized integer casts and proxy conversions are interpreter-only for now"
+                    )
                 }
                 MemOp::Sequence(_) => SEQUENCE_ENC_CONT,
                 MemOp::Set(_) => SET_ENC_CONT,

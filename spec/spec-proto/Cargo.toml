@@ -5,7 +5,7 @@ documentation = "https://docs.rs/teamy-vox-proto"
 readme = "README.md"
 publish = ["crates-io"]
 name = "teamy-vox-proto"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Service definitions used by the canonical vox compliance suite"
@@ -18,7 +18,7 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 [dependencies]
 facet.workspace = true
 facet-value.workspace = true
-vox = { package = "teamy-vox", path = "../../rust/vox", version = "=0.10.0-rc.8", default-features = false, features = ["runtime"] }
+vox = { package = "teamy-vox", path = "../../rust/vox", version = "=0.10.0-rc.9", default-features = false, features = ["runtime"] }
 vox-schema.workspace = true
 
 [dev-dependencies]

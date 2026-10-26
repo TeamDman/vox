@@ -22,9 +22,9 @@
 //!
 //! Spec: "The descriptor model", "Compact mode", `r[ir.memory]`.
 
+use phon_ir::ProxyOp;
 use std::alloc;
 use std::collections::{BTreeMap, HashMap};
-use std::convert::Infallible;
 
 use phon_ir::ir::{
     BorrowOp, BytesOp, DefaultOp, EnumOp, EnumVariantOp, Lowered, LoweringError, MapOp, MemOp,
@@ -96,6 +96,11 @@ fn fixed_size(p: Primitive) -> Option<usize> {
 // r[impl ir.memory]
 // r[impl descriptors.fact-driven]
 pub fn lower(descriptor: &Descriptor, reg: &Registry) -> Result<MemProgram> {
+    let context = Lowering {
+        registry: reg,
+        managed: contains_proxy(descriptor),
+    };
+    let reg = &context;
     let mut out = Vec::new();
     lower_node(descriptor, reg, 0, &mut out)?;
     // Coalesce contiguous scalar runs into single copies (e.g. a flat struct
@@ -114,6 +119,11 @@ pub fn lower_typed(
     descriptor_blocks: &HashMap<SchemaId, Descriptor>,
     reg: &Registry,
 ) -> Result<Lowered> {
+    let context = Lowering {
+        registry: reg,
+        managed: contains_proxy(descriptor) || descriptor_blocks.values().any(contains_proxy),
+    };
+    let reg = &context;
     let mut root = Vec::new();
     lower_node(descriptor, reg, 0, &mut root)?;
     let mut blocks = BTreeMap::new();
@@ -140,8 +150,113 @@ fn mem_program_through_canonical(program: MemProgram) -> MemProgram {
         .expect("generated typed MemOp must round-trip through canonical Weavy IR")
 }
 
+struct Lowering<'a> {
+    registry: &'a Registry,
+    managed: bool,
+}
+
+impl core::ops::Deref for Lowering<'_> {
+    type Target = Registry;
+    fn deref(&self) -> &Registry {
+        self.registry
+    }
+}
+
+fn contains_proxy(d: &Descriptor) -> bool {
+    match &d.access {
+        Access::Proxy(_) => true,
+        Access::Record(r) => r.fields.iter().any(|f| contains_proxy(&f.descriptor)),
+        Access::Enum(e) => e.variants.iter().any(|v| {
+            v.payload
+                .fields
+                .iter()
+                .any(|f| contains_proxy(&f.descriptor))
+        }),
+        Access::Option(o) => contains_proxy(&o.some),
+        Access::Array { element, .. } => contains_proxy(element),
+        Access::Sequence(s) => contains_proxy(&s.element),
+        Access::Set(s) => contains_proxy(&s.element),
+        Access::Map(m) => contains_proxy(&m.key) || contains_proxy(&m.value),
+        Access::Result(r) => contains_proxy(&r.ok) || contains_proxy(&r.err),
+        Access::Pointer(p) => contains_proxy(&p.pointee),
+        _ => false,
+    }
+}
+
+fn manage_node(
+    d: &Descriptor,
+    reg: &Lowering<'_>,
+    base: usize,
+    start: usize,
+    out: &mut MemProgram,
+) -> Result<()> {
+    if reg.managed {
+        if let Some(drop) = d.drop {
+            let program = out.split_off(start);
+            out.push(MemOp::Managed(Box::new(phon_ir::ManagedOp {
+                program,
+                field_offset: base,
+                drop,
+            })));
+        } else if !matches!(d.access, Access::Scalar) {
+            return Err(CompactError::Unsupported(
+                "typed: proxy graph value has no destruction contract",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn lower_node(d: &Descriptor, reg: &Lowering<'_>, base: usize, out: &mut MemProgram) -> Result<()> {
+    let start = out.len();
+    lower_node_body(d, reg, base, out)?;
+    manage_node(d, reg, base, start, out)
+}
+
+fn lower_decode_node(
+    writer: &SchemaRef,
+    reader: &Descriptor,
+    reg: &Lowering<'_>,
+    base: usize,
+    out: &mut MemProgram,
+) -> Result<()> {
+    let start = out.len();
+    lower_decode_node_body(writer, reader, reg, base, out)?;
+    manage_node(reader, reg, base, start, out)
+}
+
+fn lower_scalar(d: &Descriptor, p: Primitive, base: usize, out: &mut MemProgram) -> Result<()> {
+    let size = fixed_size(p).ok_or(CompactError::Unsupported(
+        "typed: variable-length scalar field",
+    ))?;
+    if d.layout.size == size {
+        out.push(MemOp::Scalar {
+            offset: base,
+            size,
+            align: alignment(p),
+        });
+    } else if matches!(p, Primitive::U64 | Primitive::I64) && matches!(d.layout.size, 1 | 2 | 4 | 8)
+    {
+        out.push(MemOp::NativeInt {
+            offset: base,
+            mem_size: d.layout.size,
+            signed: matches!(p, Primitive::I64),
+        });
+    } else {
+        return Err(CompactError::Unsupported(
+            "typed: scalar memory width differs from wire width",
+        ));
+    }
+    Ok(())
+}
+
 // r[impl ir.inlining]
-fn lower_node(d: &Descriptor, reg: &Registry, base: usize, out: &mut MemProgram) -> Result<()> {
+fn lower_node_body(
+    d: &Descriptor,
+    reg: &Lowering<'_>,
+    base: usize,
+    out: &mut MemProgram,
+) -> Result<()> {
     // A back-edge to a recursive schema: emit a call into that schema's block, run at
     // `base + offset` (the recursive value's location). The block itself is lowered once
     // by `lower_typed` from `Derived::descriptor_blocks`. (`r[ir.recursion]`)
@@ -161,31 +276,7 @@ fn lower_node(d: &Descriptor, reg: &Registry, base: usize, out: &mut MemProgram)
         return Ok(());
     }
     match (&d.access, compact::resolve(reg, &d.schema)?) {
-        (Access::Scalar, Resolved::Primitive(p)) => {
-            let size = fixed_size(p).ok_or(CompactError::Unsupported(
-                "typed: variable-length scalar field",
-            ))?;
-            if d.layout.size == size {
-                out.push(MemOp::Scalar {
-                    offset: base,
-                    size,
-                    align: alignment(p),
-                });
-            } else if matches!(p, Primitive::U64 | Primitive::I64)
-                && matches!(d.layout.size, 1 | 2 | 4 | 8)
-            {
-                out.push(MemOp::NativeInt {
-                    offset: base,
-                    mem_size: d.layout.size,
-                    signed: matches!(p, Primitive::I64),
-                });
-            } else {
-                return Err(CompactError::Unsupported(
-                    "typed: scalar memory width differs from wire width",
-                ));
-            }
-            Ok(())
-        }
+        (Access::Scalar, Resolved::Primitive(p)) => lower_scalar(d, p, base, out),
         (Access::Record(ra), Resolved::Composite(kind)) => {
             let arity = match &kind {
                 SchemaKind::Struct { fields, .. } => fields.len(),
@@ -392,9 +483,20 @@ fn lower_node(d: &Descriptor, reg: &Registry, base: usize, out: &mut MemProgram)
             })));
             Ok(())
         }
-        // r[impl ir.memory] — opaque field: a length-prefixed blob (wire-identical
-        // to a `Primitive::Bytes` run); the engine frames it and the thunks fill /
-        // consume the inner span.
+        // r[impl descriptors.explicit-proxy]
+        (Access::Proxy(proxy), _) => {
+            let mut representation = Vec::new();
+            lower_node(&proxy.representation, reg, 0, &mut representation)?;
+            out.push(MemOp::Proxy(Box::new(ProxyOp {
+                field_offset: base,
+                representation: fuse(representation),
+                representation_size: proxy.representation.layout.size,
+                representation_align: proxy.representation.layout.align,
+                thunks: proxy.thunks,
+            })));
+            Ok(())
+        }
+        // r[impl ir.memory] — opaque field: a length-prefixed blob.
         (Access::Opaque(thunks), Resolved::Primitive(Primitive::Bytes)) => {
             out.push(MemOp::Opaque(Box::new(OpaqueOp {
                 field_offset: base,
@@ -437,6 +539,11 @@ pub fn lower_decode(
     reader_blocks: &HashMap<SchemaId, Descriptor>,
     reg: &Registry,
 ) -> Result<Lowered> {
+    let context = Lowering {
+        registry: reg,
+        managed: contains_proxy(reader) || reader_blocks.values().any(contains_proxy),
+    };
+    let reg = &context;
     let mut out = Vec::new();
     lower_decode_node(&SchemaRef::concrete(writer_root), reader, reg, 0, &mut out)?;
     // A recursive reader lowers each of its cyclic schemas to a callable block, just
@@ -461,10 +568,10 @@ pub fn lower_decode(
 /// Append the reader-memory ops for one (writer schema ⋈ reader descriptor) node,
 /// folding the reader field offset into `base`.
 // r[impl compat.type-match]
-fn lower_decode_node(
+fn lower_decode_node_body(
     writer: &SchemaRef,
     reader: &Descriptor,
-    reg: &Registry,
+    reg: &Lowering<'_>,
     base: usize,
     out: &mut MemProgram,
 ) -> Result<()> {
@@ -499,15 +606,7 @@ fn lower_decode_node(
             if wp != rp {
                 return Err(incompatible(format!("primitive {wp:?} is not {rp:?}")));
             }
-            let size = fixed_size(wp).ok_or(CompactError::Unsupported(
-                "typed: variable-length scalar field",
-            ))?;
-            out.push(MemOp::Scalar {
-                offset: base,
-                size,
-                align: alignment(wp),
-            });
-            Ok(())
+            lower_scalar(reader, wp, base, out)
         }
         // Struct ⋈ struct: match fields by name, in WIRE order.
         (Access::Record(ra), Resolved::Composite(SchemaKind::Struct { fields: wf, .. })) => {
@@ -668,9 +767,19 @@ fn lower_decode_node(
             })));
             Ok(())
         }
-        // Opaque ⋈ Bytes: the writer wire is a `Primitive::Bytes` run; the reader
-        // carries an opaque adapter. The inner bytes are never translated here — the
-        // adapter owns the inner type — so this is the single-schema op verbatim.
+        // r[impl descriptors.explicit-proxy]
+        (Access::Proxy(proxy), _) => {
+            let mut representation = Vec::new();
+            lower_decode_node(writer, &proxy.representation, reg, 0, &mut representation)?;
+            out.push(MemOp::Proxy(Box::new(ProxyOp {
+                field_offset: base,
+                representation: fuse(representation),
+                representation_size: proxy.representation.layout.size,
+                representation_align: proxy.representation.layout.align,
+                thunks: proxy.thunks,
+            })));
+            Ok(())
+        }
         (Access::Opaque(thunks), Resolved::Primitive(Primitive::Bytes)) => {
             require_reader_bytes(&reader.schema, reg)?;
             out.push(MemOp::Opaque(Box::new(OpaqueOp {
@@ -686,7 +795,7 @@ fn lower_decode_node(
 fn lower_decode_sequence(
     writer_element: &SchemaRef,
     seq: &SequenceAccess,
-    reg: &Registry,
+    reg: &Lowering<'_>,
     base: usize,
     out: &mut MemProgram,
 ) -> Result<()> {
@@ -714,7 +823,7 @@ fn lower_fixed_array(
     element: &Descriptor,
     count: usize,
     stride: usize,
-    reg: &Registry,
+    reg: &Lowering<'_>,
     base: usize,
     out: &mut MemProgram,
 ) -> Result<()> {
@@ -728,7 +837,7 @@ fn lower_decode_fixed_array(
     element: &Descriptor,
     count: usize,
     stride: usize,
-    reg: &Registry,
+    reg: &Lowering<'_>,
     base: usize,
     out: &mut MemProgram,
 ) -> Result<()> {
@@ -750,7 +859,7 @@ fn require_fixed_array_count(count: usize, dimensions: &[u64]) -> Result<()> {
     }
 }
 
-fn lower_set(set: &SetAccess, reg: &Registry, base: usize, out: &mut MemProgram) -> Result<()> {
+fn lower_set(set: &SetAccess, reg: &Lowering<'_>, base: usize, out: &mut MemProgram) -> Result<()> {
     let SetStorage::Vtable(thunks) = &set.storage;
     let mut element = Vec::new();
     lower_node(&set.element, reg, 0, &mut element)?;
@@ -767,7 +876,7 @@ fn lower_set(set: &SetAccess, reg: &Registry, base: usize, out: &mut MemProgram)
 fn lower_decode_set(
     writer_element: &SchemaRef,
     set: &SetAccess,
-    reg: &Registry,
+    reg: &Lowering<'_>,
     base: usize,
     out: &mut MemProgram,
 ) -> Result<()> {
@@ -798,7 +907,7 @@ fn lower_decode_record(
     ra: &RecordAccess,
     reader_schema: &SchemaRef,
     record_kind: RecordKind,
-    reg: &Registry,
+    reg: &Lowering<'_>,
     base: usize,
     out: &mut MemProgram,
 ) -> Result<()> {
@@ -846,11 +955,13 @@ fn lower_decode_record(
                         r_named[ri].name
                     )));
                 };
+                let start = out.len();
                 out.push(MemOp::Default(Box::new(DefaultOp {
                     offset: base + fa.offset,
                     ctx: d.ctx,
                     default: d.thunk,
                 })));
+                manage_node(&fa.descriptor, reg, base + fa.offset, start, out)?;
             }
         }
     }
@@ -865,7 +976,7 @@ fn lower_decode_enum(
     w_variants: &[Variant],
     ea: &EnumAccess,
     reader_schema: &SchemaRef,
-    reg: &Registry,
+    reg: &Lowering<'_>,
     base: usize,
     out: &mut MemProgram,
 ) -> Result<()> {
@@ -918,7 +1029,7 @@ fn lower_decode_payload(
     w: &VariantPayload,
     va: &VariantAccess,
     r_schema_payload: &VariantPayload,
-    reg: &Registry,
+    reg: &Lowering<'_>,
     base: usize,
 ) -> Result<MemProgram> {
     let mut payload = Vec::new();
@@ -960,7 +1071,7 @@ fn lower_decode_variant_struct(
     w_fields: &[Field],
     ra: &RecordAccess,
     r_fields: &[Field],
-    reg: &Registry,
+    reg: &Lowering<'_>,
     base: usize,
     out: &mut MemProgram,
 ) -> Result<()> {
@@ -999,11 +1110,13 @@ fn lower_decode_variant_struct(
                         r_fields[ri].name
                     )));
                 };
+                let start = out.len();
                 out.push(MemOp::Default(Box::new(DefaultOp {
                     offset: base + fa.offset,
                     ctx: d.ctx,
                     default: d.thunk,
                 })));
+                manage_node(&fa.descriptor, reg, base + fa.offset, start, out)?;
             }
         }
     }
@@ -1026,7 +1139,7 @@ fn tuple_fields(elements: Vec<SchemaRef>) -> Vec<Field> {
 fn reader_record_fields(
     r: &SchemaRef,
     record_kind: RecordKind,
-    reg: &Registry,
+    reg: &Lowering<'_>,
 ) -> Result<Vec<Field>> {
     match (record_kind, compact::resolve(reg, r)?) {
         (RecordKind::Struct, Resolved::Composite(SchemaKind::Struct { fields, .. })) => Ok(fields),
@@ -1039,7 +1152,7 @@ fn reader_record_fields(
 
 /// The reader enum's variants (for names + payload shapes), resolved from a reader
 /// schema reference.
-fn reader_enum_variants(r: &SchemaRef, reg: &Registry) -> Result<Vec<Variant>> {
+fn reader_enum_variants(r: &SchemaRef, reg: &Lowering<'_>) -> Result<Vec<Variant>> {
     match compact::resolve(reg, r)? {
         Resolved::Composite(SchemaKind::Enum { variants, .. }) => Ok(variants),
         _ => Err(CompactError::TypeMismatch {
@@ -1048,42 +1161,42 @@ fn reader_enum_variants(r: &SchemaRef, reg: &Registry) -> Result<Vec<Variant>> {
     }
 }
 
-fn require_reader_list(r: &SchemaRef, reg: &Registry) -> Result<()> {
+fn require_reader_list(r: &SchemaRef, reg: &Lowering<'_>) -> Result<()> {
     match compact::resolve(reg, r)? {
         Resolved::Composite(SchemaKind::List { .. }) => Ok(()),
         _ => Err(incompatible("schema kinds differ")),
     }
 }
 
-fn require_reader_set(r: &SchemaRef, reg: &Registry) -> Result<()> {
+fn require_reader_set(r: &SchemaRef, reg: &Lowering<'_>) -> Result<()> {
     match compact::resolve(reg, r)? {
         Resolved::Composite(SchemaKind::Set { .. }) => Ok(()),
         _ => Err(incompatible("schema kinds differ")),
     }
 }
 
-fn require_reader_option(r: &SchemaRef, reg: &Registry) -> Result<()> {
+fn require_reader_option(r: &SchemaRef, reg: &Lowering<'_>) -> Result<()> {
     match compact::resolve(reg, r)? {
         Resolved::Composite(SchemaKind::Option { .. }) => Ok(()),
         _ => Err(incompatible("schema kinds differ")),
     }
 }
 
-fn require_reader_map(r: &SchemaRef, reg: &Registry) -> Result<()> {
+fn require_reader_map(r: &SchemaRef, reg: &Lowering<'_>) -> Result<()> {
     match compact::resolve(reg, r)? {
         Resolved::Composite(SchemaKind::Map { .. }) => Ok(()),
         _ => Err(incompatible("schema kinds differ")),
     }
 }
 
-fn require_reader_dynamic(r: &SchemaRef, reg: &Registry) -> Result<()> {
+fn require_reader_dynamic(r: &SchemaRef, reg: &Lowering<'_>) -> Result<()> {
     match compact::resolve(reg, r)? {
         Resolved::Composite(SchemaKind::Dynamic) => Ok(()),
         _ => Err(incompatible("schema kinds differ")),
     }
 }
 
-fn require_reader_bytes(r: &SchemaRef, reg: &Registry) -> Result<()> {
+fn require_reader_bytes(r: &SchemaRef, reg: &Lowering<'_>) -> Result<()> {
     match compact::resolve(reg, r)? {
         Resolved::Primitive(Primitive::Bytes) => Ok(()),
         _ => Err(incompatible("primitive Bytes is not reader schema")),
@@ -1107,7 +1220,7 @@ fn variant_index_by_name(variants: &[Variant], name: &str) -> Result<u32> {
 fn lower_result(
     ra: &ResultAccess,
     variants: &[Variant],
-    reg: &Registry,
+    reg: &Lowering<'_>,
     base: usize,
 ) -> Result<ResultOp> {
     let ok_wire_index = variant_index_by_name(variants, "Ok")?;
@@ -1135,7 +1248,7 @@ fn lower_result(
 fn lower_decode_result(
     wv: &[Variant],
     ra: &ResultAccess,
-    reg: &Registry,
+    reg: &Lowering<'_>,
     base: usize,
 ) -> Result<ResultOp> {
     let ok_wv = wv
@@ -1165,7 +1278,7 @@ fn lower_decode_result(
 fn lower_decode_result_arm(
     w: &VariantPayload,
     reader: &Descriptor,
-    reg: &Registry,
+    reg: &Lowering<'_>,
 ) -> Result<MemProgram> {
     let VariantPayload::Newtype(wr) = w else {
         return Err(incompatible("Result arm payload must be a newtype"));
@@ -1186,7 +1299,7 @@ fn lower_decode_result_arm(
 /// # Errors
 /// [`CompactError::Unsupported`] for a kind the skip walker does not carry, or a
 /// resolution error.
-fn skip_op(writer: &SchemaRef, reg: &Registry) -> Result<SkipOp> {
+fn skip_op(writer: &SchemaRef, reg: &Lowering<'_>) -> Result<SkipOp> {
     match compact::resolve(reg, writer)? {
         Resolved::Primitive(p) => match p {
             Primitive::String | Primitive::Bytes => Ok(SkipOp::Bytes {
@@ -1359,11 +1472,23 @@ unsafe extern "C" fn validate_any(_ptr: *const u8, _len: usize) -> bool {
 
 /// Encode the value at `base` into compact bytes, by a prebuilt program.
 ///
+/// # Panics
+/// Panics if a proxy rejects the value. Use [`try_encode_with`] for fallible
+/// conversion, including when encoding values provided by a caller.
+///
 /// # Safety
 /// `base` must point to an initialized value matching the descriptor the program
 /// was lowered from, readable for every `offset + size` the program touches.
 #[must_use]
 pub unsafe fn encode_with(lowered: &Lowered, base: *const u8) -> Vec<u8> {
+    unsafe { try_encode_with(lowered, base) }.expect("typed encode conversion failed")
+}
+
+/// Encode with fallible proxy validation.
+///
+/// # Safety
+/// As [`encode_with`].
+pub unsafe fn try_encode_with(lowered: &Lowered, base: *const u8) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     let mut interp = EncodeInterp {
         base,
@@ -1372,9 +1497,9 @@ pub unsafe fn encode_with(lowered: &Lowered, base: *const u8) -> Vec<u8> {
     match weavy::run_program(&lowered.program, &lowered.blocks, &mut interp) {
         Ok(()) => {}
         Err(RunError::MissingBlock(_)) => panic!("CallBlock references a lowered recursion block"),
-        Err(RunError::Step(err)) => match err {},
+        Err(RunError::Step(err)) => return Err(err),
     }
-    out
+    Ok(out)
 }
 
 /// Encoded bytes plus the generic Weavy runner counters that produced them.
@@ -1386,10 +1511,22 @@ pub struct EncodeReport {
 
 /// Encode the value at `base` and return generic Weavy runner counters.
 ///
+/// # Panics
+/// Panics if a proxy rejects the value. Use [`try_encode_with_stats`] to return
+/// conversion errors to the caller.
+///
 /// # Safety
 /// As [`encode_with`].
 #[must_use]
 pub unsafe fn encode_with_stats(lowered: &Lowered, base: *const u8) -> EncodeReport {
+    unsafe { try_encode_with_stats(lowered, base) }.expect("typed encode conversion failed")
+}
+
+/// Encode with validation and return generic Weavy runner counters.
+///
+/// # Safety
+/// As [`encode_with`].
+pub unsafe fn try_encode_with_stats(lowered: &Lowered, base: *const u8) -> Result<EncodeReport> {
     let mut bytes = Vec::new();
     let mut interp = EncodeInterp {
         base,
@@ -1399,9 +1536,9 @@ pub unsafe fn encode_with_stats(lowered: &Lowered, base: *const u8) -> EncodeRep
     {
         Ok(stats) => stats,
         Err(RunError::MissingBlock(_)) => panic!("CallBlock references a lowered recursion block"),
-        Err(RunError::Step(err)) => match err {},
+        Err(RunError::Step(err)) => return Err(err),
     };
-    EncodeReport { bytes, stats }
+    Ok(EncodeReport { bytes, stats })
 }
 
 struct EncodeInterp<'out> {
@@ -1409,7 +1546,38 @@ struct EncodeInterp<'out> {
     out: &'out mut Vec<u8>,
 }
 
+struct EncodeIterator {
+    ptr: *mut (),
+    ctx: *const (),
+    dealloc: unsafe extern "C" fn(*const (), *mut ()),
+}
+
+struct EncodedProxy {
+    scratch: RawScratch,
+    thunks: phon_ir::ProxyThunks,
+}
+
+impl Drop for EncodedProxy {
+    fn drop(&mut self) {
+        // SAFETY: constructed only after conversion successfully initialized the
+        // temporary. The conversion binds its matching destructor.
+        unsafe { (self.thunks.drop_temporary)(self.thunks.ctx, self.scratch.ptr()) };
+    }
+}
+
+impl Drop for EncodeIterator {
+    fn drop(&mut self) {
+        // SAFETY: created by the paired iterator initializer and owned exactly
+        // once by the continuation, including when a nested proxy rejects input.
+        unsafe { (self.dealloc)(self.ctx, self.ptr) };
+    }
+}
+
 enum EncodeContinuation<'program> {
+    Proxy {
+        previous_base: *const u8,
+        scratch: EncodedProxy,
+    },
     RestoreBase {
         previous_base: *const u8,
     },
@@ -1424,24 +1592,24 @@ enum EncodeContinuation<'program> {
     Set {
         previous_base: *const u8,
         element: &'program MemProgram,
-        iter: *mut (),
+        iter: EncodeIterator,
         thunks: phon_ir::SetThunks,
     },
     MapKey {
         previous_base: *const u8,
         map: &'program MapOp,
-        iter: *mut (),
+        iter: EncodeIterator,
         value: *const u8,
     },
     MapValue {
         previous_base: *const u8,
         map: &'program MapOp,
-        iter: *mut (),
+        iter: EncodeIterator,
     },
 }
 
 impl<'program> Step<'program, SchemaId, MemOp> for EncodeInterp<'_> {
-    type Error = Infallible;
+    type Error = CompactError;
     type Continuation = EncodeContinuation<'program>;
 
     fn step(
@@ -1525,7 +1693,16 @@ impl<'program> Step<'program, SchemaId, MemOp> for EncodeInterp<'_> {
                 let n = unsafe { (s.thunks.len)(s.thunks.ctx, set) };
                 write_u32(self.out, n as u32);
                 let it = unsafe { (s.thunks.iter_init)(s.thunks.ctx, set) };
-                self.call_next_set(self.base, &s.element, it, s.thunks)
+                self.call_next_set(
+                    self.base,
+                    &s.element,
+                    EncodeIterator {
+                        ptr: it,
+                        ctx: s.thunks.ctx,
+                        dealloc: s.thunks.iter_dealloc,
+                    },
+                    s.thunks,
+                )
             }
             MemOp::Bytes(b) => {
                 // Safety: the handle lives at field_offset; one bulk read of its
@@ -1601,7 +1778,15 @@ impl<'program> Step<'program, SchemaId, MemOp> for EncodeInterp<'_> {
                 // Drive a stateful iterator over the entries, encoding each
                 // (key, value) pair in turn.
                 let it = unsafe { (m.thunks.iter_init)(m.thunks.ctx, map) };
-                self.call_next_map(self.base, m, it)
+                self.call_next_map(
+                    self.base,
+                    m,
+                    EncodeIterator {
+                        ptr: it,
+                        ctx: m.thunks.ctx,
+                        dealloc: m.thunks.iter_dealloc,
+                    },
+                )
             }
             // r[impl ir.memory] — a self-describing dynamic `Value`: write it through
             // the self-describing codec (self-delimiting; no length prefix).
@@ -1641,6 +1826,33 @@ impl<'program> Step<'program, SchemaId, MemOp> for EncodeInterp<'_> {
                 }
             }
             // r[impl descriptors.thunk-binding]
+            MemOp::Managed(op) => Control::CallProgram(&op.program),
+            MemOp::Proxy(proxy) => {
+                let scratch = alloc_scratch(proxy.representation_size, proxy.representation_align)?;
+                // SAFETY: the descriptor binds correctly typed source/conversion
+                // and the scratch allocation has the representation's size/alignment.
+                if !unsafe {
+                    (proxy.thunks.encode)(
+                        proxy.thunks.ctx,
+                        self.base.add(proxy.field_offset),
+                        scratch.ptr(),
+                    )
+                } {
+                    return Err(CompactError::Malformed("proxy encode rejected value"));
+                }
+                let previous_base = self.base;
+                self.base = scratch.ptr();
+                Control::CallProgramThen(
+                    &proxy.representation,
+                    EncodeContinuation::Proxy {
+                        previous_base,
+                        scratch: EncodedProxy {
+                            scratch,
+                            thunks: proxy.thunks,
+                        },
+                    },
+                )
+            }
             MemOp::Pointer(p) => {
                 // Safety: the owning pointer handle lives at field_offset.
                 let pointer = unsafe { self.base.add(p.field_offset) };
@@ -1666,7 +1878,16 @@ impl<'program> Step<'program, SchemaId, MemOp> for EncodeInterp<'_> {
                 let start = self.out.len();
                 // Safety: `field` points at the opaque field; the thunk appends the
                 // inner value's encoded bytes to `out`.
-                unsafe { (o.thunks.encode)(o.thunks.ctx, field, core::ptr::from_mut(self.out)) };
+                if let Some(encode) = o.thunks.try_encode {
+                    if !unsafe { encode(o.thunks.ctx, field, core::ptr::from_mut(self.out)) } {
+                        self.out.truncate(len_pos);
+                        return Err(CompactError::Malformed("opaque encode rejected value"));
+                    }
+                } else {
+                    unsafe {
+                        (o.thunks.encode)(o.thunks.ctx, field, core::ptr::from_mut(self.out))
+                    };
+                }
                 let inner_len = (self.out.len() - start) as u32;
                 self.out[len_pos..len_pos + 4].copy_from_slice(&inner_len.to_le_bytes());
                 Control::Continue
@@ -1685,6 +1906,14 @@ impl<'program> Step<'program, SchemaId, MemOp> for EncodeInterp<'_> {
     ) -> core::result::Result<Control<'program, SchemaId, MemOp, Self::Continuation>, Self::Error>
     {
         Ok(match continuation {
+            EncodeContinuation::Proxy {
+                previous_base,
+                scratch,
+            } => {
+                self.base = previous_base;
+                drop(scratch);
+                Control::Continue
+            }
             EncodeContinuation::RestoreBase { previous_base } => {
                 self.base = previous_base;
                 Control::Continue
@@ -1751,12 +1980,12 @@ impl EncodeInterp<'_> {
         &mut self,
         previous_base: *const u8,
         element: &'program MemProgram,
-        iter: *mut (),
+        iter: EncodeIterator,
         thunks: phon_ir::SetThunks,
     ) -> Control<'program, SchemaId, MemOp, EncodeContinuation<'program>> {
         let mut value: *const u8 = core::ptr::null();
         // Safety: `iter` is a live iterator; the out-param is valid.
-        if unsafe { (thunks.iter_next)(thunks.ctx, iter, &mut value) } {
+        if unsafe { (thunks.iter_next)(thunks.ctx, iter.ptr, &mut value) } {
             self.base = value;
             Control::CallProgramThen(
                 element,
@@ -1768,8 +1997,7 @@ impl EncodeInterp<'_> {
                 },
             )
         } else {
-            // Safety: `iter` was built by `iter_init` and is freed exactly once.
-            unsafe { (thunks.iter_dealloc)(thunks.ctx, iter) };
+            drop(iter);
             self.base = previous_base;
             Control::Continue
         }
@@ -1779,12 +2007,12 @@ impl EncodeInterp<'_> {
         &mut self,
         previous_base: *const u8,
         map: &'program MapOp,
-        iter: *mut (),
+        iter: EncodeIterator,
     ) -> Control<'program, SchemaId, MemOp, EncodeContinuation<'program>> {
         let mut key: *const u8 = core::ptr::null();
         let mut value: *const u8 = core::ptr::null();
         // Safety: `iter` is a live iterator; the out-params are valid.
-        if unsafe { (map.thunks.iter_next)(map.thunks.ctx, iter, &mut key, &mut value) } {
+        if unsafe { (map.thunks.iter_next)(map.thunks.ctx, iter.ptr, &mut key, &mut value) } {
             self.base = key;
             Control::CallProgramThen(
                 &map.key,
@@ -1796,8 +2024,7 @@ impl EncodeInterp<'_> {
                 },
             )
         } else {
-            // Safety: `iter` was built by `iter_init` and is freed exactly once.
-            unsafe { (map.thunks.iter_dealloc)(map.thunks.ctx, iter) };
+            drop(iter);
             self.base = previous_base;
             Control::Continue
         }
@@ -1819,7 +2046,7 @@ pub unsafe fn encode(
 ) -> Result<Vec<u8>> {
     let lowered = lower_typed(descriptor, descriptor_blocks, reg)?;
     // Safety: forwarded from this function's contract.
-    Ok(unsafe { encode_with(&lowered, base) })
+    unsafe { try_encode_with(&lowered, base) }
 }
 
 // ============================================================================
@@ -1840,7 +2067,11 @@ pub unsafe fn decode_with(lowered: &Lowered, bytes: &[u8], base: *mut u8) -> Res
     let mut interp = DecodeInterp {
         reader: Reader::new(bytes),
         base,
-        retained: Vec::new(),
+        rollback: DecodeRollback::default(),
+        active_owner: None,
+        retained: RetainedValues::default(),
+        scratch_storage: Vec::new(),
+        array_storage: Vec::new(),
     };
     match weavy::run_program(&lowered.program, &lowered.blocks, &mut interp) {
         Ok(()) => {}
@@ -1859,6 +2090,7 @@ pub unsafe fn decode_with(lowered: &Lowered, bytes: &[u8], base: *mut u8) -> Res
             "typed: decode produced retained reference pointees; use decode_with_retention",
         ));
     }
+    interp.rollback.commit();
     Ok(())
 }
 
@@ -1868,7 +2100,7 @@ pub unsafe fn decode_with(lowered: &Lowered, bytes: &[u8], base: *mut u8) -> Res
 /// value's destructor.
 #[derive(Debug, Default)]
 pub struct DecodeRetention {
-    retained: Vec<RetainedScratch>,
+    retained: RetainedValues,
 }
 
 impl DecodeRetention {
@@ -1893,7 +2125,11 @@ pub unsafe fn decode_with_retention(
     let mut interp = DecodeInterp {
         reader: Reader::new(bytes),
         base,
-        retained: Vec::new(),
+        rollback: DecodeRollback::default(),
+        active_owner: None,
+        retained: RetainedValues::default(),
+        scratch_storage: Vec::new(),
+        array_storage: Vec::new(),
     };
     match weavy::run_program(&lowered.program, &lowered.blocks, &mut interp) {
         Ok(()) => {}
@@ -1907,6 +2143,7 @@ pub unsafe fn decode_with_retention(
             interp.reader.remaining(),
         )));
     }
+    interp.rollback.commit();
     Ok(DecodeRetention {
         retained: interp.retained,
     })
@@ -1927,7 +2164,11 @@ pub unsafe fn decode_with_stats(
     let mut interp = DecodeInterp {
         reader: Reader::new(bytes),
         base,
-        retained: Vec::new(),
+        rollback: DecodeRollback::default(),
+        active_owner: None,
+        retained: RetainedValues::default(),
+        scratch_storage: Vec::new(),
+        array_storage: Vec::new(),
     };
     let stats = match weavy::run_program_with_stats(&lowered.program, &lowered.blocks, &mut interp)
     {
@@ -1947,18 +2188,115 @@ pub unsafe fn decode_with_stats(
             "typed: decode produced retained reference pointees; use decode_with_retention",
         ));
     }
+    interp.rollback.commit();
     Ok(stats)
 }
 
 struct DecodeInterp<'bytes> {
     reader: Reader<'bytes>,
     base: *mut u8,
-    retained: Vec<RetainedScratch>,
+    // Field order is deliberate: drop initialized values before pointees/storage.
+    rollback: DecodeRollback,
+    active_owner: Option<InitializedOwner>,
+    retained: RetainedValues,
+    scratch_storage: Vec<std::rc::Rc<RawScratch>>,
+    array_storage: Vec<SharedArray>,
+}
+
+#[derive(Clone, Copy)]
+struct InitializedOwner {
+    ptr: *mut u8,
+    binding: phon_ir::DropBinding,
+}
+
+#[derive(Default)]
+struct DecodeRollback {
+    initialized: Vec<InitializedOwner>,
+}
+
+impl DecodeRollback {
+    fn mark(&self) -> usize {
+        self.initialized.len()
+    }
+    // The caller has moved these values into another owner (or a consuming thunk).
+    fn transfer_since(&mut self, mark: usize) {
+        self.initialized.truncate(mark);
+    }
+    fn commit(&mut self) {
+        self.initialized.clear();
+    }
+}
+
+impl Drop for DecodeRollback {
+    fn drop(&mut self) {
+        drop_reverse(&mut self.initialized, |owner| {
+            // SAFETY: registered only after complete initialization; backing storage
+            // outlives this ledger. Transferred child ownership is removed first.
+            unsafe { (owner.binding.drop)(owner.binding.ctx, owner.ptr) };
+        });
+    }
+}
+
+/// Continue reverse-order cleanup if one destructor unwinds. A second panic
+/// while unwinding follows Rust's normal abort behavior.
+fn drop_reverse<T>(values: &mut Vec<T>, drop_one: fn(T)) {
+    struct Remaining<'a, T> {
+        values: &'a mut Vec<T>,
+        drop_one: fn(T),
+    }
+    impl<T> Drop for Remaining<'_, T> {
+        fn drop(&mut self) {
+            drop_reverse(self.values, self.drop_one);
+        }
+    }
+    while let Some(value) = values.pop() {
+        let remaining = Remaining { values, drop_one };
+        drop_one(value);
+        core::mem::forget(remaining);
+    }
+}
+
+#[derive(Clone)]
+struct SharedArray(std::rc::Rc<std::cell::RefCell<RawArrayBuffer>>);
+
+impl SharedArray {
+    fn ptr(&self) -> *mut u8 {
+        self.0.borrow().ptr()
+    }
+    fn cap(&self) -> usize {
+        self.0.borrow().cap()
+    }
+    fn adopt(&self) {
+        self.0.borrow_mut().adopt();
+    }
+    unsafe fn slot_unchecked(&self, index: usize) -> *mut u8 {
+        unsafe { self.0.borrow().slot_unchecked(index) }
+    }
+}
+
+/// Nested pointees are constructed before the owners that borrow them. Destroy
+/// them in reverse order so every pointee outlives the destructor of its reader.
+#[derive(Debug, Default)]
+struct RetainedValues(Vec<RetainedScratch>);
+
+impl RetainedValues {
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    fn push(&mut self, value: RetainedScratch) {
+        self.0.push(value);
+    }
+}
+
+impl Drop for RetainedValues {
+    fn drop(&mut self) {
+        drop_reverse(&mut self.0, drop);
+    }
 }
 
 #[derive(Debug)]
 struct RetainedScratch {
-    scratch: RawScratch,
+    scratch: std::rc::Rc<RawScratch>,
     ctx: *const (),
     drop_pointee: unsafe extern "C" fn(ctx: *const (), value: *mut u8),
 }
@@ -1970,47 +2308,63 @@ impl Drop for RetainedScratch {
 }
 
 enum DecodeContinuation<'program> {
+    Managed {
+        previous_owner: Option<InitializedOwner>,
+        owner: InitializedOwner,
+        mark: usize,
+    },
+    Proxy {
+        mark: usize,
+        previous_base: *mut u8,
+        target: *mut u8,
+        scratch: std::rc::Rc<RawScratch>,
+        thunks: phon_ir::ProxyThunks,
+    },
     RestoreBase {
         previous_base: *mut u8,
     },
     Sequence {
         previous_base: *mut u8,
         element: &'program MemProgram,
-        buffer: RawArrayBuffer,
+        buffer: SharedArray,
         next_index: usize,
         count: usize,
         list: *mut u8,
         thunks: phon_ir::SeqThunks,
     },
     SetElement {
+        mark: usize,
         previous_base: *mut u8,
         set: &'program SetOp,
         set_ptr: *mut u8,
         remaining_after_current: usize,
-        scratch: RawScratch,
+        scratch: std::rc::Rc<RawScratch>,
     },
     MapKey {
+        mark: usize,
         previous_base: *mut u8,
         map: &'program MapOp,
         map_ptr: *mut u8,
         total: usize,
         remaining: usize,
-        key_scratch: RawScratch,
-        value_scratch: RawScratch,
+        key_scratch: std::rc::Rc<RawScratch>,
+        value_scratch: std::rc::Rc<RawScratch>,
     },
     MapValue {
+        mark: usize,
         previous_base: *mut u8,
         map: &'program MapOp,
         map_ptr: *mut u8,
         total: usize,
         remaining: usize,
-        key_scratch: RawScratch,
-        value_scratch: RawScratch,
+        key_scratch: std::rc::Rc<RawScratch>,
+        value_scratch: std::rc::Rc<RawScratch>,
     },
     Init {
+        mark: usize,
         previous_base: *mut u8,
         target: InitTarget,
-        scratch: RawScratch,
+        scratch: std::rc::Rc<RawScratch>,
     },
 }
 
@@ -2091,7 +2445,7 @@ impl<'program> Step<'program, SchemaId, MemOp> for DecodeInterp<'_> {
             }
             MemOp::Sequence(s) => {
                 let count = self.reader.read_len(s.min_wire)?;
-                let mut buffer = alloc_sequence_buffer(count, s.stride, s.elem_align)?;
+                let buffer = self.alloc_array(count, s.stride, s.elem_align)?;
                 // Safety: the handle lives at `field_offset`.
                 let list = unsafe { self.base.add(s.field_offset) };
                 if count == 0 {
@@ -2128,9 +2482,8 @@ impl<'program> Step<'program, SchemaId, MemOp> for DecodeInterp<'_> {
                 // Safety: the set handle lives at field_offset.
                 let set = unsafe { self.base.add(s.field_offset) };
                 // Initialize the (uninitialized) set with room for `count` entries.
-                // NOTE: a decode error after this point leaks the partial set — the
-                // same trivially-droppable limitation as sequences/options/maps.
                 unsafe { (s.thunks.init_with_capacity)(s.thunks.ctx, set, count) };
+                self.register_container(set);
                 self.decode_next_set_element(self.base, s, set, count)?
             }
             MemOp::Bytes(b) => {
@@ -2246,9 +2599,8 @@ impl<'program> Step<'program, SchemaId, MemOp> for DecodeInterp<'_> {
                 // Safety: the map handle lives at field_offset.
                 let map = unsafe { self.base.add(m.field_offset) };
                 // Initialize the (uninitialized) map with room for `n` entries.
-                // NOTE: a decode error after this point leaks the partial map — the
-                // same trivially-droppable limitation as sequences/options.
                 unsafe { (m.thunks.init_with_capacity)(m.thunks.ctx, map, n) };
+                self.register_container(map);
                 self.decode_next_map_entry(self.base, m, map, n, n)?
             }
             // r[impl ir.memory] — a self-describing dynamic `Value`: decode one value
@@ -2300,6 +2652,40 @@ impl<'program> Step<'program, SchemaId, MemOp> for DecodeInterp<'_> {
                 }
             }
             // r[impl descriptors.thunk-binding]
+            MemOp::Managed(op) => {
+                let owner = InitializedOwner {
+                    ptr: unsafe { self.base.add(op.field_offset) },
+                    binding: op.drop,
+                };
+                let previous_owner = self.active_owner.replace(owner);
+                Control::CallProgramThen(
+                    &op.program,
+                    DecodeContinuation::Managed {
+                        previous_owner,
+                        owner,
+                        mark: self.rollback.mark(),
+                    },
+                )
+            }
+            MemOp::Proxy(proxy) => {
+                let mark = self.rollback.mark();
+                let scratch =
+                    self.alloc_scratch(proxy.representation_size, proxy.representation_align)?;
+                let previous_base = self.base;
+                // SAFETY: field_offset is supplied by the reader descriptor.
+                let target = unsafe { self.base.add(proxy.field_offset) };
+                self.base = scratch.ptr();
+                Control::CallProgramThen(
+                    &proxy.representation,
+                    DecodeContinuation::Proxy {
+                        mark,
+                        previous_base,
+                        target,
+                        scratch,
+                        thunks: proxy.thunks,
+                    },
+                )
+            }
             MemOp::Pointer(p) => self.decode_into_via_init(
                 &p.pointee,
                 p.pointee_size,
@@ -2355,6 +2741,39 @@ impl<'program> Step<'program, SchemaId, MemOp> for DecodeInterp<'_> {
         continuation: Self::Continuation,
     ) -> Result<Control<'program, SchemaId, MemOp, Self::Continuation>> {
         match continuation {
+            DecodeContinuation::Managed {
+                previous_owner,
+                owner,
+                mark,
+            } => {
+                if let Some(validate) = owner.binding.validate {
+                    // The child wrote only raw storage. Validate before any typed
+                    // destructor, consuming thunk, or parent can observe this value.
+                    if !unsafe { validate(owner.ptr.cast_const()) } {
+                        return Err(CompactError::Malformed("invalid scalar representation"));
+                    }
+                }
+                self.rollback.transfer_since(mark);
+                self.rollback.initialized.push(owner);
+                self.active_owner = previous_owner;
+                Ok(Control::Continue)
+            }
+            DecodeContinuation::Proxy {
+                mark,
+                previous_base,
+                target,
+                scratch,
+                thunks,
+            } => {
+                self.base = previous_base;
+                // SAFETY: the representation program completed, so scratch is initialized;
+                // the conversion initializes target only on success.
+                self.rollback.transfer_since(mark);
+                if !unsafe { (thunks.decode)(thunks.ctx, scratch.ptr(), target) } {
+                    return Err(CompactError::Malformed("proxy decode rejected value"));
+                }
+                Ok(Control::Continue)
+            }
             DecodeContinuation::RestoreBase { previous_base } => {
                 self.base = previous_base;
                 Ok(Control::Continue)
@@ -2362,7 +2781,7 @@ impl<'program> Step<'program, SchemaId, MemOp> for DecodeInterp<'_> {
             DecodeContinuation::Sequence {
                 previous_base,
                 element,
-                mut buffer,
+                buffer,
                 next_index,
                 count,
                 list,
@@ -2392,6 +2811,7 @@ impl<'program> Step<'program, SchemaId, MemOp> for DecodeInterp<'_> {
                 }
             }
             DecodeContinuation::SetElement {
+                mark,
                 previous_base,
                 set,
                 set_ptr,
@@ -2400,6 +2820,7 @@ impl<'program> Step<'program, SchemaId, MemOp> for DecodeInterp<'_> {
             } => {
                 // Safety: scratch holds an initialized element; `insert` moves it
                 // into the set and tells us whether it was unique.
+                self.rollback.transfer_since(mark);
                 let inserted =
                     unsafe { (set.thunks.insert)(set.thunks.ctx, set_ptr, scratch.ptr()) };
                 drop(scratch);
@@ -2409,6 +2830,7 @@ impl<'program> Step<'program, SchemaId, MemOp> for DecodeInterp<'_> {
                 self.decode_next_set_element(previous_base, set, set_ptr, remaining_after_current)
             }
             DecodeContinuation::MapKey {
+                mark,
                 previous_base,
                 map,
                 map_ptr,
@@ -2421,6 +2843,7 @@ impl<'program> Step<'program, SchemaId, MemOp> for DecodeInterp<'_> {
                 Ok(Control::CallProgramThen(
                     &map.value,
                     DecodeContinuation::MapValue {
+                        mark,
                         previous_base,
                         map,
                         map_ptr,
@@ -2432,6 +2855,7 @@ impl<'program> Step<'program, SchemaId, MemOp> for DecodeInterp<'_> {
                 ))
             }
             DecodeContinuation::MapValue {
+                mark,
                 previous_base,
                 map,
                 map_ptr,
@@ -2440,6 +2864,7 @@ impl<'program> Step<'program, SchemaId, MemOp> for DecodeInterp<'_> {
                 key_scratch,
                 value_scratch,
             } => {
+                self.rollback.transfer_since(mark);
                 unsafe {
                     (map.thunks.insert)(
                         map.thunks.ctx,
@@ -2462,10 +2887,12 @@ impl<'program> Step<'program, SchemaId, MemOp> for DecodeInterp<'_> {
                 }
             }
             DecodeContinuation::Init {
+                mark,
                 previous_base,
                 target,
                 scratch,
             } => {
+                self.rollback.transfer_since(mark);
                 unsafe { target.initialize(scratch.ptr()) };
                 if target.retain_value {
                     let drop_pointee = target.drop_value.ok_or(CompactError::Unsupported(
@@ -2487,6 +2914,31 @@ impl<'program> Step<'program, SchemaId, MemOp> for DecodeInterp<'_> {
 }
 
 impl DecodeInterp<'_> {
+    fn register_container(&mut self, ptr: *mut u8) {
+        if let Some(owner) = self.active_owner {
+            // Lowering wraps each concrete map/set in its own Managed boundary.
+            assert_eq!(
+                owner.ptr, ptr,
+                "container must have its own ownership boundary"
+            );
+            self.rollback.initialized.push(owner);
+        }
+    }
+
+    fn alloc_scratch(&mut self, size: usize, align: usize) -> Result<std::rc::Rc<RawScratch>> {
+        let scratch = std::rc::Rc::new(alloc_scratch(size, align)?);
+        self.scratch_storage.push(scratch.clone());
+        Ok(scratch)
+    }
+
+    fn alloc_array(&mut self, count: usize, stride: usize, align: usize) -> Result<SharedArray> {
+        let buffer = SharedArray(std::rc::Rc::new(std::cell::RefCell::new(
+            alloc_sequence_buffer(count, stride, align)?,
+        )));
+        self.array_storage.push(buffer.clone());
+        Ok(buffer)
+    }
+
     fn decode_next_set_element<'program>(
         &mut self,
         previous_base: *mut u8,
@@ -2499,11 +2951,13 @@ impl DecodeInterp<'_> {
             return Ok(Control::Continue);
         }
 
-        let scratch = alloc_scratch(set.elem_size, set.elem_align)?;
+        let mark = self.rollback.mark();
+        let scratch = self.alloc_scratch(set.elem_size, set.elem_align)?;
         self.base = scratch.ptr();
         Ok(Control::CallProgramThen(
             &set.element,
             DecodeContinuation::SetElement {
+                mark,
                 previous_base,
                 set,
                 set_ptr,
@@ -2526,12 +2980,14 @@ impl DecodeInterp<'_> {
             return Ok(Control::Continue);
         }
 
-        let key_scratch = alloc_scratch(map.key_size, map.key_align)?;
-        let value_scratch = alloc_scratch(map.value_size, map.value_align)?;
+        let mark = self.rollback.mark();
+        let key_scratch = self.alloc_scratch(map.key_size, map.key_align)?;
+        let value_scratch = self.alloc_scratch(map.value_size, map.value_align)?;
         self.base = key_scratch.ptr();
         Ok(Control::CallProgramThen(
             &map.key,
             DecodeContinuation::MapKey {
+                mark,
                 previous_base,
                 map,
                 map_ptr,
@@ -2550,12 +3006,19 @@ impl DecodeInterp<'_> {
         align: usize,
         target: InitTarget,
     ) -> Result<Control<'program, SchemaId, MemOp, DecodeContinuation<'program>>> {
-        let scratch = alloc_scratch(size, align)?;
+        if target.retain_value && target.drop_value.is_none() {
+            return Err(CompactError::Unsupported(
+                "typed: retained decode target without drop thunk",
+            ));
+        }
+        let mark = self.rollback.mark();
+        let scratch = self.alloc_scratch(size, align)?;
         let previous_base = self.base;
         self.base = scratch.ptr();
         Ok(Control::CallProgramThen(
             program,
             DecodeContinuation::Init {
+                mark,
                 previous_base,
                 target,
                 scratch,
@@ -2616,6 +3079,130 @@ mod tests {
     use phon_schema::bytes::{write_i64, write_u64};
     use phon_schema::{Schema, SchemaId, SchemaRef, primitive_id};
 
+    // r[verify descriptors.explicit-proxy]
+    #[test]
+    fn proxy_temporary_is_dropped_once_on_success_and_nested_rejection() {
+        use core::cell::Cell;
+        unsafe fn convert(_: *const (), source: *const u8, target: *mut u8) -> bool {
+            unsafe { target.cast::<u64>().write(*source.cast::<u64>()) };
+            true
+        }
+        unsafe fn drop_temporary(ctx: *const (), _: *mut u8) {
+            let dropped = unsafe { &*ctx.cast::<Cell<usize>>() };
+            dropped.set(dropped.get() + 1);
+        }
+        let dropped = Cell::new(0_usize);
+        let thunks = phon_ir::ProxyThunks {
+            ctx: core::ptr::from_ref(&dropped).cast(),
+            encode: convert,
+            decode: |_, _, _| unreachable!(),
+            drop_temporary,
+        };
+        let scalar = vec![MemOp::Scalar {
+            offset: 0,
+            size: 8,
+            align: 8,
+        }];
+        let rejecting = vec![MemOp::Proxy(Box::new(ProxyOp {
+            field_offset: 0,
+            representation: scalar.clone(),
+            representation_size: 8,
+            representation_align: 8,
+            thunks: phon_ir::ProxyThunks {
+                encode: |_, _, _| false,
+                ..thunks
+            },
+        }))];
+        let value = 42_u64;
+        for (representation, should_succeed) in [(scalar, true), (rejecting, false)] {
+            dropped.set(0);
+            let lowered = Lowered::new(vec![MemOp::Proxy(Box::new(ProxyOp {
+                field_offset: 0,
+                representation,
+                representation_size: 8,
+                representation_align: 8,
+                thunks,
+            }))]);
+            let result =
+                unsafe { try_encode_with_stats(&lowered, core::ptr::from_ref(&value).cast()) };
+            assert_eq!(result.is_ok(), should_succeed);
+            assert_eq!(
+                dropped.get(),
+                1,
+                "only the successfully initialized temporary is dropped"
+            );
+        }
+    }
+
+    // r[verify descriptors.explicit-proxy]
+    #[test]
+    fn nested_proxy_rejection_frees_live_set_iterator() {
+        use core::cell::Cell;
+        struct State {
+            dropped: Cell<usize>,
+            advanced: Cell<bool>,
+            value: u64,
+        }
+        unsafe extern "C" fn iter_init(ctx: *const (), _: *const u8) -> *mut () {
+            ctx.cast_mut()
+        }
+        unsafe extern "C" fn iter_next(ctx: *const (), _: *mut (), value: *mut *const u8) -> bool {
+            let state = unsafe { &*ctx.cast::<State>() };
+            if state.advanced.replace(true) {
+                return false;
+            }
+            unsafe { value.write(core::ptr::from_ref(&state.value).cast()) };
+            true
+        }
+        unsafe extern "C" fn iter_drop(ctx: *const (), _: *mut ()) {
+            let state = unsafe { &*ctx.cast::<State>() };
+            state.dropped.set(state.dropped.get() + 1);
+        }
+        unsafe extern "C" fn len(_: *const (), _: *const u8) -> usize {
+            1
+        }
+        unsafe extern "C" fn init(_: *const (), _: *mut u8, _: usize) {
+            unreachable!()
+        }
+        unsafe extern "C" fn insert(_: *const (), _: *mut u8, _: *mut u8) -> bool {
+            unreachable!()
+        }
+        let state = State {
+            dropped: Cell::new(0),
+            advanced: Cell::new(false),
+            value: 42,
+        };
+        let lowered = Lowered::new(vec![MemOp::Set(Box::new(phon_ir::SetOp {
+            field_offset: 0,
+            elem_size: 8,
+            elem_align: 8,
+            min_wire: 8,
+            element: vec![MemOp::Proxy(Box::new(ProxyOp {
+                field_offset: 0,
+                representation: vec![],
+                representation_size: 8,
+                representation_align: 8,
+                thunks: phon_ir::ProxyThunks {
+                    ctx: core::ptr::null(),
+                    encode: |_, _, _| false,
+                    decode: |_, _, _| unreachable!(),
+                    drop_temporary: |_, _| unreachable!(),
+                },
+            }))],
+            thunks: phon_ir::SetThunks {
+                ctx: core::ptr::from_ref(&state).cast(),
+                len,
+                init_with_capacity: init,
+                insert,
+                iter_init,
+                iter_next,
+                iter_dealloc: iter_drop,
+            },
+        }))]);
+        assert!(unsafe { try_encode_with(&lowered, core::ptr::from_ref(&state).cast()) }.is_err());
+        assert_eq!(state.dropped.get(), 1);
+    }
+
     // Hand-written list thunks for `Vec<u32>`. The facet bridge will generate
     // equivalents from the list vtable; here we wire them by hand to exercise the
     // engine's sequence machinery on a real `Vec`. The engine allocates the
@@ -2648,6 +3235,7 @@ mod tests {
 
     fn vec_u32_descriptor(schema: SchemaId) -> Descriptor {
         Descriptor {
+            drop: None,
             schema: SchemaRef::concrete(schema),
             layout: Layout {
                 size: size_of::<Vec<u32>>(),
@@ -2655,6 +3243,7 @@ mod tests {
             },
             access: Access::Sequence(SequenceAccess {
                 element: Box::new(Descriptor {
+                    drop: None,
                     schema: SchemaRef::concrete(primitive_id(Primitive::U32)),
                     layout: Layout { size: 4, align: 4 },
                     access: Access::Scalar,
@@ -2709,6 +3298,7 @@ mod tests {
             FieldAccess {
                 offset: offset_of!(NarrowNativeInts, count),
                 descriptor: Descriptor {
+                    drop: None,
                     schema: SchemaRef::concrete(primitive_id(Primitive::U64)),
                     layout: Layout {
                         size: size_of::<u32>(),
@@ -2721,6 +3311,7 @@ mod tests {
             FieldAccess {
                 offset: offset_of!(NarrowNativeInts, delta),
                 descriptor: Descriptor {
+                    drop: None,
                     schema: SchemaRef::concrete(primitive_id(Primitive::I64)),
                     layout: Layout {
                         size: size_of::<i32>(),
@@ -2733,6 +3324,7 @@ mod tests {
         ];
         let byte_ownership = RecordByteOwnership::from_record_layout(layout, &fields);
         Descriptor {
+            drop: None,
             schema: SchemaRef::concrete(schema),
             layout,
             access: Access::Record(RecordAccess {
@@ -2774,6 +3366,7 @@ mod tests {
             FieldAccess {
                 offset: offset_of!(PaddedScalars, a),
                 descriptor: Descriptor {
+                    drop: None,
                     schema: SchemaRef::concrete(primitive_id(Primitive::U32)),
                     layout: Layout {
                         size: size_of::<u32>(),
@@ -2786,6 +3379,7 @@ mod tests {
             FieldAccess {
                 offset: offset_of!(PaddedScalars, b),
                 descriptor: Descriptor {
+                    drop: None,
                     schema: SchemaRef::concrete(primitive_id(Primitive::U64)),
                     layout: Layout {
                         size: size_of::<u64>(),
@@ -2798,6 +3392,7 @@ mod tests {
         ];
         let byte_ownership = RecordByteOwnership::from_record_layout(layout, &fields);
         Descriptor {
+            drop: None,
             schema: SchemaRef::concrete(schema),
             layout,
             access: Access::Record(RecordAccess {
@@ -3025,6 +3620,100 @@ mod tests {
                 "native-sized signed integer out of range"
             ))
         ));
+    }
+
+    // r[verify descriptors.explicit-proxy]
+    #[test]
+    fn compatibility_native_ints_respect_four_byte_storage_and_proxy_temporaries() {
+        #[repr(align(8))]
+        struct Guarded([u8; 16]);
+        for (primitive, valid, invalid) in [
+            (Primitive::U64, 42_u64, u64::from(u32::MAX) + 1),
+            (
+                Primitive::I64,
+                (-42_i64) as u64,
+                (i64::from(i32::MAX) + 1) as u64,
+            ),
+        ] {
+            let descriptor = Descriptor {
+                drop: None,
+                schema: SchemaRef::concrete(primitive_id(primitive)),
+                layout: Layout { size: 4, align: 4 },
+                access: Access::Scalar,
+            };
+            let program = lower_decode(
+                primitive_id(primitive),
+                &descriptor,
+                &HashMap::new(),
+                &Registry::new([]),
+            )
+            .unwrap();
+            assert!(
+                matches!(program.program[0], MemOp::NativeInt { mem_size: 4, .. }),
+                "must not copy eight wire bytes into four-byte storage"
+            );
+            let mut slot = Guarded([0xa5; 16]);
+            unsafe { decode_with(&program, &valid.to_le_bytes(), slot.0.as_mut_ptr().add(4)) }
+                .unwrap();
+            assert_eq!(&slot.0[4..8], &valid.to_le_bytes()[..4]);
+            assert_eq!(&slot.0[..4], &[0xa5; 4]);
+            assert_eq!(&slot.0[8..], &[0xa5; 8]);
+            let mut slot = Guarded([0xa5; 16]);
+            assert!(
+                unsafe {
+                    decode_with(&program, &invalid.to_le_bytes(), slot.0.as_mut_ptr().add(4))
+                }
+                .is_err()
+            );
+            assert_eq!(slot.0, [0xa5; 16]);
+
+            let proxy = Descriptor {
+                drop: Some(phon_ir::DropBinding {
+                    validate: None,
+                    ctx: core::ptr::null(),
+                    drop: |_, _| {},
+                }),
+                schema: descriptor.schema.clone(),
+                layout: descriptor.layout,
+                access: Access::Proxy(phon_ir::ProxyAccess {
+                    representation: Box::new(descriptor),
+                    thunks: phon_ir::ProxyThunks {
+                        ctx: core::ptr::null(),
+                        encode: |_, _, _| unreachable!(),
+                        decode: |_, representation, target| {
+                            assert_eq!(representation as usize % 4, 0);
+                            unsafe {
+                                target
+                                    .cast::<u32>()
+                                    .write(representation.cast::<u32>().read())
+                            };
+                            true
+                        },
+                        drop_temporary: |_, _| {},
+                    },
+                }),
+            };
+            let program = lower_decode(
+                primitive_id(primitive),
+                &proxy,
+                &HashMap::new(),
+                &Registry::new([]),
+            )
+            .unwrap();
+            let mut slot = Guarded([0xa5; 16]);
+            unsafe { decode_with(&program, &valid.to_le_bytes(), slot.0.as_mut_ptr().add(4)) }
+                .unwrap();
+            assert_eq!(&slot.0[4..8], &valid.to_le_bytes()[..4]);
+            assert_eq!(&slot.0[8..], &[0xa5; 8]);
+            let mut slot = Guarded([0xa5; 16]);
+            assert!(
+                unsafe {
+                    decode_with(&program, &invalid.to_le_bytes(), slot.0.as_mut_ptr().add(4))
+                }
+                .is_err()
+            );
+            assert_eq!(slot.0, [0xa5; 16]);
+        }
     }
 
     #[test]

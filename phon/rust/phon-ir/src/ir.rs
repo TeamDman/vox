@@ -30,6 +30,9 @@ use std::collections::BTreeMap;
 
 use phon_schema::bytes::{Reader, skip_pad};
 use phon_schema::{DecodeError, Primitive, SchemaId, SchemaRef};
+pub use weavy::mem::ProxyThunks;
+pub type ManagedOp = weavy::mem::ManagedOp<SchemaId>;
+pub type ProxyOp = weavy::mem::ProxyOp<SchemaId>;
 pub use weavy::ir::{
     ControlOp, EffectContract, EffectOrdering, EffectResource, EffectStats, IntrinsicChildren,
     IntrinsicDescriptor, IntrinsicOp, LoweredAnalysis, LoweredEffectStats, LoweredProgramStats,

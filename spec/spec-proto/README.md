@@ -11,7 +11,7 @@ packages have separate Rust type identities, even when their version numbers mat
 
 ```toml
 [dependencies]
-spec-proto = { package = "teamy-vox-proto", version = "=0.2.3" }
+spec-proto = { package = "teamy-vox-proto", version = "=0.2.4" }
 ```
 
 For application RPC code, start with [teamy-vox](https://crates.io/crates/teamy-vox).

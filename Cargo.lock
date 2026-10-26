@@ -4245,7 +4245,7 @@ dependencies = [
 
 [[package]]
 name = "teamy-phon"
-version = "0.2.0-rc.8"
+version = "0.2.0-rc.9"
 dependencies = [
  "teamy-facet",
  "teamy-facet-value",
@@ -4257,7 +4257,7 @@ dependencies = [
 
 [[package]]
 name = "teamy-phon-codegen"
-version = "0.2.0-rc.8"
+version = "0.2.0-rc.9"
 dependencies = [
  "teamy-facet",
  "teamy-phon",
@@ -4266,30 +4266,30 @@ dependencies = [
 
 [[package]]
 name = "teamy-phon-engine"
-version = "0.2.0-rc.8"
+version = "0.2.0-rc.9"
 dependencies = [
  "teamy-facet-value",
  "teamy-phon-ir",
  "teamy-phon-schema",
- "weavy",
+ "teamy-weavy",
 ]
 
 [[package]]
 name = "teamy-phon-ir"
-version = "0.2.0-rc.8"
+version = "0.2.0-rc.9"
 dependencies = [
  "teamy-phon-schema",
- "weavy",
+ "teamy-weavy",
 ]
 
 [[package]]
 name = "teamy-phon-jit"
-version = "0.2.0-rc.8"
+version = "0.2.0-rc.9"
 dependencies = [
  "copypatch",
  "teamy-phon-ir",
  "teamy-phon-schema",
- "weavy",
+ "teamy-weavy",
 ]
 
 [[package]]
@@ -4303,7 +4303,7 @@ dependencies = [
 
 [[package]]
 name = "teamy-vox"
-version = "0.10.0-rc.8"
+version = "0.10.0-rc.9"
 dependencies = [
  "rustls",
  "rustls-pemfile",
@@ -4327,7 +4327,7 @@ dependencies = [
 
 [[package]]
 name = "teamy-vox-codegen"
-version = "0.10.0-rc.8"
+version = "0.10.0-rc.9"
 dependencies = [
  "base64 0.21.7",
  "heck",
@@ -4346,7 +4346,7 @@ dependencies = [
 
 [[package]]
 name = "teamy-vox-core"
-version = "0.10.0-rc.8"
+version = "0.10.0-rc.9"
 dependencies = [
  "futures-util",
  "teamy-facet",
@@ -4374,7 +4374,7 @@ dependencies = [
 
 [[package]]
 name = "teamy-vox-ffi"
-version = "0.10.0-rc.8"
+version = "0.10.0-rc.9"
 dependencies = [
  "teamy-vox-types",
  "tracing",
@@ -4435,7 +4435,7 @@ dependencies = [
 
 [[package]]
 name = "teamy-vox-phon"
-version = "0.10.0-rc.8"
+version = "0.10.0-rc.9"
 dependencies = [
  "teamy-facet",
  "teamy-phon",
@@ -4450,7 +4450,7 @@ dependencies = [
 
 [[package]]
 name = "teamy-vox-proto"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "teamy-facet",
  "teamy-facet-value",
@@ -4497,7 +4497,7 @@ dependencies = [
 
 [[package]]
 name = "teamy-vox-stream"
-version = "0.10.0-rc.8"
+version = "0.10.0-rc.9"
 dependencies = [
  "libc",
  "teamy-vox-core",
@@ -4512,7 +4512,7 @@ dependencies = [
 
 [[package]]
 name = "teamy-vox-types"
-version = "0.10.0-rc.8"
+version = "0.10.0-rc.9"
 dependencies = [
  "blake3",
  "heck",
@@ -4530,7 +4530,7 @@ dependencies = [
 
 [[package]]
 name = "teamy-vox-websocket"
-version = "0.10.0-rc.8"
+version = "0.10.0-rc.9"
 dependencies = [
  "axum",
  "futures-channel",
@@ -4559,6 +4559,13 @@ dependencies = [
  "teamy-vox-proto",
  "teamy-vox-types",
  "xshell",
+]
+
+[[package]]
+name = "teamy-weavy"
+version = "0.2.3-rc.1"
+dependencies = [
+ "copypatch",
 ]
 
 [[package]]
@@ -5283,15 +5290,6 @@ checksum = "1c598d6b99ea013e35844697fc4670d08339d5cda15588f193c6beedd12f644b"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "weavy"
-version = "0.2.3-rc.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02a7fcadcbd0f12cd098f64637c46d9b4195f36490cb5ad2ffa2f4e867d15abb"
-dependencies = [
- "copypatch",
 ]
 
 [[package]]

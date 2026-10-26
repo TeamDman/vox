@@ -100,6 +100,69 @@ pub fn of<'a, T: Facet<'a>>() -> Result<Derived, DeriveError> {
 // r[impl descriptors.fact-driven]
 // r[impl descriptors.separate-implementations]
 pub fn of_shape(shape: &'static Shape) -> Result<Derived, DeriveError> {
+    let mut derived = of_shape_inner(shape)?;
+    derived.descriptor.drop = shape_drop_binding(shape);
+    Ok(derived)
+}
+
+fn shape_drop_binding(shape: &'static Shape) -> Option<phon_ir::DropBinding> {
+    let validate = scalar_storage_validator(shape);
+    if shape.type_ops.is_some() {
+        Some(phon_ir::DropBinding {
+            validate,
+            ctx: core::ptr::from_ref(shape).cast(),
+            drop: drop_shape,
+        })
+    } else if shape.is_type::<()>() || shape.marker_traits.contains(facet::MarkerTraits::COPY) {
+        Some(phon_ir::DropBinding {
+            validate,
+            ctx: core::ptr::null(),
+            drop: drop_copy,
+        })
+    } else {
+        None
+    }
+}
+
+// Explicit conversions construct a valid target themselves; transparent scalar
+// wrappers inherit the inner raw check but keep their own concrete destructor.
+fn scalar_storage_validator(mut shape: &'static Shape) -> Option<unsafe fn(*const u8) -> bool> {
+    loop {
+        if shape.proxy.is_some() {
+            return None;
+        }
+        if shape.is_type::<bool>() {
+            return Some(valid_bool_storage);
+        }
+        if shape.is_type::<char>() {
+            return Some(valid_char_storage);
+        }
+        shape = transparent_inner(shape)?;
+    }
+}
+
+unsafe fn valid_bool_storage(value: *const u8) -> bool {
+    // Read a byte, never an invalid bool.
+    unsafe { value.read() <= 1 }
+}
+
+unsafe fn valid_char_storage(value: *const u8) -> bool {
+    // Read integer bits, never an invalid char.
+    char::from_u32(unsafe { value.cast::<u32>().read_unaligned() }).is_some()
+}
+
+unsafe fn drop_copy(_: *const (), _: *mut u8) {}
+
+unsafe fn drop_shape(ctx: *const (), value: *mut u8) {
+    // SAFETY: bound from this concrete owner shape; called only after initialization.
+    let shape = unsafe { &*ctx.cast::<Shape>() };
+    unsafe { shape.call_drop_in_place(PtrMut::new(value)) }.expect("bound type operations");
+}
+
+fn of_shape_inner(shape: &'static Shape) -> Result<Derived, DeriveError> {
+    if shape.proxy.is_some() {
+        return proxy_derived(shape);
+    }
     // An opaque-adapter type (`#[facet(opaque = ...)]`): on the wire it is a
     // `Primitive::Bytes` run (a `u32` length + inner bytes); the adapter owns the
     // inner type, so the engine only frames it.
@@ -154,6 +217,7 @@ pub fn of_shape(shape: &'static Shape) -> Result<Derived, DeriveError> {
             schemas: inner.schemas,
             descriptor_blocks: inner.descriptor_blocks,
             descriptor: Descriptor {
+                drop: None,
                 schema: inner.descriptor.schema.clone(),
                 layout: Layout { size, align },
                 access: Access::Pointer(PointerAccess {
@@ -171,6 +235,7 @@ pub fn of_shape(shape: &'static Shape) -> Result<Derived, DeriveError> {
             schemas: inner.schemas,
             descriptor_blocks: inner.descriptor_blocks,
             descriptor: Descriptor {
+                drop: None,
                 schema: inner.descriptor.schema.clone(),
                 layout: Layout { size, align },
                 access: Access::Pointer(PointerAccess {
@@ -188,6 +253,7 @@ pub fn of_shape(shape: &'static Shape) -> Result<Derived, DeriveError> {
             schemas: Vec::new(),
             descriptor_blocks: HashMap::new(),
             descriptor: Descriptor {
+                drop: None,
                 schema: SchemaRef::concrete(primitive_id(p)),
                 layout: Layout { size, align },
                 access: Access::Scalar,
@@ -311,6 +377,9 @@ impl Builder {
     /// The schema reference for a field's type: a primitive's real id, a nested
     /// struct's provisional key, or a `List`'s provisional key.
     fn ref_of(&mut self, shape: &'static Shape) -> Result<SchemaRef, DeriveError> {
+        if let Some(proxy) = shape.proxy {
+            return Ok(SchemaRef::concrete(primitive_id(proxy_primitive(proxy)?)));
+        }
         // An opaque-adapter field is a `Primitive::Bytes` run on the wire; only the
         // adapter knows the inner type.
         if shape.has_opaque_adapter() {
@@ -634,6 +703,7 @@ impl RecCtx<'_> {
         if self.ids.contains(&real) {
             if self.blocks.contains_key(&real) || self.building.contains(&real) {
                 return Some(Descriptor {
+                    drop: None,
                     schema: SchemaRef::concrete(real),
                     layout,
                     access: Access::Recurse,
@@ -646,12 +716,14 @@ impl RecCtx<'_> {
 
     /// After building `desc` for `real`: if recursive, file it as a block and return the
     /// [`Access::Recurse`] stand-in; otherwise return it inline unchanged.
-    fn exit(&mut self, real: SchemaId, desc: Descriptor) -> Descriptor {
+    fn exit(&mut self, real: SchemaId, mut desc: Descriptor, shape: &'static Shape) -> Descriptor {
+        desc.drop = shape_drop_binding(shape);
         if self.ids.contains(&real) {
             self.building.remove(&real);
             let layout = desc.layout;
             self.blocks.insert(real, desc);
             Descriptor {
+                drop: None,
                 schema: SchemaRef::concrete(real),
                 layout,
                 access: Access::Recurse,
@@ -668,7 +740,21 @@ fn build_descriptor(
     real_ids: &[SchemaId],
     rec: &mut RecCtx,
 ) -> Result<Descriptor, DeriveError> {
+    let mut descriptor = build_descriptor_inner(shape, by_shape, real_ids, rec)?;
+    descriptor.drop = shape_drop_binding(shape);
+    Ok(descriptor)
+}
+
+fn build_descriptor_inner(
+    shape: &'static Shape,
+    by_shape: &HashMap<usize, usize>,
+    real_ids: &[SchemaId],
+    rec: &mut RecCtx,
+) -> Result<Descriptor, DeriveError> {
     let (size, align) = layout_of(shape)?;
+    if shape.proxy.is_some() {
+        return Ok(proxy_derived(shape)?.descriptor);
+    }
     if shape.has_opaque_adapter() {
         return opaque_descriptor(shape);
     }
@@ -685,6 +771,7 @@ fn build_descriptor(
     if is_dynamic_value(shape) {
         let real = real_ids[by_shape[&shape_ptr(shape)]];
         return Ok(Descriptor {
+            drop: None,
             schema: SchemaRef::concrete(real),
             layout: Layout { size, align },
             access: Access::Dynamic,
@@ -701,6 +788,7 @@ fn build_descriptor(
     if let Some((ptr, pointee_shape)) = reference_pointer_def(shape) {
         let pointee = build_descriptor(pointee_shape, by_shape, real_ids, rec)?;
         return Ok(Descriptor {
+            drop: None,
             schema: pointee.schema.clone(),
             layout: Layout { size, align },
             access: Access::Pointer(PointerAccess {
@@ -712,6 +800,7 @@ fn build_descriptor(
     if let Some((ptr, pointee_shape)) = owned_pointer_def(shape) {
         let pointee = build_descriptor(pointee_shape, by_shape, real_ids, rec)?;
         return Ok(Descriptor {
+            drop: None,
             schema: pointee.schema.clone(),
             layout: Layout { size, align },
             access: Access::Pointer(PointerAccess {
@@ -722,6 +811,7 @@ fn build_descriptor(
     }
     if let Some(p) = scalar_primitive(shape)? {
         return Ok(Descriptor {
+            drop: None,
             schema: SchemaRef::concrete(primitive_id(p)),
             layout: Layout { size, align },
             access: Access::Scalar,
@@ -735,6 +825,7 @@ fn build_descriptor(
         }
         let element = build_descriptor(list_def.t(), by_shape, real_ids, rec)?;
         let desc = Descriptor {
+            drop: None,
             schema: SchemaRef::concrete(real),
             layout,
             access: Access::Sequence(SequenceAccess {
@@ -742,7 +833,7 @@ fn build_descriptor(
                 storage: SequenceStorage::Vtable(list_thunks(list_def)),
             }),
         };
-        return Ok(rec.exit(real, desc));
+        return Ok(rec.exit(real, desc, shape));
     }
     if let Some(array_def) = array_def(shape) {
         let real = real_ids[by_shape[&(core::ptr::from_ref(array_def) as usize)]];
@@ -752,6 +843,7 @@ fn build_descriptor(
         }
         let element = build_descriptor(array_def.t(), by_shape, real_ids, rec)?;
         let desc = Descriptor {
+            drop: None,
             schema: SchemaRef::concrete(real),
             layout,
             access: Access::Array {
@@ -760,7 +852,7 @@ fn build_descriptor(
                 element: Box::new(element),
             },
         };
-        return Ok(rec.exit(real, desc));
+        return Ok(rec.exit(real, desc, shape));
     }
     if let Some(set_def) = set_def(shape) {
         let real = real_ids[by_shape[&(core::ptr::from_ref(set_def) as usize)]];
@@ -770,6 +862,7 @@ fn build_descriptor(
         }
         let element = build_descriptor(set_def.t(), by_shape, real_ids, rec)?;
         let desc = Descriptor {
+            drop: None,
             schema: SchemaRef::concrete(real),
             layout,
             access: Access::Set(SetAccess {
@@ -777,7 +870,7 @@ fn build_descriptor(
                 storage: SetStorage::Vtable(set_thunks(set_def)),
             }),
         };
-        return Ok(rec.exit(real, desc));
+        return Ok(rec.exit(real, desc, shape));
     }
     if let Some(opt) = option_def(shape) {
         let real = real_ids[by_shape[&(core::ptr::from_ref(opt) as usize)]];
@@ -787,6 +880,7 @@ fn build_descriptor(
         }
         let some = build_descriptor(opt.t(), by_shape, real_ids, rec)?;
         let desc = Descriptor {
+            drop: None,
             schema: SchemaRef::concrete(real),
             layout,
             access: Access::Option(OptionAccess {
@@ -794,7 +888,7 @@ fn build_descriptor(
                 some: Box::new(some),
             }),
         };
-        return Ok(rec.exit(real, desc));
+        return Ok(rec.exit(real, desc, shape));
     }
     if let Some(map_def) = map_def(shape) {
         let real = real_ids[by_shape[&(core::ptr::from_ref(map_def) as usize)]];
@@ -805,6 +899,7 @@ fn build_descriptor(
         let key = build_descriptor(map_def.k(), by_shape, real_ids, rec)?;
         let value = build_descriptor(map_def.v(), by_shape, real_ids, rec)?;
         let desc = Descriptor {
+            drop: None,
             schema: SchemaRef::concrete(real),
             layout,
             access: Access::Map(MapAccess {
@@ -813,7 +908,7 @@ fn build_descriptor(
                 storage: MapStorage::Vtable(map_thunks(map_def)),
             }),
         };
-        return Ok(rec.exit(real, desc));
+        return Ok(rec.exit(real, desc, shape));
     }
     if let Some(rd) = result_def(shape) {
         let real = real_ids[by_shape[&shape_ptr(shape)]];
@@ -824,6 +919,7 @@ fn build_descriptor(
         let ok = build_descriptor(rd.t(), by_shape, real_ids, rec)?;
         let err = build_descriptor(rd.e(), by_shape, real_ids, rec)?;
         let desc = Descriptor {
+            drop: None,
             schema: SchemaRef::concrete(real),
             layout,
             access: Access::Result(ResultAccess {
@@ -832,7 +928,7 @@ fn build_descriptor(
                 thunks: result_thunks(rd),
             }),
         };
-        return Ok(rec.exit(real, desc));
+        return Ok(rec.exit(real, desc, shape));
     }
     if let Some(et) = enum_type(shape) {
         let width = enum_repr_width(et.enum_repr).ok_or(DeriveError::Unsupported(
@@ -867,6 +963,7 @@ fn build_descriptor(
             });
         }
         let desc = Descriptor {
+            drop: None,
             schema: SchemaRef::concrete(real),
             layout,
             access: Access::Enum(EnumAccess {
@@ -875,7 +972,7 @@ fn build_descriptor(
                 variants,
             }),
         };
-        return Ok(rec.exit(real, desc));
+        return Ok(rec.exit(real, desc, shape));
     }
     let fields = struct_fields(shape)?;
     let real = real_ids[by_shape[&shape_ptr(shape)]];
@@ -892,6 +989,7 @@ fn build_descriptor(
         });
     }
     let desc = Descriptor {
+        drop: None,
         schema: SchemaRef::concrete(real),
         layout,
         access: Access::Record(RecordAccess {
@@ -900,7 +998,7 @@ fn build_descriptor(
             construct: Construct::InPlace,
         }),
     };
-    Ok(rec.exit(real, desc))
+    Ok(rec.exit(real, desc, shape))
 }
 
 fn shape_ptr(shape: &'static Shape) -> usize {
@@ -1726,10 +1824,12 @@ fn borrowed_descriptor(shape: &'static Shape, kind: BorrowKind) -> Result<Descri
         },
     };
     Ok(Descriptor {
+        drop: None,
         schema: SchemaRef::concrete(primitive_id(p)),
         layout: Layout { size, align },
         access: Access::Sequence(SequenceAccess {
             element: Box::new(Descriptor {
+                drop: None,
                 schema: SchemaRef::concrete(primitive_id(Primitive::U8)),
                 layout: Layout { size: 1, align: 1 },
                 access: Access::Scalar,
@@ -1835,14 +1935,87 @@ unsafe extern "C" fn bytes_data(_ctx: *const (), field: *const u8) -> *const u8 
 }
 
 // ============================================================================
-// Transparent newtypes (`#[repr(transparent)]` / `#[facet(transparent)]`)
+// Explicit proxies and transparent newtypes
 // ============================================================================
 
-/// The inner shape of a transparent newtype, which shares its wire form, schema,
-/// AND layout (offset 0) — id newtypes over `u64`, `MetadataFlags`, `NonZero`, … so
-/// the bridge resolves straight through to the inner. `None` for a non-transparent
-/// shape (the caller falls through). A `Cow`/`Arc` sets `Shape::inner` but is NOT
-/// `is_transparent()`, so it is correctly excluded here and handled on its own.
+/// Admit representations whose decode either initializes one whole value or
+/// leaves its temporary uninitialized. Nested proxies are deliberately rejected.
+fn proxy_primitive(proxy: &facet::ProxyDef) -> Result<Primitive, DeriveError> {
+    if is_string(proxy.shape) && proxy.shape.proxy.is_none() {
+        return Ok(Primitive::String);
+    }
+    match scalar_primitive(proxy.shape)? {
+        Some(
+            p @ (Primitive::U8
+            | Primitive::U16
+            | Primitive::U32
+            | Primitive::U64
+            | Primitive::U128
+            | Primitive::I8
+            | Primitive::I16
+            | Primitive::I32
+            | Primitive::I64
+            | Primitive::I128),
+        ) if proxy.shape.proxy.is_none() => Ok(p),
+        _ => Err(DeriveError::Unsupported(
+            "explicit proxy representation must be an integer or owned String",
+        )),
+    }
+}
+
+// r[impl descriptors.fact-driven]
+// r[impl descriptors.explicit-proxy]
+// Explicit proxy conversions take precedence over transparent memory traversal.
+// Integer/String representations initialize atomically. More complex or
+// borrowed representations require additional partial-initialization tracking.
+fn proxy_derived(shape: &'static Shape) -> Result<Derived, DeriveError> {
+    let proxy = shape.proxy.expect("caller checked proxy");
+    proxy_primitive(proxy)?;
+    let mut derived = of_shape(proxy.shape)?;
+    let (size, align) = layout_of(shape)?;
+    derived.descriptor = Descriptor {
+        drop: None,
+        schema: derived.descriptor.schema.clone(),
+        layout: Layout { size, align },
+        access: Access::Proxy(phon_ir::ProxyAccess {
+            representation: Box::new(derived.descriptor),
+            thunks: phon_ir::ProxyThunks {
+                ctx: core::ptr::from_ref(proxy).cast(),
+                encode: proxy_encode,
+                decode: proxy_decode,
+                drop_temporary: proxy_drop_temporary,
+            },
+        }),
+    };
+    Ok(derived)
+}
+
+unsafe fn proxy_encode(ctx: *const (), source: *const u8, representation: *mut u8) -> bool {
+    // SAFETY: the descriptor binds this static ProxyDef and aligned typed slots.
+    let proxy = unsafe { &*ctx.cast::<facet::ProxyDef>() };
+    unsafe { (proxy.convert_out)(PtrConst::new(source), PtrUninit::new(representation)) }.is_ok()
+}
+
+unsafe fn proxy_decode(ctx: *const (), representation: *mut u8, target: *mut u8) -> bool {
+    // SAFETY: the representation is initialized and the target is uninitialized
+    // storage for the proxy's owner. Facet's convert_in consumes its proxy value
+    // on both success and error; only the raw storage remains to be deallocated.
+    let proxy = unsafe { &*ctx.cast::<facet::ProxyDef>() };
+    unsafe { (proxy.convert_in)(PtrConst::new(representation), PtrUninit::new(target)) }.is_ok()
+}
+
+unsafe fn proxy_drop_temporary(ctx: *const (), temporary: *mut u8) {
+    // SAFETY: the bridge admits only integer and owned String representations.
+    // Integer temporaries have no destructor; the String is fully initialized.
+    let proxy = unsafe { &*ctx.cast::<facet::ProxyDef>() };
+    if is_string(proxy.shape) {
+        unsafe { core::ptr::drop_in_place(temporary.cast::<String>()) };
+    }
+}
+
+/// The inner shape of a transparent newtype shares its layout at offset zero.
+/// Callers resolve explicit proxies first. Cow/Arc inner shapes are not
+/// transparent and are handled by their own descriptors.
 fn transparent_inner(shape: &Shape) -> Option<&'static Shape> {
     if shape.is_transparent() {
         shape.inner
@@ -1916,10 +2089,12 @@ fn cow_descriptor(shape: &'static Shape, leaf: CowLeaf) -> Result<Descriptor, De
         },
     };
     Ok(Descriptor {
+        drop: None,
         schema: SchemaRef::concrete(primitive_id(cow_primitive(leaf))),
         layout: Layout { size, align },
         access: Access::Sequence(SequenceAccess {
             element: Box::new(Descriptor {
+                drop: None,
                 schema: SchemaRef::concrete(primitive_id(Primitive::U8)),
                 layout: Layout { size: 1, align: 1 },
                 access: Access::Scalar,
@@ -2014,10 +2189,12 @@ unsafe extern "C" fn cow_bytes_data(_ctx: *const (), field: *const u8) -> *const
 fn string_descriptor(shape: &'static Shape) -> Result<Descriptor, DeriveError> {
     let (size, align) = layout_of(shape)?;
     Ok(Descriptor {
+        drop: None,
         schema: SchemaRef::concrete(primitive_id(Primitive::String)),
         layout: Layout { size, align },
         access: Access::Sequence(SequenceAccess {
             element: Box::new(Descriptor {
+                drop: None,
                 schema: SchemaRef::concrete(primitive_id(Primitive::U8)),
                 layout: Layout { size: 1, align: 1 },
                 access: Access::Scalar,
@@ -2095,9 +2272,11 @@ fn opaque_descriptor(shape: &'static Shape) -> Result<Descriptor, DeriveError> {
         "opaque field without an adapter def",
     ))?;
     Ok(Descriptor {
+        drop: None,
         schema: SchemaRef::concrete(primitive_id(Primitive::Bytes)),
         layout: Layout { size, align },
         access: Access::Opaque(OpaqueThunks {
+            try_encode: Some(opaque_try_encode),
             ctx: core::ptr::from_ref(adapter).cast::<()>(),
             encode: opaque_encode,
             decode: opaque_decode,
@@ -2130,28 +2309,27 @@ static INNER_PROGRAMS: LazyLock<ProgramCache> =
 /// and cached. A racing build is harmless — the program is deterministic, so a
 /// double-build just drops the extra program.
 ///
-/// # Panics
-/// If the inner shape cannot be derived or lowered: a programming error (the
-/// inner shape of an opaque field must be supported by Phon).
-fn inner_program(shape: &'static Shape) -> Arc<CachedLowered> {
+/// # Errors
+/// If the runtime inner shape cannot be derived or safely lowered.
+fn inner_program(shape: &'static Shape) -> Result<Arc<CachedLowered>, String> {
     let key = core::ptr::from_ref(shape) as usize;
     if let Some(p) = INNER_PROGRAMS.0.read().unwrap().get(&key) {
-        return Arc::clone(p);
+        return Ok(Arc::clone(p));
     }
     let derived = of_shape(shape)
-        .unwrap_or_else(|e| panic!("opaque inner facet shape {shape} cannot be derived: {e}",));
+        .map_err(|e| format!("opaque inner facet shape {shape} cannot be derived: {e}"))?;
     let reg = Registry::new(derived.schemas);
     let program = typed::lower_typed(&derived.descriptor, &derived.descriptor_blocks, &reg)
-        .unwrap_or_else(|e| panic!("opaque inner facet shape {shape} cannot be lowered: {e:?}",));
+        .map_err(|e| format!("opaque inner facet shape {shape} cannot be lowered: {e:?}"))?;
     let program = Arc::new(CachedLowered(program));
-    Arc::clone(
+    Ok(Arc::clone(
         INNER_PROGRAMS
             .0
             .write()
             .unwrap()
             .entry(key)
             .or_insert(program),
-    )
+    ))
 }
 
 /// [`OpaqueThunks::encode`]: map the opaque field to its inner `(ptr, shape)` via the
@@ -2162,6 +2340,15 @@ fn inner_program(shape: &'static Shape) -> Arc<CachedLowered> {
 /// `ctx` must be the `&'static OpaqueAdapterDef` set in [`opaque_descriptor`];
 /// `field` must point to an initialized opaque field; `out` must be a live `Vec<u8>`.
 unsafe extern "C" fn opaque_encode(ctx: *const (), field: *const u8, out: *mut Vec<u8>) {
+    // Legacy infallible callback. Fallible runners and native selection must
+    // honor try_encode; this callback cannot represent a validation failure.
+    assert!(
+        unsafe { opaque_try_encode(ctx, field, out) },
+        "infallible opaque encode rejected value"
+    );
+}
+
+unsafe fn opaque_try_encode(ctx: *const (), field: *const u8, out: *mut Vec<u8>) -> bool {
     // Safety: `ctx` is the `&'static OpaqueAdapterDef`.
     let adapter = unsafe { &*ctx.cast::<OpaqueAdapterDef>() };
     // Safety: `field` points at the opaque field; the adapter maps it to the inner
@@ -2176,14 +2363,19 @@ unsafe extern "C" fn opaque_encode(ctx: *const (), field: *const u8, out: *mut V
         let raw = unsafe { &*ptr.as_byte_ptr().cast::<RawOpaqueBytes>() };
         // Safety: `out` is a live `Vec<u8>`.
         unsafe { (*out).extend_from_slice(raw.0) };
-        return;
+        return true;
     }
-    let program = inner_program(shape);
+    let Ok(program) = inner_program(shape) else {
+        return false;
+    };
     // Safety: `ptr` points at an initialized value of `shape`, which `program` was
     // lowered to encode.
-    let bytes = unsafe { typed::encode_with(&program.0, ptr.as_byte_ptr()) };
+    let Ok(bytes) = (unsafe { typed::try_encode_with(&program.0, ptr.as_byte_ptr()) }) else {
+        return false;
+    };
     // Safety: `out` is a live `Vec<u8>`.
     unsafe { (*out).extend_from_slice(&bytes) };
+    true
 }
 
 /// Sentinel wrapper for opaque passthrough: an [`OpaqueSerialize`] whose `shape`
@@ -5480,12 +5672,9 @@ mod tests {
         assert_eq!(shape.type_identifier, "(…)");
         assert_eq!(shape.to_string(), "(*const T, String)");
 
-        let panic = std::panic::catch_unwind(|| {
-            let _ = inner_program(shape);
-        })
-        .expect_err("raw pointer tuple should not derive as an opaque inner program");
-
-        let message = panic_message(&panic);
+        let message = inner_program(shape)
+            .err()
+            .expect("unsupported runtime shape must be an error");
         assert!(
             message.contains("opaque inner facet shape (*const T, String) cannot be derived"),
             "opaque panic should include Shape display, got: {message}"
@@ -5610,22 +5799,12 @@ mod tests {
         assert_eq!(unsafe { islot.assume_init() }, inner);
     }
 
-    fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {
-        if let Some(message) = panic.downcast_ref::<String>() {
-            message.clone()
-        } else if let Some(message) = panic.downcast_ref::<&'static str>() {
-            (*message).to_string()
-        } else {
-            "<non-string panic>".to_string()
-        }
-    }
-
     // r[verify exec.jit-optional]
     // r[verify ir.stencils]
     // r[verify ir.memory]
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
-    fn derived_opaque_field_jit_matches_interpreter_and_roundtrips() {
+    fn derived_opaque_field_uses_fallible_encode_and_native_decode() {
         use phon_jit::native::{NativeDecode, NativeEncode};
 
         let d = of::<Envelope>().unwrap();
@@ -5669,9 +5848,15 @@ mod tests {
             )
         }
         .unwrap();
-        let jit_bytes =
-            unsafe { NativeEncode::compile(&program).run(core::ptr::from_ref(&env).cast::<u8>()) };
-        assert_eq!(jit_bytes, interp_bytes);
+        // Native encoding cannot express a fallible opaque callback. Even a
+        // direct compile must reject it before emitting an infallible C call.
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                NativeEncode::compile(&program)
+            }))
+            .is_err()
+        );
+        let jit_bytes = interp_bytes;
 
         let dec = NativeDecode::compile(&program);
         let mut slot = std::mem::MaybeUninit::<Envelope>::uninit();

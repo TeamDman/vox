@@ -61,6 +61,7 @@ pub type ResultAccess = weavy::mem::ResultAccess<SchemaRef>;
 
 /// A PHON owning pointer: its pointee descriptor and thunks.
 pub type PointerAccess = weavy::mem::PointerAccess<SchemaRef>;
+pub type ProxyAccess = weavy::mem::ProxyAccess<SchemaRef>;
 
 /// PHON key/value pairs: key and value descriptors plus map storage.
 pub type MapAccess = weavy::mem::MapAccess<SchemaRef>;

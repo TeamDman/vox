@@ -11,7 +11,7 @@ packages have separate Rust type identities, even when their version numbers mat
 
 ```toml
 [dependencies]
-vox-ffi = { package = "teamy-vox-ffi", version = "=0.10.0-rc.8" }
+vox-ffi = { package = "teamy-vox-ffi", version = "=0.10.0-rc.9" }
 ```
 
 For application RPC code, start with [teamy-vox](https://crates.io/crates/teamy-vox).

@@ -11,7 +11,7 @@ packages have separate Rust type identities, even when their version numbers mat
 
 ```toml
 [dependencies]
-phon-ir = { package = "teamy-phon-ir", version = "=0.2.0-rc.8" }
+phon-ir = { package = "teamy-phon-ir", version = "=0.2.0-rc.9" }
 ```
 
 For application RPC code, start with [teamy-vox](https://crates.io/crates/teamy-vox).

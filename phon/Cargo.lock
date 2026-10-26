@@ -687,7 +687,7 @@ dependencies = [
 
 [[package]]
 name = "teamy-phon"
-version = "0.2.0-rc.8"
+version = "0.2.0-rc.9"
 dependencies = [
  "teamy-facet",
  "teamy-facet-value",
@@ -699,7 +699,7 @@ dependencies = [
 
 [[package]]
 name = "teamy-phon-codegen"
-version = "0.2.0-rc.8"
+version = "0.2.0-rc.9"
 dependencies = [
  "teamy-facet",
  "teamy-phon",
@@ -721,31 +721,31 @@ dependencies = [
 
 [[package]]
 name = "teamy-phon-engine"
-version = "0.2.0-rc.8"
+version = "0.2.0-rc.9"
 dependencies = [
  "proptest",
  "teamy-facet-value",
  "teamy-phon-ir",
  "teamy-phon-schema",
- "weavy",
+ "teamy-weavy",
 ]
 
 [[package]]
 name = "teamy-phon-ir"
-version = "0.2.0-rc.8"
+version = "0.2.0-rc.9"
 dependencies = [
  "teamy-phon-schema",
- "weavy",
+ "teamy-weavy",
 ]
 
 [[package]]
 name = "teamy-phon-jit"
-version = "0.2.0-rc.8"
+version = "0.2.0-rc.9"
 dependencies = [
  "copypatch",
  "teamy-phon-ir",
  "teamy-phon-schema",
- "weavy",
+ "teamy-weavy",
 ]
 
 [[package]]
@@ -755,6 +755,13 @@ dependencies = [
  "blake3",
  "taxon",
  "teamy-facet-value",
+]
+
+[[package]]
+name = "teamy-weavy"
+version = "0.2.3-rc.1"
+dependencies = [
+ "copypatch",
 ]
 
 [[package]]
@@ -870,15 +877,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b67efb37e106e55ce722a510d6b5f9c17f083e5fc79afc2badeb12cc313d9487"
 dependencies = [
  "wit-bindgen",
-]
-
-[[package]]
-name = "weavy"
-version = "0.2.3-rc.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02a7fcadcbd0f12cd098f64637c46d9b4195f36490cb5ad2ffa2f4e867d15abb"
-dependencies = [
- "copypatch",
 ]
 
 [[package]]

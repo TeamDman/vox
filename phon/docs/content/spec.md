@@ -1934,6 +1934,44 @@ commonly has direct read facts and a thunked construct path.
 > insertion, or controlled initialization. The engine uses whatever the node
 > provides for the direction it is running.
 
+> r[descriptors.explicit-proxy]
+>
+> A Rust Facet container-level explicit proxy takes precedence over transparent
+> and opaque layout traversal. For integer and owned `String` representations,
+> its wire schema and bytes are those of the representation, without extra
+> framing. The descriptor retains the original value's layout and binds the
+> proxy conversions; it must never reinterpret that value as the representation.
+>
+> Encoding borrows the source, converts into aligned temporary storage, and
+> drops the initialized temporary after encoding, including on failure.
+> Decoding initializes a representation temporary and passes ownership to the
+> conversion, which consumes it on success or failure and initializes the target
+> only on success. Conversion rejection returns an error from fallible encoding
+> and decoding APIs. Integer decoding checks bounds and String decoding validates
+> UTF-8 before calling the conversion. Unsupported composite, borrowed, or chained
+> proxy representations are rejected during derivation. Native backends that
+> cannot execute these fallible conversions must use the interpreter fallback.
+>
+> For a descriptor graph containing a proxy, decoding tracks complete initialized
+> owners. On malformed input, conversion rejection, unwinding, or trailing bytes,
+> each completed value is destroyed exactly once before its backing storage is
+> released. Incomplete records/enums are never destroyed as complete values.
+> Moving a value into a container or consuming conversion transfers its cleanup
+> responsibility. Descriptors without a destruction contract are rejected, except
+> fixed scalar leaves. Retained reference pointees outlive the decoded owner and
+> every other retained value that borrows them. Cleanup metadata is local and does
+> not affect wire bytes or schema identity.
+>
+> Bool and char storage is validated before an owner is registered for cleanup,
+> including transparent wrappers and collection elements. Invalid scalar bytes
+> never reach a Rust destructor. Runtime opaque payload encoding propagates
+> unsupported inner shapes and proxy conversion rejection through fallible APIs;
+> native encoders without a fallible opaque callback use the interpreter.
+
+This rule concerns container-level Facet proxies. Field-level proxy attributes
+are outside this subset. Existing low-level infallible encode entry points panic
+on conversion rejection; their fallible counterparts return the error.
+
 The model, in the same Rust notation the type system uses. These are not wire
 types: no `SchemaId`, never serialized, process-local only.
 

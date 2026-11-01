@@ -3,9 +3,13 @@
 The release source follows `task/bounded-stream-receive-20261024` at
 `172bf871b5a2bff90607802771c5d23706d9859a`. This includes the completed modern
 Phon/Taxon migration (`5628c00d`), malformed-first-response schema fix
-(`e469b86c`), and bounded stream receiver (`20c08f7e`). The legacy remote `main`
-and `teamy-main` branches are deliberately unchanged. Earlier documents that
-describe every crate as private describe their historical checkpoints.
+(`e469b86c`), and bounded stream receiver (`20c08f7e`). At release time the legacy
+remote `main` and `teamy-main` branches were deliberately unchanged. On October 27,
+`4d47e18077d0060160c1f789e1305c7c64071b1a` integrated the published history into
+canonical `teamy-main`, retaining exactly the `ca7cc00d` source tree. See the
+[branch inventory](canonical-branch-inventory.md) for the remaining legacy work.
+Earlier documents that describe every crate as private describe their historical
+checkpoints.
 
 The initial crates.io release is limited to the dependency closure required by
 MFT, terminal and SFM tooling:

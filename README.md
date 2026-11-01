@@ -14,6 +14,11 @@ Teamy Facet graph, and includes reviewed fixes for malformed first RPC responses
 and bounded stream receives. These are fork changes, not a claim about the current
 status of upstream releases.
 
+`teamy-main` is the canonical development branch. The
+[branch inventory](docs/teamy-migration/canonical-branch-inventory.md) records
+integrated feature/release history and the legacy variants that require a port
+or a protocol decision before adoption.
+
 ## Rust dependencies
 
 ```toml

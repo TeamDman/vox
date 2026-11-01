@@ -1,13 +1,19 @@
 # Standalone Teamy Vox migration
 
-**Current branch:** the in-progress full protocol cutover and cloud continuation
-instructions are in [cutover-handoff.md](cutover-handoff.md). The validation and
-legacy compatibility discussion below describe the earlier preserved checkpoint,
-not successful validation of the new protocol.
+**Current branch:** `TeamDman/vox:teamy-main` contains the completed protocol
+cutover, Java continuation, release work, malformed-response fix, bounded stream
+receiver and Iroh adapter. See the [canonical branch inventory](canonical-branch-inventory.md)
+for every owned remote branch and the two preserved legacy variants. Current
+protocol qualification is recorded in [cloud-cutover-validation.md](cloud-cutover-validation.md)
+and [desktop-registry-release.md](desktop-registry-release.md).
 
-This branch preserves the owned Java and terminal work from the former Facet
-monorepo and joins it to the current standalone Vox history. It is a review
-checkpoint, not a package release or a consumer upgrade.
+The extraction and compatibility discussion below describes the earlier preserved
+checkpoint. [cutover-handoff.md](cutover-handoff.md) is a historical handoff; its
+Java compilation blockers were resolved by the cloud completion.
+
+The original integration preserved the owned Java and terminal work from the
+former Facet monorepo and joined it to standalone Vox history. That initial
+checkpoint was for review; the subsequent cutover and release are linked above.
 
 ## Sources and history
 

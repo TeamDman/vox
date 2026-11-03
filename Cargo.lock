@@ -4500,6 +4500,8 @@ name = "teamy-vox-stream"
 version = "0.10.0-rc.9"
 dependencies = [
  "libc",
+ "rcgen",
+ "rustls",
  "teamy-vox-core",
  "teamy-vox-fdpass",
  "teamy-vox-phon",
@@ -4507,6 +4509,7 @@ dependencies = [
  "teamy-vox-types",
  "tempfile",
  "tokio",
+ "tokio-rustls",
  "tracing",
 ]
 

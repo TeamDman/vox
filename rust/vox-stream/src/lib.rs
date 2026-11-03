@@ -486,6 +486,8 @@ impl StreamLinkTx {
     /// Close the shared outbound stream after already admitted frames. The
     /// budget covers admission, enqueue and shutdown; expiry aborts the writer.
     /// An abort is asynchronous and does not prove the writer has stopped.
+    /// The cutoff is setting the flag under `admission`, not claiming the close;
+    /// sends may be admitted while close waits for that mutex.
     pub async fn close_shared_bounded(&self, budget: std::time::Duration) -> io::Result<()> {
         if self.close_claimed.swap(true, Ordering::AcqRel) {
             return Err(io::Error::new(
@@ -1116,6 +1118,250 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy)]
+    enum WriterFailure {
+        FrameFlush,
+        Shutdown,
+        PanicShutdown,
+    }
+
+    struct FailingWriter {
+        failure: WriterFailure,
+        flush_count: usize,
+    }
+
+    impl tokio::io::AsyncWrite for FailingWriter {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            bytes: &[u8],
+        ) -> std::task::Poll<io::Result<usize>> {
+            std::task::Poll::Ready(Ok(bytes.len()))
+        }
+        fn poll_flush(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            self.flush_count += 1;
+            if matches!(self.failure, WriterFailure::FrameFlush) && self.flush_count > 1 {
+                return std::task::Poll::Ready(Err(io::Error::other("synthetic flush failure")));
+            }
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            match self.failure {
+                WriterFailure::Shutdown => {
+                    std::task::Poll::Ready(Err(io::Error::other("synthetic shutdown failure")))
+                }
+                WriterFailure::PanicShutdown => panic!("synthetic shutdown panic"),
+                WriterFailure::FrameFlush => std::task::Poll::Ready(Ok(())),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_close_does_not_report_success_after_writer_failure_or_panic() {
+        for failure in [
+            WriterFailure::FrameFlush,
+            WriterFailure::Shutdown,
+            WriterFailure::PanicShutdown,
+        ] {
+            let (tx, _rx) = StreamLink::new(
+                tokio::io::empty(),
+                FailingWriter {
+                    failure,
+                    flush_count: 0,
+                },
+            )
+            .split();
+            if matches!(failure, WriterFailure::FrameFlush) {
+                let _send_error = tx.send(b"frame".to_vec()).await.unwrap_err();
+            }
+            let _close_error = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                tx.close_shared_bounded(std::time::Duration::from_secs(1)),
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn test_tls_configs() -> (
+        std::sync::Arc<rustls::ClientConfig>,
+        std::sync::Arc<rustls::ServerConfig>,
+    ) {
+        use rcgen::{
+            BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+            KeyUsagePurpose,
+        };
+        use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+        let mut ca = CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca.key_usages.push(KeyUsagePurpose::KeyCertSign);
+        let ca_key = KeyPair::generate().unwrap();
+        let ca_cert = ca.self_signed(&ca_key).unwrap();
+        let issuer = Issuer::new(ca, ca_key);
+        let mut params = CertificateParams::new(vec!["localhost".into()]).unwrap();
+        params
+            .extended_key_usages
+            .push(ExtendedKeyUsagePurpose::ServerAuth);
+        let key = KeyPair::generate().unwrap();
+        let cert = params.signed_by(&key, &issuer).unwrap();
+        let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+        let server = rustls::ServerConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![cert.der().clone()],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der())),
+            )
+            .unwrap();
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(ca_cert.der().clone()).unwrap();
+        let client = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        (std::sync::Arc::new(client), std::sync::Arc::new(server))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn assert_tls_orderly_close<C, S>(client_io: C, server_io: S)
+    where
+        C: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let (client_config, server_config) = test_tls_configs();
+        let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
+        let connector = tokio_rustls::TlsConnector::from(client_config);
+        let server = tokio::spawn(async move {
+            let mut stream = acceptor.accept(server_io).await.unwrap();
+            let mut prologue = [0_u8; LINK_PROLOGUE_LEN];
+            stream.read_exact(&mut prologue).await.unwrap();
+            assert_eq!(prologue, link_prologue(false));
+            let mut length = [0_u8; 4];
+            stream.read_exact(&mut length).await.unwrap();
+            assert_eq!(u32::from_le_bytes(length), 3);
+            let mut payload = [0_u8; 3];
+            stream.read_exact(&mut payload).await.unwrap();
+            assert_eq!(&payload, b"tls");
+            let mut trailing = [0_u8; 1];
+            assert_eq!(
+                stream.read(&mut trailing).await.unwrap(),
+                0,
+                "TLS must close cleanly after the frame"
+            );
+            stream.write_all(&link_prologue(false)).await.unwrap();
+            stream.write_all(&3_u32.to_le_bytes()).await.unwrap();
+            stream.write_all(b"ack").await.unwrap();
+            stream.shutdown().await.unwrap();
+        });
+        let server_name = rustls::pki_types::ServerName::try_from("localhost".to_owned()).unwrap();
+        let stream = connector.connect(server_name, client_io).await.unwrap();
+        let (read, write) = tokio::io::split(stream);
+        let (tx, mut rx) = StreamLink::new(read, write).split();
+        tx.send(b"tls".to_vec()).await.unwrap();
+        tx.close_shared_bounded(std::time::Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(payload(&rx.recv().await.unwrap().unwrap()), b"ack");
+        assert!(rx.recv().await.unwrap().is_none());
+        tokio::time::timeout(std::time::Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn shared_close_sends_tls_close_notify_over_duplex() {
+        let (client, server) = tokio::io::duplex(16 * 1024);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            assert_tls_orderly_close(client, server),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    #[ignore = "manual loopback TLS test; binds only 127.0.0.1"]
+    async fn shared_close_sends_tls_close_notify_over_loopback() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (client, accepted) =
+            tokio::join!(tokio::net::TcpStream::connect(address), listener.accept());
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            assert_tls_orderly_close(client.unwrap(), accepted.unwrap().0),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn tls_transport_cut_is_reported_as_truncation() {
+        let (client_config, server_config) = test_tls_configs();
+        let (client_io, mut bridge_client) = tokio::io::duplex(16 * 1024);
+        let (server_io, mut bridge_server) = tokio::io::duplex(16 * 1024);
+        let bridge = tokio::spawn(async move {
+            let _result =
+                tokio::io::copy_bidirectional(&mut bridge_client, &mut bridge_server).await;
+        });
+        let (frame_read, frame_read_rx) = oneshot::channel("tls_truncation_frame_read");
+        let server = tokio::spawn(async move {
+            let mut tls = tokio_rustls::TlsAcceptor::from(server_config)
+                .accept(server_io)
+                .await
+                .unwrap();
+            let mut prologue = [0_u8; LINK_PROLOGUE_LEN];
+            tls.read_exact(&mut prologue).await.unwrap();
+            let mut length = [0_u8; 4];
+            tls.read_exact(&mut length).await.unwrap();
+            assert_eq!(u32::from_le_bytes(length), 3);
+            let mut body = [0_u8; 3];
+            tls.read_exact(&mut body).await.unwrap();
+            assert_eq!(&body, b"tls");
+            let _ = frame_read.send(());
+            let mut trailing = [0_u8; 1];
+            tls.read(&mut trailing).await.unwrap_err()
+        });
+        let name = rustls::pki_types::ServerName::try_from("localhost".to_owned()).unwrap();
+        let tls = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tokio_rustls::TlsConnector::from(client_config).connect(name, client_io),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (read, write) = tokio::io::split(tls);
+        let (tx, _rx) = StreamLink::new(read, write).split();
+        tokio::time::timeout(std::time::Duration::from_secs(2), tx.send(b"tls".to_vec()))
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), frame_read_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        bridge.abort();
+        let _stopped = bridge.await.unwrap_err();
+        let error = tokio::time::timeout(std::time::Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
     // r[verify link]
     // r[verify link.split]
     // r[verify link.message]
@@ -1228,6 +1474,67 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn capacity_blocked_sender_is_admitted_before_close_cutoff() {
+        let (tx, mut rx) = mpsc::channel::<QueuedWrite>("cutoff_capacity", 1);
+        let (first_flushed, _first_wait) = oneshot::channel("cutoff_first");
+        tx.try_send(QueuedWrite::Frame {
+            bytes: b"occupied".to_vec(),
+            flushed: first_flushed,
+        })
+        .unwrap();
+        let sender = std::sync::Arc::new(test_sender(
+            tx,
+            vox_rt::spawn(async { std::future::pending::<io::Result<()>>().await }),
+        ));
+        let sending = sender.clone();
+        let send = tokio::spawn(async move { sending.send(b"before".to_vec()).await });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if sender.admission.try_lock().is_err() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let closing = sender.clone();
+        let close = tokio::spawn(async move {
+            closing
+                .close_shared_bounded(std::time::Duration::from_secs(2))
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !sender.close_claimed.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!close.is_finished());
+        let QueuedWrite::Frame { bytes, .. } = rx.recv().await.unwrap() else {
+            panic!("expected occupied slot")
+        };
+        assert_eq!(bytes, b"occupied");
+        let QueuedWrite::Frame { bytes, flushed } = rx.recv().await.unwrap() else {
+            panic!("expected admitted frame")
+        };
+        assert_eq!(bytes, b"before");
+        flushed.send(()).unwrap();
+        send.await.unwrap().unwrap();
+        let QueuedWrite::Close { completed } = rx.recv().await.unwrap() else {
+            panic!("expected close after admitted frame")
+        };
+        assert_eq!(
+            sender.send(b"after".to_vec()).await.unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        completed.send(Ok(())).unwrap();
+        close.await.unwrap().unwrap();
+        sender.abort();
+    }
+
     // r[verify link.tx.shared-close]
     #[tokio::test]
     async fn cancelling_shared_close_aborts_writer() {
@@ -1267,6 +1574,71 @@ mod tests {
         assert_eq!(
             sender.send(b"late".to_vec()).await.unwrap_err().kind(),
             io::ErrorKind::BrokenPipe
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_close_before_cutoff_aborts_the_writer() {
+        let (tx, rx) = mpsc::channel::<QueuedWrite>("close_cancel_before_cutoff", 1);
+        let (started, started_rx) = oneshot::channel("close_cancel_before_started");
+        let (dropped, dropped_rx) = oneshot::channel("close_cancel_before_dropped");
+        struct NotifyDrop(Option<oneshot::Sender<()>>);
+        impl Drop for NotifyDrop {
+            fn drop(&mut self) {
+                if let Some(done) = self.0.take() {
+                    let _ = done.send(());
+                }
+            }
+        }
+        let writer = vox_rt::spawn(async move {
+            let _rx = rx;
+            let _guard = NotifyDrop(Some(dropped));
+            let _ = started.send(());
+            std::future::pending::<io::Result<()>>().await
+        });
+        let sender = std::sync::Arc::new(test_sender(tx, writer));
+        started_rx.await.unwrap();
+        let held = sender.admission.lock().await;
+        let closing = sender.clone();
+        let task = tokio::spawn(async move {
+            closing
+                .close_shared_bounded(std::time::Duration::from_secs(5))
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !sender.close_claimed.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        task.abort();
+        let _cancelled = task.await.unwrap_err();
+        tokio::time::timeout(std::time::Duration::from_secs(2), dropped_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(held);
+        let _send_error = sender.send(b"late".to_vec()).await.unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn zero_budget_close_aborts_and_cannot_be_retried() {
+        let (a, _b) = duplex_pair();
+        let (tx, _rx) = a.split();
+        assert_eq!(
+            tx.close_shared_bounded(std::time::Duration::ZERO)
+                .await
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
+        assert_eq!(
+            tx.close_shared_bounded(std::time::Duration::from_secs(1))
+                .await
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
         );
     }
 

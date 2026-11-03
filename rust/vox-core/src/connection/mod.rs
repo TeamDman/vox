@@ -4160,6 +4160,36 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "diagnostic: explicit shutdown currently retains the conduit behind a held lane"]
+    async fn shutdown_releases_conduit_when_service_lane_is_retained() {
+        let (mut connection, _control) =
+            make_capturing_connection(Arc::new(Mutex::new(Vec::new())));
+        let lanes = Arc::new(Mutex::new(Vec::new()));
+        connection.lane_acceptor = Some(Arc::new(RetainLanes(lanes.clone())));
+        connection
+            .handle_inbound_open(LaneId(2), inbound_open(1, 1))
+            .await;
+        let core = {
+            let guard = lanes.lock().unwrap();
+            assert_eq!(guard.len(), 1);
+            guard[0].sender.connection_core.clone()
+        };
+        connection
+            .control_tx
+            .send(DropControlRequest::Shutdown)
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), connection.run())
+            .await
+            .unwrap();
+        drop(connection);
+        assert!(
+            core.inner.lock().unwrap().tx.is_none(),
+            "explicit shutdown retained the conduit sender behind a held service lane"
+        );
+        drop(lanes);
+    }
+
+    #[tokio::test]
     async fn rejected_lane_does_not_wait_forever_for_stalled_peer() {
         struct StalledTx(Option<oneshot::Sender<()>>);
         impl Drop for StalledTx {

@@ -3126,8 +3126,83 @@ async fn unsolicited_response_id_is_ignored_and_does_not_break_calls() {
 
 #[tokio::test]
 async fn proxy_lanes_forwards_calls_without_service_specific_proxy_code() {
+    use vox_types::MetadataExt;
+
+    type ObservedCalls = Arc<Mutex<Vec<(RequestId, u32, Option<String>)>>>;
+
+    #[derive(Clone)]
+    struct RecordingEcho {
+        observed: ObservedCalls,
+        collision_barrier: Arc<tokio::sync::Barrier>,
+    }
+    impl Handler<crate::DriverReplySink> for RecordingEcho {
+        async fn handle(
+            &self,
+            call: SelfRef<RequestCall<'static>>,
+            reply: crate::DriverReplySink,
+            _schemas: Arc<vox_types::SchemaRecvTracker>,
+        ) {
+            let id = reply.request_id().expect("downstream request ID");
+            let (value, method_id, trace_id) = {
+                let call = call.get();
+                let Payload::Encoded(bytes) = &call.args else {
+                    panic!("expected encoded call")
+                };
+                let value: u32 = vox_phon::from_slice(bytes).expect("decode call");
+                (
+                    value,
+                    call.method_id,
+                    call.metadata.meta_str("trace-id").map(str::to_owned),
+                )
+            };
+            self.observed.lock().unwrap().push((id, value, trace_id));
+            if value == 410 || value == 420 {
+                self.collision_barrier.wait().await;
+            }
+            if method_id == MethodId(2) {
+                reply
+                    .send_typed_error::<u32, std::convert::Infallible>(VoxError::InvalidPayload(
+                        "proxied failure".into(),
+                    ))
+                    .await;
+                return;
+            }
+            if method_id == MethodId(3) {
+                let _reply = reply;
+                std::future::pending::<()>().await;
+                return;
+            }
+            reply
+                .send_reply(RequestResponse {
+                    ret: Payload::outgoing(&value),
+                    schemas: Default::default(),
+                    metadata: Default::default(),
+                })
+                .await;
+        }
+    }
+    struct RecordingAcceptor {
+        observed: ObservedCalls,
+        collision_barrier: Arc<tokio::sync::Barrier>,
+    }
+    impl LaneAcceptor for RecordingAcceptor {
+        fn accept(
+            &self,
+            _request: &LaneRequest,
+            connection: PendingLane,
+        ) -> Result<(), LaneRejection> {
+            connection.handle_with(RecordingEcho {
+                observed: self.observed.clone(),
+                collision_barrier: self.collision_barrier.clone(),
+            });
+            Ok(())
+        }
+    }
+
     let (host_a_conduit, guest_a_conduit) = message_conduit_pair();
     let (host_b_conduit, guest_b_conduit) = message_conduit_pair();
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let collision_barrier = Arc::new(tokio::sync::Barrier::new(2));
 
     struct ProxyHostAcceptor {
         upstream_connection: ConnectionHandle,
@@ -3166,11 +3241,16 @@ async fn proxy_lanes_forwards_calls_without_service_specific_proxy_code() {
         }
     }
 
+    let downstream_observed = observed.clone();
+    let downstream_barrier = collision_barrier.clone();
     let guest_b_task = vox_rt::task::spawn(
         async move {
             let guard = acceptor_conduit(guest_b_conduit, test_acceptor_handshake())
-                .on_lane(EchoAcceptor)
-                .establish::<TestLaneClient>()
+                .on_lane(RecordingAcceptor {
+                    observed: downstream_observed,
+                    collision_barrier: downstream_barrier,
+                })
+                .establish_connection()
                 .await
                 .expect("guest-b establish");
             let _guard = guard;
@@ -3179,11 +3259,10 @@ async fn proxy_lanes_forwards_calls_without_service_specific_proxy_code() {
         .named("guest_b_connection"),
     );
 
-    let _host_to_b_guard = initiator_conduit(host_b_conduit, test_initiator_handshake())
-        .establish::<TestLaneClient>()
+    let host_to_b_connection = initiator_conduit(host_b_conduit, test_initiator_handshake())
+        .establish_connection()
         .await
         .expect("host<->guest-b establish");
-    let host_to_b_connection = _host_to_b_guard.connection.clone().unwrap();
 
     let host_for_a_task = vox_rt::task::spawn(
         async move {
@@ -3191,7 +3270,7 @@ async fn proxy_lanes_forwards_calls_without_service_specific_proxy_code() {
                 .on_lane(ProxyHostAcceptor {
                     upstream_connection: host_to_b_connection,
                 })
-                .establish::<TestLaneClient>()
+                .establish_connection()
                 .await
                 .expect("host<->guest-a establish");
             let _guard = guard;
@@ -3200,11 +3279,10 @@ async fn proxy_lanes_forwards_calls_without_service_specific_proxy_code() {
         .named("host_for_guest_a_connection"),
     );
 
-    let _guest_a_connection_guard = initiator_conduit(guest_a_conduit, test_initiator_handshake())
-        .establish::<TestLaneClient>()
+    let guest_a_connection = initiator_conduit(guest_a_conduit, test_initiator_handshake())
+        .establish_connection()
         .await
         .expect("guest-a<->host establish");
-    let guest_a_connection = _guest_a_connection_guard.connection.clone().unwrap();
 
     let proxy_conn = guest_a_connection
         .open_lane_handle(
@@ -3272,7 +3350,9 @@ async fn proxy_lanes_forwards_calls_without_service_specific_proxy_code() {
                     method_id: MethodId(1),
                     args: Payload::outgoing(&value),
                     schemas: Default::default(),
-                    metadata: Default::default(),
+                    metadata: vox_types::metadata()
+                        .str("trace-id", "example-correlation")
+                        .build(),
                 }),
             }))
             .await
@@ -3297,10 +3377,191 @@ async fn proxy_lanes_forwards_calls_without_service_specific_proxy_code() {
         .expect("timeout waiting for raw proxied response");
         assert_eq!(returned, value);
     }
+    let error_value = 271_u32;
+    raw_lane
+        .sender
+        .send(ConnectionMessage::Request(RequestMessage {
+            id: RequestId(77),
+            body: RequestBody::Call(RequestCall {
+                channels: Vec::new(),
+                method_id: MethodId(2),
+                args: Payload::outgoing(&error_value),
+                schemas: Default::default(),
+                metadata: vox_types::metadata()
+                    .str("trace-id", "example-correlation")
+                    .build(),
+            }),
+        }))
+        .await
+        .expect("send raw proxied error call");
+    let error = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let recv = raw_lane.rx.recv().await.expect("proxy lane closed");
+            if let ConnectionMessage::Request(RequestMessage {
+                id,
+                body: RequestBody::Response(response),
+            }) = recv.msg.get()
+            {
+                assert_eq!(*id, RequestId(77));
+                let Payload::Encoded(bytes) = &response.ret else {
+                    panic!("expected encoded proxied error")
+                };
+                break vox_phon::from_slice::<Result<u32, VoxError<std::convert::Infallible>>>(
+                    bytes,
+                )
+                .expect("decode proxied error");
+            }
+        }
+    })
+    .await
+    .expect("timeout waiting for proxied error");
+    assert!(matches!(
+        error,
+        Err(VoxError::InvalidPayload(ref message)) if message == "proxied failure"
+    ));
+    let cancel_value = 999_u32;
+    raw_lane
+        .sender
+        .send(ConnectionMessage::Request(RequestMessage {
+            id: RequestId(77),
+            body: RequestBody::Call(RequestCall {
+                channels: Vec::new(),
+                method_id: MethodId(3),
+                args: Payload::outgoing(&cancel_value),
+                schemas: Default::default(),
+                metadata: vox_types::metadata()
+                    .str("trace-id", "example-correlation")
+                    .build(),
+            }),
+        }))
+        .await
+        .expect("send raw proxied cancellable call");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if observed.lock().unwrap().len() == 5 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("downstream handler did not start");
+    raw_lane
+        .sender
+        .send(ConnectionMessage::Request(RequestMessage {
+            id: RequestId(77),
+            body: RequestBody::Cancel(RequestCancel {
+                metadata: Default::default(),
+            }),
+        }))
+        .await
+        .expect("send proxied cancel");
+    let cancelled = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let recv = raw_lane.rx.recv().await.expect("proxy lane closed");
+            if let ConnectionMessage::Request(RequestMessage {
+                id,
+                body: RequestBody::Response(response),
+            }) = recv.msg.get()
+            {
+                assert_eq!(*id, RequestId(77));
+                let Payload::Encoded(bytes) = &response.ret else {
+                    panic!("expected encoded cancellation response")
+                };
+                break vox_phon::from_slice::<Result<(), VoxError<std::convert::Infallible>>>(
+                    bytes,
+                )
+                .expect("decode proxied cancellation");
+            }
+        }
+    })
+    .await
+    .expect("timeout waiting for proxied cancellation");
+    assert!(matches!(cancelled, Err(VoxError::Cancelled)));
+
+    // Two live source lanes may use the same numeric request ID. Hold both
+    // handlers at a barrier so their lifetimes overlap before either replies.
+    let mut second_lane = guest_a_connection
+        .open_lane_handle(
+            ConnectionSettings {
+                parity: Parity::Odd,
+                max_concurrent_requests: 64,
+                initial_channel_credit: 16,
+            },
+            vox_types::metadata().str("vox-service", "Echo").build(),
+        )
+        .await
+        .expect("open second proxy lane");
+    let second_lane_id = second_lane.lane_id();
+    for (sender, value, trace) in [
+        (&raw_lane.sender, 410_u32, "collision-a"),
+        (&second_lane.sender, 420_u32, "collision-b"),
+    ] {
+        sender
+            .send(ConnectionMessage::Request(RequestMessage {
+                id: RequestId(77),
+                body: RequestBody::Call(RequestCall {
+                    channels: Vec::new(),
+                    method_id: MethodId(1),
+                    args: Payload::outgoing(&value),
+                    schemas: Default::default(),
+                    metadata: vox_types::metadata().str("trace-id", trace).build(),
+                }),
+            }))
+            .await
+            .expect("send same-ID call on independent lane");
+    }
+    async fn receive_echo(lane: &mut crate::connection::LaneHandle) -> u32 {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let recv = lane.rx.recv().await.expect("proxy lane closed");
+                if let ConnectionMessage::Request(RequestMessage {
+                    id,
+                    body: RequestBody::Response(response),
+                }) = recv.msg.get()
+                {
+                    assert_eq!(*id, RequestId(77));
+                    let Payload::Encoded(bytes) = &response.ret else {
+                        panic!("expected encoded proxied response")
+                    };
+                    break vox_phon::from_slice(bytes).expect("decode proxied response");
+                }
+            }
+        })
+        .await
+        .expect("timeout waiting for concurrent proxy response")
+    }
+    let (first, second) = tokio::join!(receive_echo(&mut raw_lane), receive_echo(&mut second_lane));
+    assert_eq!((first, second), (410, 420));
+    guest_a_connection
+        .close_lane(second_lane_id, Default::default())
+        .await
+        .expect("close second proxy lane");
     guest_a_connection
         .close_lane(raw_lane_id, Default::default())
         .await
         .expect("close raw proxy lane");
+
+    let recorded = observed.lock().unwrap().clone();
+    assert_eq!(
+        &recorded[..5],
+        &[
+            (RequestId(1), 777, None),
+            (RequestId(1), 314, Some("example-correlation".to_owned())),
+            (RequestId(3), 159, Some("example-correlation".to_owned())),
+            (RequestId(5), 271, Some("example-correlation".to_owned())),
+            (RequestId(7), 999, Some("example-correlation".to_owned())),
+        ]
+    );
+    let mut concurrent = recorded[5..].to_vec();
+    concurrent.sort_by_key(|(_, value, _)| *value);
+    assert_eq!(
+        concurrent,
+        vec![
+            (RequestId(9), 410, Some("collision-a".to_owned())),
+            (RequestId(1), 420, Some("collision-b".to_owned())),
+        ]
+    );
 
     proxy_driver_task.abort();
     guest_b_task.abort();

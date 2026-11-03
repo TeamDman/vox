@@ -182,6 +182,26 @@ not a peer receipt. Remote close, other transport implementations, real
 concurrent traffic, cancellation at every boundary, and the one-second budget
 need independent review and further qualification.
 
+Independent source review of `8929dc37` accepted only the queued-batch
+ordering fix for locally settled transports, not the branch as a whole. It
+called out the availability effects above and that an implicit
+`DropControlRequest::Close` started its one-second budget when handled rather
+than when requested. The working tree now carries the original deadline in
+that control request and adds tests for its expired deadline and
+deadline preservation through the control pump. It also adds tests
+for unrelated traffic behind the global fence, a prior unrelated rejected
+batch, peer close racing a prechecked write, and local lane close observed by
+a peer over loopback TLS. The core library suite passed 207 tests with six
+ignored, and the new manual TLS loopback test passed outside the sandbox.
+These results do not qualify broader teardown behavior.
+
+The stream library suite passed 32 tests with three manual tests ignored
+outside the sandbox; the sandbox denied the TCP loopback bind. Core library
+Clippy with warnings denied passed. The broader core test-target Clippy run
+still reports test-only lints, including intentional lock-contention tests,
+portable descriptor defaults, and existing type-complexity and module-order
+findings; it is not a clean strict-Clippy result.
+
 ## Forwarded request identity: unresolved ingress boundary
 
 The connection currently inserts `(request ID, method ID)` into a mutable
@@ -241,6 +261,77 @@ method binding only while that binding remains present. Ingress/consumer
 races, overlapping response writes, descriptor-bearing messages, actual
 late-response injection, and cancellation during a real proxy write still
 require focused tests and review.
+
+The guarded proxy also does not yet enforce cumulative channel credit: the
+connection-level limit checks an individual incoming grant, while raw and
+proxy consumers are responsible for cumulative enforcement. Request-ID
+mapping tests do not qualify the proxy against a peer that repeatedly grants
+credit. Track each live channel's direction, initial credit, grants, sends,
+closure and ID lifetime under explicit bounds before using this path with an
+untrusted peer; account for early channel messages and fail closed on unknown
+or ambiguous state. This is a separate gate for the intended transfer.
+
+An unintegrated `proxy_credit.rs` prototype now tracks a bounded number of
+channel IDs and provisional early frames, each direction's source and
+destination credit, cumulative grants, and terminal tombstones. It rejects
+an initially advertised source allowance larger than the destination's
+initial allowance, because the proxy cannot revoke credit already advertised.
+It uses caller-configured caps rather than inventing defaults and has
+passing isolated unit tests for repeated grants, overflow, both directions, early
+frames, ID separation and terminal ambiguity. It is not connected to
+`proxy_lanes`, and no live protection is claimed.
+
+Before integration, independently review the mapping of each leg's negotiated
+settings and configured caps, and bind channel declarations and terminal
+state to exact request generations. Preserve permitted early delivery while
+bounding provisional entries and lifetimes. Opposite-direction frames have no
+single shared arrival clock: a grant and an item may cross, and an item may
+already be in flight when a reset is sent. The gate can bound what it forwards
+to the destination, but must not infer a sender-side protocol violation from
+that observation alone. The prototype treats terminal crossings as ambiguous
+and fails conservatively, which may close otherwise valid sessions. Verify
+error propagation, cancellation, channel-ID reuse and session quotas before
+exposing it as a production option.
+
+The prototype infers a channel's direction from the first observed frame; it
+does not validate that direction against the declared schema. It also binds a
+channel to a numeric request ID rather than a request-generation capability.
+Neither is sufficient for production. Confirm each side's peer parity and the
+negotiated initial-credit mapping from the actual lane settings, and use the
+schema and generation identity when binding early frames. A successful local
+accounting transition is not evidence that a frame reached the other peer:
+serialize accounting with forwarding, and fail the bounded connection on an
+uncertain or partially completed write rather than rolling credit back as if
+no bytes escaped. Provisional entries need a bounded lifetime as well as a
+count limit. These conditions remain unimplemented.
+
+Request ID rewriting is observable: `RequestContext::request_id()` exposes
+the wire-level ID at the receiving hop. The guarded proxy does not preserve
+that number end to end. Review must decide and document whether per-hop IDs
+are compatible with existing tracing, authorization, and service consumers;
+no global or end-to-end request identity is implied by this implementation.
+Independent source review found fresh destination IDs consistent with the
+caller's per-service-lane allocation rules, but identified a compatibility
+change from legacy passthrough for correlation, idempotency and tests. Cover
+normal and error responses, cancellation, same-ID collisions across lanes,
+tracing correlation, and legacy transport behavior before qualification. If
+end-to-end correlation is required, specify a distinct correlation field
+rather than promising that the numeric per-hop request ID remains unchanged.
+The working tree extends the in-memory proxy test for error and cancellation
+responses, simultaneous source-ID collisions, observed downstream IDs, and
+an explicit correlation metadata field; a separate legacy passthrough test is
+also passed. The main proxy test was rerun with connection-only setup after
+its old fixture produced detached bootstrap-lane panics. These tests do not
+establish general compatibility or tracing guarantees.
+
+The working tree also constructs the proxy termination guard before returning
+its future, so dropping that future without polling requests termination of
+both connections. Its new regression passed in the core suite. The requests remain
+best-effort signals, not proof that either transport writer has stopped.
+The public function now returns an opaque future instead of being declared
+`async fn` so the guard can be constructed before polling. Existing `.await`
+call sites compile in these tests; function-item typing and other API
+compatibility still need review.
 
 Each proxy direction would own an active mapping from the source request's
 exact ingress capability to a fresh destination request ID, plus the reverse

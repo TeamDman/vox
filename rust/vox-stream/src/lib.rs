@@ -1434,6 +1434,89 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
+    #[ignore = "manual lane-close TLS test; binds only 127.0.0.1"]
+    async fn local_lane_close_reaches_peer_over_tls_loopback() {
+        use vox_types::{ConnectionCloseReason, ConnectionSettings, Parity};
+
+        fn settings(parity: Parity) -> ConnectionSettings {
+            ConnectionSettings {
+                parity,
+                max_concurrent_requests: 4,
+                initial_channel_credit: 4,
+            }
+        }
+
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let (client_config, server_config) = test_tls_configs();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let peer = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let tls = tokio_rustls::TlsAcceptor::from(server_config)
+                    .accept(socket)
+                    .await
+                    .unwrap();
+                let (read, write) = tokio::io::split(tls);
+                let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+                let accepted_tx = std::sync::Mutex::new(Some(accepted_tx));
+                let connection = vox_core::acceptor_on_link(
+                    StreamLink::new(read, write),
+                    settings(Parity::Even),
+                )
+                .await
+                .unwrap()
+                .on_lane(vox_core::lane_acceptor_fn(
+                    move |_request: &vox_core::LaneRequest, pending: vox_core::PendingLane| {
+                        if let Some(sender) = accepted_tx.lock().unwrap().take() {
+                            let _ = sender.send(pending.into_handle());
+                        }
+                        Ok(())
+                    },
+                ))
+                .establish_connection()
+                .await
+                .unwrap();
+                let lane = accepted_rx.await.expect("peer did not accept lane");
+                tokio::time::timeout(std::time::Duration::from_secs(5), lane.closed())
+                    .await
+                    .expect("peer lane did not close");
+                assert_eq!(lane.close_reason(), Some(ConnectionCloseReason::Remote));
+                drop(connection);
+            });
+            let socket = tokio::net::TcpStream::connect(address).await.unwrap();
+            let name = rustls::pki_types::ServerName::try_from("localhost".to_owned()).unwrap();
+            let tls = tokio_rustls::TlsConnector::from(client_config)
+                .connect(name, socket)
+                .await
+                .unwrap();
+            let (read, write) = tokio::io::split(tls);
+            let connection =
+                vox_core::initiator_on_link(StreamLink::new(read, write), settings(Parity::Odd))
+                    .await
+                    .unwrap()
+                    .establish_connection()
+                    .await
+                    .unwrap();
+            let lane = connection
+                .open_lane_handle(
+                    settings(Parity::Odd),
+                    vox_types::metadata().str("vox-service", "Noop").build(),
+                )
+                .await
+                .expect("open service lane");
+            connection
+                .close_lane(lane.lane_id(), Default::default())
+                .await
+                .expect("local lane close");
+            peer.await.unwrap();
+            let _ = connection.shutdown();
+        })
+        .await
+        .expect("TLS lane-close test timed out");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
     async fn tls_transport_cut_is_reported_as_truncation() {
         let (client_config, server_config) = test_tls_configs();
         let (client_io, mut bridge_client) = tokio::io::duplex(16 * 1024);

@@ -31,6 +31,10 @@ pub(crate) mod channel_gate_lifecycle;
 // identities are not yet integrated into the connection shutdown protocol.
 #[allow(dead_code)]
 mod lane_retirement;
+// Bounded credit accounting is a review-only prototype, not yet wired into
+// proxy forwarding or qualified for live use.
+#[allow(dead_code)]
+mod proxy_credit;
 #[allow(dead_code)]
 pub(crate) mod response_reservation;
 mod wake_registry;
@@ -480,7 +484,7 @@ impl Drop for PendingLane {
             let conn_id = handle.lane_id();
             warn!(%conn_id, "PendingLane dropped without being consumed — closing service lane");
             if let Some(tx) = handle.control_tx.as_ref() {
-                let _ = send_drop_control(tx, DropControlRequest::Close(conn_id));
+                let _ = send_drop_control(tx, DropControlRequest::close(conn_id));
             }
         }
     }
@@ -546,7 +550,10 @@ pub(crate) enum DropControlRequest {
         deadline: Instant,
     },
     ResourceClose,
-    Close(LaneId),
+    Close {
+        conn_id: LaneId,
+        deadline: Instant,
+    },
     ProtocolClose {
         conn_id: LaneId,
         description: String,
@@ -558,6 +565,13 @@ impl DropControlRequest {
     /// connection loop eventually gets scheduled.
     fn shutdown() -> Self {
         Self::Shutdown {
+            deadline: Instant::now() + Duration::from_secs(1),
+        }
+    }
+
+    fn close(conn_id: LaneId) -> Self {
+        Self::Close {
+            conn_id,
             deadline: Instant::now() + Duration::from_secs(1),
         }
     }
@@ -1705,7 +1719,7 @@ impl Drop for ProxyTermination {
                 let request = if self.uncertain || lane.is_control() {
                     DropControlRequest::ResourceClose
                 } else {
-                    DropControlRequest::Close(lane)
+                    DropControlRequest::close(lane)
                 };
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     send_drop_control(sender, request)
@@ -1718,18 +1732,38 @@ impl Drop for ProxyTermination {
 /// Forward all request/channel traffic between two connections.
 ///
 /// On locally settled transports, calls and replies retain request identity
-/// through a bounded, parity-correct ID mapping. Other transports retain the
-/// legacy forwarding path and do not receive that identity guarantee.
+/// through a bounded, parity-correct ID mapping. The downstream wire request
+/// ID may differ from the upstream ID and is visible to `RequestContext`;
+/// end-to-end correlation requires an explicit field. Other transports retain
+/// the legacy forwarding path and do not receive that identity guarantee.
 /// It exits when either side closes or a forward send fails, then requests
 /// closure of both underlying connections.
-pub async fn proxy_lanes(left: LaneHandle, right: LaneHandle) -> Result<(), ConnectionError> {
+pub fn proxy_lanes(
+    left: LaneHandle,
+    right: LaneHandle,
+) -> impl Future<Output = Result<(), ConnectionError>> + MaybeSend {
+    // Construct the guard before the returned future can be dropped without
+    // ever being polled. Both lanes otherwise outlive a cancelled proxy.
+    let termination = ProxyTermination {
+        left: left.control_tx.clone(),
+        right: right.control_tx.clone(),
+        left_lane: left.lane_id(),
+        right_lane: right.lane_id(),
+        uncertain: true,
+    };
+    async move { proxy_lanes_inner(left, right, termination).await }
+}
+
+async fn proxy_lanes_inner(
+    left: LaneHandle,
+    right: LaneHandle,
+    mut termination: ProxyTermination,
+) -> Result<(), ConnectionError> {
     if left.parity == right.parity {
         return Err(ConnectionError::Protocol(
             "proxy_lanes requires opposite parities".into(),
         ));
     }
-    let left_conn_id = left.lane_id();
-    let right_conn_id = right.lane_id();
     let guarded = left.sender.connection_core.guarded_responses
         && right.sender.connection_core.guarded_responses;
     let mut left_to_right = ProxiedRequests::new(
@@ -1749,7 +1783,7 @@ pub async fn proxy_lanes(left: LaneHandle, right: LaneHandle) -> Result<(), Conn
         sender: left_sender,
         rx: mut left_rx,
         failures_rx: _left_failures_rx,
-        control_tx: left_control_tx,
+        control_tx: _left_control_tx,
         closed_rx: _left_closed_rx,
         local_settings: _left_local_settings,
         peer_settings: _left_peer_settings,
@@ -1765,7 +1799,7 @@ pub async fn proxy_lanes(left: LaneHandle, right: LaneHandle) -> Result<(), Conn
         sender: right_sender,
         rx: mut right_rx,
         failures_rx: _right_failures_rx,
-        control_tx: right_control_tx,
+        control_tx: _right_control_tx,
         closed_rx: _right_closed_rx,
         local_settings: _right_local_settings,
         peer_settings: _right_peer_settings,
@@ -1777,16 +1811,6 @@ pub async fn proxy_lanes(left: LaneHandle, right: LaneHandle) -> Result<(), Conn
         lane_grant: _right_lane_grant,
         lane_grant_state: _right_lane_grant_state,
     } = right;
-
-    // If forwarding is cancelled while a send is in flight its outcome is
-    // uncertain. Terminate both connections rather than reusing a lane or ID.
-    let mut termination = ProxyTermination {
-        left: left_control_tx,
-        right: right_control_tx,
-        left_lane: left_conn_id,
-        right_lane: right_conn_id,
-        uncertain: true,
-    };
 
     let mut failed = false;
     loop {
@@ -3553,7 +3577,7 @@ impl Connection {
                 self.resource_exhausted = true;
                 false
             }
-            DropControlRequest::Close(conn_id) => {
+            DropControlRequest::Close { conn_id, deadline } => {
                 if conn_id.is_control() {
                     trace!("ignoring root close control request");
                     return true;
@@ -3562,11 +3586,7 @@ impl Connection {
                     return true;
                 }
                 match self
-                    .close_lane_gracefully(
-                        conn_id,
-                        vox_types::Metadata::default(),
-                        Instant::now() + Duration::from_secs(1),
-                    )
+                    .close_lane_gracefully(conn_id, vox_types::Metadata::default(), deadline)
                     .await
                 {
                     Ok(()) => true,
@@ -6918,6 +6938,64 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn peer_lane_close_rejects_a_prechecked_but_unwritten_batch() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let (mut connection, _control) = make_settled_capturing_connection(sent.clone());
+        let settings = ConnectionSettings {
+            parity: Parity::Odd,
+            max_concurrent_requests: 1,
+            initial_channel_credit: 1,
+        };
+        let lane = connection.make_connection_handle(LaneId(2), settings.clone(), settings);
+        let core = connection.connection_core.clone();
+        let (started_tx, started_rx) = oneshot::channel("peer_close.prechecked");
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *core.before_worker_write.lock().unwrap() = Some(Box::new(move || {
+            let _ = started_tx.send(());
+            let _ = release_rx.recv();
+        }));
+        let sender = lane.sender.clone();
+        let send = tokio::spawn(async move {
+            sender
+                .send(ConnectionMessage::Channel(ChannelMessage {
+                    id: vox_types::ChannelId(3),
+                    body: vox_types::ChannelBody::Close(vox_types::ChannelClose {
+                        metadata: Metadata::default(),
+                    }),
+                }))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let message = Message {
+            lane_id: LaneId(2),
+            payload: MessagePayload::LaneClose(LaneClose {
+                metadata: Metadata::default(),
+            }),
+        };
+        connection
+            .handle_message(
+                SelfRef::owning(Backing::Boxed(Box::default()), message),
+                Default::default(),
+                &mut None,
+            )
+            .await;
+        let _ = release_tx.send(());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), send)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        assert_eq!(lane.close_reason(), Some(ConnectionCloseReason::Remote));
+        assert!(sent.lock().unwrap().is_empty());
+        connection.outbound_abort.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn local_lane_close_drains_admitted_batches_before_lane_close() {
         struct FirstWriteGate {
             started: Mutex<Option<oneshot::Sender<()>>>,
@@ -6992,6 +7070,7 @@ mod tests {
             .establish_from_handshake(test_handshake(settings.clone(), settings.clone()))
             .unwrap();
         let lane = connection.make_connection_handle(LaneId(2), settings.clone(), settings);
+        let unrelated_sender = control.sender.clone();
         let first = tokio::spawn(async move {
             control
                 .sender
@@ -7024,7 +7103,7 @@ mod tests {
                     conn_id: LaneId(2),
                     metadata: Metadata::default(),
                     result_tx,
-                    deadline: Instant::now() + Duration::from_secs(1),
+                    deadline: Instant::now() + Duration::from_secs(5),
                 })
                 .await;
             connection
@@ -7043,10 +7122,33 @@ mod tests {
         .await
         .expect("post-cutoff send did not resolve");
         assert!(late.is_err(), "post-cutoff send was admitted");
+        // Wait until the lane-close fence is queued, then admit independent
+        // traffic behind it. It must remain usable and must precede LaneClose
+        // if it reaches the shared worker before the close frame.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while core.outbound_queue_stats().0 < 3 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let unrelated = tokio::spawn(async move {
+            unrelated_sender
+                .send(ConnectionMessage::Channel(channel()))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while core.outbound_queue_stats().0 < 4 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         let _ = release_tx.send(());
         assert!(first.await.unwrap().is_ok());
         let result_a = queued_a.await.unwrap();
         let result_b = queued_b.await.unwrap();
+        let unrelated_result = unrelated.await.unwrap();
         let close_result = result_rx.await.unwrap();
         let connection = close.await.unwrap();
         connection.outbound_abort.abort();
@@ -7054,6 +7156,7 @@ mod tests {
             result_a.is_ok() && result_b.is_ok(),
             "admitted lane writes failed"
         );
+        assert!(unrelated_result.is_ok(), "unrelated lane write failed");
         assert!(close_result.is_ok(), "graceful lane close failed");
         assert_eq!(
             *sent.lock().unwrap(),
@@ -7061,6 +7164,7 @@ mod tests {
                 (LaneId::CONTROL, "channel"),
                 (LaneId(2), "channel"),
                 (LaneId(2), "channel"),
+                (LaneId::CONTROL, "channel"),
                 (LaneId(2), "lane-close"),
             ]
         );
@@ -7097,6 +7201,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unrelated_rejected_batch_makes_lane_close_fail_conservatively() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let (mut connection, _control) = make_settled_capturing_connection(sent.clone());
+        let settings = ConnectionSettings {
+            parity: Parity::Odd,
+            max_concurrent_requests: 1,
+            initial_channel_credit: 1,
+        };
+        let _target =
+            connection.make_connection_handle(LaneId(2), settings.clone(), settings.clone());
+        let unrelated = connection.make_connection_handle(LaneId(4), settings.clone(), settings);
+        let core = connection.connection_core.clone();
+        let (batch, rejected_rx, _channels, _gate) = core
+            .prepare_outbound_batch(
+                Message {
+                    lane_id: LaneId(4),
+                    payload: MessagePayload::ChannelMessage(ChannelMessage {
+                        id: vox_types::ChannelId(3),
+                        body: vox_types::ChannelBody::Close(vox_types::ChannelClose {
+                            metadata: Metadata::default(),
+                        }),
+                    }),
+                },
+                None,
+                None,
+                None,
+                Vec::new(),
+                Some(unrelated.sender.lane_closed.clone()),
+                Some(unrelated.sender.lane_generation.clone()),
+            )
+            .ok()
+            .unwrap();
+        connection.remove_connection_with_reason(&LaneId(4), ConnectionCloseReason::Local);
+        assert!(
+            core.outbound_tx
+                .send(OutboundCommand::Batch(Box::new(batch)))
+                .await
+                .is_ok()
+        );
+        let (result_tx, result_rx) = oneshot::channel("unrelated_rejection.close_result");
+        connection
+            .handle_close_request(CloseRequest {
+                conn_id: LaneId(2),
+                metadata: Metadata::default(),
+                result_tx,
+                deadline: Instant::now() + Duration::from_secs(2),
+            })
+            .await;
+        assert!(rejected_rx.await.unwrap().is_err());
+        assert!(result_rx.await.unwrap().is_err());
+        assert!(connection.resource_exhausted);
+        assert!(sent.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn unsettled_transport_lane_close_fails_without_sending_lane_close() {
         let sent = Arc::new(Mutex::new(Vec::new()));
         let (mut connection, _control) = make_capturing_connection(sent.clone());
@@ -7116,6 +7275,27 @@ mod tests {
             })
             .await;
         assert!(result_rx.await.unwrap().is_err());
+        assert!(connection.resource_exhausted);
+        assert!(sent.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn expired_drop_control_lane_close_aborts_without_sending_close() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let (mut connection, _control) = make_settled_capturing_connection(sent.clone());
+        let settings = ConnectionSettings {
+            parity: Parity::Odd,
+            max_concurrent_requests: 1,
+            initial_channel_credit: 1,
+        };
+        let _lane = connection.make_connection_handle(LaneId(2), settings.clone(), settings);
+        let keep_running = connection
+            .handle_drop_control_request(DropControlRequest::Close {
+                conn_id: LaneId(2),
+                deadline: Instant::now(),
+            })
+            .await;
+        assert!(!keep_running);
         assert!(connection.resource_exhausted);
         assert!(sent.lock().unwrap().is_empty());
     }
@@ -7653,13 +7833,21 @@ mod tests {
             destination_tx,
             Arc::downgrade(&core),
         ));
+        let request = DropControlRequest::close(LaneId(2));
+        let DropControlRequest::Close { conn_id, deadline } = request else {
+            unreachable!()
+        };
         source_tx
-            .send(DropControlRequest::Close(LaneId(2)))
+            .send(DropControlRequest::Close { conn_id, deadline })
             .unwrap();
-        assert!(matches!(
-            destination_rx.recv().await,
-            Some(DropControlRequest::Close(LaneId(2)))
-        ));
+        let Some(DropControlRequest::Close {
+            conn_id: LaneId(2),
+            deadline: forwarded,
+        }) = destination_rx.recv().await
+        else {
+            panic!("lane close request was not forwarded")
+        };
+        assert_eq!(forwarded, deadline, "pump reset the lane-close deadline");
         assert!(!core.admission_is_stopped());
         let request = DropControlRequest::shutdown();
         let DropControlRequest::Shutdown { deadline } = request else {
@@ -9396,6 +9584,18 @@ mod tests {
         let method = vox_types::MethodId(9);
         let first = requests.begin(&lane.sender, source, method).unwrap();
         assert_eq!(first, RequestId(1));
+        let (other_connection, other_lane) =
+            make_settled_capturing_connection(Arc::new(Mutex::new(Vec::new())));
+        let mut other_requests = ProxiedRequests::new(Parity::Odd, 1);
+        let other = other_requests
+            .begin(&other_lane.sender, source, method)
+            .unwrap();
+        assert_eq!(other, RequestId(1));
+        let (_, _, other_capability) = other_requests.response(other).unwrap();
+        assert!(matches!(
+            lane.sender.response_book.reserve(&other_capability),
+            Err(response_reservation::ReservationError::StaleRequest)
+        ));
         assert!(requests.begin(&lane.sender, source, method).is_err());
         assert!(requests.begin(&lane.sender, RequestId(79), method).is_err());
         let (actual_source, actual_method, capability) = requests.response(first).unwrap();
@@ -9410,6 +9610,68 @@ mod tests {
         assert!(requests.response(first).is_err());
         assert_eq!(requests.response(second).unwrap().0, source);
         connection.outbound_abort.abort();
+        other_connection.outbound_abort.abort();
+    }
+
+    #[tokio::test]
+    async fn legacy_proxy_preserves_numeric_request_id() {
+        let (left_connection, mut left) =
+            make_capturing_connection(Arc::new(Mutex::new(Vec::new())));
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let (right_connection, mut right) = make_capturing_connection(captured.clone());
+        assert!(!left.sender.connection_core.guarded_responses);
+        assert!(!right.sender.connection_core.guarded_responses);
+        left.parity = Parity::Odd;
+        right.parity = Parity::Even;
+        let inbound = match left_connection.conns.get(&LaneId::CONTROL) {
+            Some(ConnectionSlot::Active(state)) => state.conn_tx.clone(),
+            _ => panic!("control lane not active"),
+        };
+        let proxy = tokio::spawn(proxy_lanes(left, right));
+        let message = ConnectionMessage::Request(RequestMessage {
+            id: RequestId(77),
+            body: RequestBody::Call(RequestCall {
+                method_id: vox_types::MethodId(9),
+                channels: Vec::new(),
+                metadata: Metadata::default(),
+                args: Payload::Encoded(&[]),
+                schemas: vox_types::SchemaBytes(vec![1]),
+            }),
+        });
+        assert!(
+            inbound
+                .send(RecvMessage {
+                    schemas: Arc::new(vox_types::SchemaRecvTracker::new()),
+                    msg: SelfRef::owning(Backing::Boxed(Box::default()), message),
+                    fds: Default::default(),
+                })
+                .await
+                .is_ok()
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if captured.lock().unwrap().iter().any(|message| {
+                    matches!(
+                        &message.payload,
+                        CapturedPayload::Call {
+                            request_id: RequestId(77),
+                            ..
+                        }
+                    )
+                }) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("legacy proxy did not preserve the request ID");
+        proxy.abort();
+        let _ = proxy.await;
+        left_connection.outbound_abort.abort();
+        right_connection.outbound_abort.abort();
+        // The legacy path preserves the number but has no guarded identity or
+        // independently proven local-settlement guarantee.
     }
 
     #[tokio::test]
@@ -9432,6 +9694,33 @@ mod tests {
             Some(DropControlRequest::ResourceClose)
         ));
         // ResourceClose is a request; this does not prove transport teardown.
+    }
+
+    #[tokio::test]
+    async fn dropping_unpolled_proxy_requests_connection_abort_on_both_sides() {
+        let (left_connection, mut left) =
+            make_settled_capturing_connection(Arc::new(Mutex::new(Vec::new())));
+        let (right_connection, mut right) =
+            make_settled_capturing_connection(Arc::new(Mutex::new(Vec::new())));
+        let (left_tx, mut left_rx) = mpsc::unbounded_channel("unpolled_proxy.left");
+        let (right_tx, mut right_rx) = mpsc::unbounded_channel("unpolled_proxy.right");
+        left.parity = Parity::Odd;
+        right.parity = Parity::Even;
+        left.control_tx = Some(left_tx);
+        right.control_tx = Some(right_tx);
+        let proxy = proxy_lanes(left, right);
+        drop(proxy);
+        assert!(matches!(
+            left_rx.try_recv(),
+            Ok(DropControlRequest::ResourceClose)
+        ));
+        assert!(matches!(
+            right_rx.try_recv(),
+            Ok(DropControlRequest::ResourceClose)
+        ));
+        left_connection.outbound_abort.abort();
+        right_connection.outbound_abort.abort();
+        // The requests do not establish transport teardown.
     }
 
     #[tokio::test]

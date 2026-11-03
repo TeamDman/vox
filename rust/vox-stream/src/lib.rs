@@ -1334,6 +1334,106 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
+    #[ignore = "manual connection-level TLS test; binds only 127.0.0.1"]
+    async fn connection_shutdown_sends_tls_close_notify_over_loopback() {
+        use std::sync::atomic::{AtomicU8, Ordering};
+        use vox_types::{ConnectionSettings, Parity};
+
+        struct ObserveEof<R> {
+            inner: R,
+            outcome: std::sync::Arc<AtomicU8>,
+        }
+        impl<R: AsyncRead + Unpin> AsyncRead for ObserveEof<R> {
+            fn poll_read(
+                mut self: std::pin::Pin<&mut Self>,
+                cx: &mut std::task::Context<'_>,
+                buf: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                let before = buf.filled().len();
+                let result = std::pin::Pin::new(&mut self.inner).poll_read(cx, buf);
+                match &result {
+                    std::task::Poll::Ready(Ok(())) if buf.filled().len() == before => {
+                        self.outcome.store(1, Ordering::Release);
+                    }
+                    std::task::Poll::Ready(Err(_)) => {
+                        self.outcome.store(2, Ordering::Release);
+                    }
+                    _ => {}
+                }
+                result
+            }
+        }
+        fn settings(parity: Parity) -> ConnectionSettings {
+            ConnectionSettings {
+                parity,
+                max_concurrent_requests: 1,
+                initial_channel_credit: 1,
+            }
+        }
+
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let (client_config, server_config) = test_tls_configs();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let outcome = std::sync::Arc::new(AtomicU8::new(0));
+            let peer_outcome = outcome.clone();
+            let peer = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let tls = tokio_rustls::TlsAcceptor::from(server_config)
+                    .accept(socket)
+                    .await
+                    .unwrap();
+                let (read, write) = tokio::io::split(tls);
+                let link = StreamLink::new(
+                    ObserveEof {
+                        inner: read,
+                        outcome: peer_outcome,
+                    },
+                    write,
+                );
+                let connection = vox_core::acceptor_on_link(link, settings(Parity::Even))
+                    .await
+                    .unwrap()
+                    .establish_connection()
+                    .await
+                    .unwrap();
+                tokio::time::timeout(std::time::Duration::from_secs(5), connection.closed())
+                    .await
+                    .unwrap();
+            });
+            let socket = tokio::net::TcpStream::connect(address).await.unwrap();
+            let name = rustls::pki_types::ServerName::try_from("localhost".to_owned()).unwrap();
+            let tls = tokio_rustls::TlsConnector::from(client_config)
+                .connect(name, socket)
+                .await
+                .unwrap();
+            let (read, write) = tokio::io::split(tls);
+            let connection =
+                vox_core::initiator_on_link(StreamLink::new(read, write), settings(Parity::Odd))
+                    .await
+                    .unwrap()
+                    .establish_connection()
+                    .await
+                    .unwrap();
+            let retained = connection.clone();
+            connection.shutdown().unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), peer)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                outcome.load(Ordering::Acquire),
+                1,
+                "peer did not observe clean TLS EOF"
+            );
+            drop(retained);
+        })
+        .await
+        .expect("connection-level TLS shutdown timed out");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
     async fn tls_transport_cut_is_reported_as_truncation() {
         let (client_config, server_config) = test_tls_configs();
         let (client_io, mut bridge_client) = tokio::io::duplex(16 * 1024);

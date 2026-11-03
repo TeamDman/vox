@@ -6,10 +6,11 @@ use facet::Facet;
 use vox_rt::task::FutureExt;
 use vox_types::{
     Backing, ChannelBody, ChannelClose, ChannelDirection, ChannelGrantCredit, ChannelId,
-    ChannelItem, ChannelMessage, ChannelSink, ConnectionRole, ConnectionSettings, Handler,
-    HandshakeResult, IncomingChannelMessage, Message, MessagePayload, Metadata, MethodId, Parity,
-    Payload, ReplySink, RequestBody, RequestCall, RequestCancel, RequestId, RequestMessage,
-    RequestResponse, RequestTerminationReason, Rx, SelfRef, Tx, VoxError, channel,
+    ChannelItem, ChannelMessage, ChannelSink, Conduit, ConduitTx, ConnectionRole,
+    ConnectionSettings, Handler, HandshakeResult, IncomingChannelMessage, Message, MessageFamily,
+    MessagePayload, Metadata, MethodId, Parity, Payload, ReplySink, RequestBody, RequestCall,
+    RequestCancel, RequestId, RequestMessage, RequestResponse, RequestTerminationReason, Rx,
+    SelfRef, Tx, VoxError, channel,
 };
 
 use super::utils::*;
@@ -212,6 +213,91 @@ impl Handler<crate::DriverReplySink> for ImmediateReplyHandler {
                 metadata: Default::default(),
             })
             .await;
+    }
+}
+
+/// Delivers the response locally but never returns from the send. This models
+/// the uncertainty seen when a sender is cancelled after bytes may escape.
+struct HoldDeliveredResponse<C> {
+    inner: C,
+    started: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+    responses: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+struct HoldDeliveredResponseTx<T> {
+    inner: T,
+    started: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+    responses: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl<C> Conduit for HoldDeliveredResponse<C>
+where
+    C: Conduit<Msg = MessageFamily>,
+    C::Tx: Send + Sync,
+{
+    type Msg = MessageFamily;
+    type Tx = HoldDeliveredResponseTx<C::Tx>;
+    type Rx = C::Rx;
+
+    fn split(self) -> (Self::Tx, Self::Rx) {
+        let (tx, rx) = self.inner.split();
+        (
+            HoldDeliveredResponseTx {
+                inner: tx,
+                started: self.started,
+                responses: self.responses,
+            },
+            rx,
+        )
+    }
+}
+
+impl<T: ConduitTx<Msg = MessageFamily> + Send + Sync> ConduitTx for HoldDeliveredResponseTx<T> {
+    type Msg = MessageFamily;
+    type Prepared = (T::Prepared, bool);
+    type Error = std::io::Error;
+
+    fn prepare_send(&self, item: Message<'_>) -> Result<Self::Prepared, Self::Error> {
+        let response = matches!(&item.payload, MessagePayload::RequestMessage(req) if matches!(&req.body, RequestBody::Response(_)));
+        self.inner
+            .prepare_send(item)
+            .map(|prepared| (prepared, response))
+            .map_err(|error| std::io::Error::other(error.to_string()))
+    }
+
+    async fn send_prepared(&self, (prepared, response): Self::Prepared) -> Result<(), Self::Error> {
+        if response {
+            self.responses.fetch_add(1, Ordering::SeqCst);
+        }
+        self.inner
+            .send_prepared(prepared)
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        if response {
+            if let Some(started) = self.started.lock().unwrap().take() {
+                let _ = started.send(());
+            }
+            std::future::pending::<()>().await;
+        }
+        Ok(())
+    }
+
+    async fn close(self) -> std::io::Result<()> {
+        self.inner.close().await
+    }
+    fn abort(&self) {
+        self.inner.abort();
+    }
+}
+
+impl<C> crate::IntoConduit for HoldDeliveredResponse<C>
+where
+    C: Conduit<Msg = MessageFamily>,
+    C::Tx: Send + Sync,
+{
+    type Conduit = Self;
+    fn into_conduit(self) -> Self {
+        self
     }
 }
 
@@ -778,6 +864,78 @@ async fn request_associated_channel_items_reset_idle_timeout() {
     };
     let total: u32 = vox_phon::from_slice(ret_bytes).expect("deserialize response");
     assert_eq!(total, 6);
+}
+
+// r[verify rpc.cancel]
+// r[verify rpc.cancel.channels]
+#[tokio::test]
+async fn cancelling_after_reply_delivery_does_not_send_a_second_reply() {
+    let (client_conduit, server_conduit) = message_conduit_pair();
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let responses = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let server_conduit = HoldDeliveredResponse {
+        inner: server_conduit,
+        started: Arc::new(Mutex::new(Some(started_tx))),
+        responses: responses.clone(),
+    };
+    let server_task = vox_rt::task::spawn(
+        async move {
+            acceptor_conduit(server_conduit, test_acceptor_handshake())
+                .on_lane(ImmediateReplyHandler)
+                .establish_connection()
+                .await
+                .expect("server handshake failed")
+        }
+        .named("uncertain_reply_server"),
+    );
+    let caller = initiator_conduit(client_conduit, test_initiator_handshake())
+        .establish::<TestLaneClient>()
+        .await
+        .expect("client handshake failed");
+    let client_sender = caller.caller.driver().connection_sender().clone();
+    let server = server_task.await.expect("server setup failed");
+    let call_client = caller.clone();
+    let call_task = tokio::spawn(async move {
+        let args = 99_u32;
+        call_client
+            .caller
+            .call(RequestCall {
+                channels: Vec::new(),
+                method_id: MethodId(1),
+                args: Payload::outgoing(&args),
+                schemas: Default::default(),
+                metadata: Default::default(),
+            })
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), started_rx)
+        .await
+        .expect("reply did not reach the transport")
+        .expect("start signal dropped");
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), call_task)
+            .await
+            .expect("original reply did not arrive")
+            .expect("call task failed")
+            .is_ok()
+    );
+    client_sender
+        .send(ConnectionMessage::Request(RequestMessage {
+            id: RequestId(1),
+            body: RequestBody::Cancel(RequestCancel {
+                metadata: Default::default(),
+            }),
+        }))
+        .await
+        .expect("cancel send failed");
+    tokio::time::timeout(Duration::from_secs(3), server.closed())
+        .await
+        .expect("uncertain reply did not terminate the server connection");
+    assert_eq!(
+        responses.load(Ordering::SeqCst),
+        1,
+        "a replacement reply was attempted"
+    );
 }
 
 // r[verify rpc.cancel]
@@ -3089,6 +3247,60 @@ async fn proxy_lanes_forwards_calls_without_service_specific_proxy_code() {
         .close_lane(proxy_conn_id, Default::default())
         .await
         .expect("close proxy connection");
+
+    // A caller may reuse a source ID after its prior response. The proxy must
+    // keep that source lifetime distinct from its later destination request.
+    let mut raw_lane = guest_a_connection
+        .open_lane_handle(
+            ConnectionSettings {
+                parity: Parity::Odd,
+                max_concurrent_requests: 64,
+                initial_channel_credit: 16,
+            },
+            vox_types::metadata().str("vox-service", "Echo").build(),
+        )
+        .await
+        .expect("open proxy lane for source-ID reuse");
+    let raw_lane_id = raw_lane.lane_id();
+    for value in [314_u32, 159_u32] {
+        raw_lane
+            .sender
+            .send(ConnectionMessage::Request(RequestMessage {
+                id: RequestId(77),
+                body: RequestBody::Call(RequestCall {
+                    channels: Vec::new(),
+                    method_id: MethodId(1),
+                    args: Payload::outgoing(&value),
+                    schemas: Default::default(),
+                    metadata: Default::default(),
+                }),
+            }))
+            .await
+            .expect("send raw proxied call");
+        let returned = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let recv = raw_lane.rx.recv().await.expect("proxy lane closed");
+                if let ConnectionMessage::Request(RequestMessage {
+                    id,
+                    body: RequestBody::Response(response),
+                }) = recv.msg.get()
+                {
+                    assert_eq!(*id, RequestId(77));
+                    let Payload::Encoded(bytes) = &response.ret else {
+                        panic!("expected encoded proxied response")
+                    };
+                    break vox_phon::from_slice::<u32>(bytes).expect("decode proxied response");
+                }
+            }
+        })
+        .await
+        .expect("timeout waiting for raw proxied response");
+        assert_eq!(returned, value);
+    }
+    guest_a_connection
+        .close_lane(raw_lane_id, Default::default())
+        .await
+        .expect("close raw proxy lane");
 
     proxy_driver_task.abort();
     guest_b_task.abort();

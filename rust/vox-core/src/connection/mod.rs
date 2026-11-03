@@ -1467,6 +1467,8 @@ impl Connection {
             admission_stopped: std::sync::atomic::AtomicBool::new(false),
             admission_stopped_tx,
             admission_stopped_rx,
+            #[cfg(test)]
+            before_admission_commit: std::sync::Mutex::new(None),
             observer: observer.clone(),
             channel_gates: std::sync::Mutex::new(HashMap::new()),
         });
@@ -2916,6 +2918,8 @@ pub(crate) struct ConnectionCore {
     admission_stopped: std::sync::atomic::AtomicBool,
     admission_stopped_tx: watch::Sender<bool>,
     admission_stopped_rx: watch::Receiver<bool>,
+    #[cfg(test)]
+    before_admission_commit: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     observer: Option<VoxObserverHandle>,
     /// Open gates for channels the local side opened but whose declaring Call has not
     /// yet been enqueued. Keyed by channel id; entries removed when opened.
@@ -3510,6 +3514,12 @@ impl ConnectionCore {
             if *guard || self.admission_is_stopped() {
                 return Err(());
             }
+            // A forced stop can race after this check and before enqueue. Such
+            // a preadmitted batch has an uncertain outcome, not a hard cutoff.
+            #[cfg(test)]
+            if let Some(hook) = self.before_admission_commit.lock().unwrap().take() {
+                hook();
+            }
             drop(permit.send(batch));
             Ok::<(), ()>(())
         }
@@ -3594,6 +3604,11 @@ impl ConnectionCore {
             drop(guard);
             self.open_channel_gates(&gated_channels);
             return Err(TrySendError::Closed(()));
+        }
+        // As above, a forced stop can overlap this already-admitted try-send.
+        #[cfg(test)]
+        if let Some(hook) = self.before_admission_commit.lock().unwrap().take() {
+            hook();
         }
         let result = self.outbound_tx.try_send(batch).map_err(|err| match err {
             mpsc::error::TrySendError::Full(_) => {
@@ -4560,6 +4575,198 @@ mod tests {
             .await
             .expect_err("observed EOF must reject new sends");
         connection.outbound_abort.abort();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn forced_stop_may_overlap_a_preadmitted_async_enqueue() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let (connection, lane) = make_capturing_connection(sent.clone());
+        let core = connection.connection_core.clone();
+        let (started, started_rx) = oneshot::channel("forced_async.started");
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        *core.before_admission_commit.lock().unwrap() = Some(Box::new(move || {
+            let _ = started.send(());
+            let _ = wait.recv();
+        }));
+        let sender = lane.sender.clone();
+        let task = tokio::spawn(async move {
+            sender
+                .send(ConnectionMessage::Channel(vox_types::ChannelMessage {
+                    id: vox_types::ChannelId(1),
+                    body: vox_types::ChannelBody::Close(vox_types::ChannelClose {
+                        metadata: Metadata::default(),
+                    }),
+                }))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        core.force_stop_admission();
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            sent.lock().unwrap().len(),
+            1,
+            "the preadmitted batch can complete after forced stop"
+        );
+        connection.outbound_abort.abort();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn forced_stop_may_overlap_a_preadmitted_try_enqueue() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let (connection, lane) = make_capturing_connection(sent.clone());
+        let core = connection.connection_core.clone();
+        let (started, started_rx) = oneshot::channel("forced_try.started");
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        *core.before_admission_commit.lock().unwrap() = Some(Box::new(move || {
+            let _ = started.send(());
+            let _ = wait.recv();
+        }));
+        let sender = lane.sender.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            sender.try_send_channel_with_writer_schema(
+                vox_types::ChannelMessage {
+                    id: vox_types::ChannelId(1),
+                    body: vox_types::ChannelBody::Close(vox_types::ChannelClose {
+                        metadata: Metadata::default(),
+                    }),
+                },
+                None,
+            )
+        });
+        tokio::time::timeout(Duration::from_secs(2), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        core.force_stop_admission();
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while sent.lock().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        connection.outbound_abort.abort();
+    }
+
+    #[tokio::test]
+    #[ignore = "diagnostic: cancelled declaring calls can strand channel gates and prepared request state"]
+    async fn cancelled_declaring_call_releases_waiters_and_prepared_state() {
+        #[derive(facet::Facet)]
+        struct Args {
+            input: vox_types::Rx<u32>,
+        }
+        let (connection, lane) = make_capturing_connection(Arc::new(Mutex::new(Vec::new())));
+        let sender = lane.sender.clone();
+        let core = connection.connection_core.clone();
+        let driver = crate::Driver::new(lane, ());
+        let binder = driver.caller();
+        let (_paired_tx, input) = vox_types::channel::<u32>();
+        let held_admission = core.admission.lock().await;
+        let (declared, declared_rx) = oneshot::channel("cancel_declared.channels");
+        let call_sender = sender.clone();
+        let call = tokio::spawn(async move {
+            let args = Args { input };
+            let message = ConnectionMessage::Request(RequestMessage {
+                id: RequestId(77),
+                body: RequestBody::Call(vox_types::RequestCall {
+                    method_id: vox_types::MethodId(1),
+                    channels: Vec::new(),
+                    args: vox_types::Payload::outgoing(&args),
+                    schemas: Default::default(),
+                    metadata: Metadata::default(),
+                }),
+            });
+            call_sender
+                .send_with_binder_and_method_observing_channels(
+                    message,
+                    Some(&binder),
+                    None,
+                    move |ids| {
+                        let _ = declared.send(ids.to_vec());
+                    },
+                )
+                .await
+        });
+        let ids = tokio::time::timeout(Duration::from_secs(2), declared_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ids.len(), 1);
+        let spawn_waiter = |sender: ConnectionSender| {
+            let id = ids[0];
+            tokio::spawn(async move {
+                sender
+                    .send(ConnectionMessage::Channel(vox_types::ChannelMessage {
+                        id,
+                        body: vox_types::ChannelBody::Close(vox_types::ChannelClose {
+                            metadata: Metadata::default(),
+                        }),
+                    }))
+                    .await
+            })
+        };
+        let mut first = spawn_waiter(sender.clone());
+        let mut second = spawn_waiter(sender);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut first)
+                .await
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut second)
+                .await
+                .is_err()
+        );
+        call.abort();
+        let _cancelled = call.await.unwrap_err();
+        drop(held_admission);
+        let first_stranded = tokio::time::timeout(Duration::from_millis(50), &mut first)
+            .await
+            .is_err();
+        let second_stranded = tokio::time::timeout(Duration::from_millis(50), &mut second)
+            .await
+            .is_err();
+        let state = core
+            .inner
+            .lock()
+            .unwrap()
+            .conns
+            .get(&LaneId::CONTROL)
+            .unwrap()
+            .clone();
+        let stale_request = state
+            .lock()
+            .unwrap()
+            .inflight_outgoing
+            .contains_key(&RequestId(77));
+        core.force_stop_admission();
+        let _first = tokio::time::timeout(Duration::from_secs(2), first)
+            .await
+            .unwrap();
+        let _second = tokio::time::timeout(Duration::from_secs(2), second)
+            .await
+            .unwrap();
+        connection.outbound_abort.abort();
+        assert!(
+            !first_stranded && !second_stranded && !stale_request,
+            "cancelled call left waiters stranded: {first_stranded}/{second_stranded}, stale request: {stale_request}"
+        );
     }
 
     #[tokio::test]

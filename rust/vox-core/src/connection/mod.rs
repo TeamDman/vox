@@ -4816,6 +4816,231 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "diagnostic: failed call preparation can release undeclared channels"]
+    async fn preparation_failure_does_not_release_undeclared_channel() {
+        #[derive(facet::Facet)]
+        struct Args {
+            input: vox_types::Rx<u32>,
+        }
+        struct RejectCallTx(CapturingTx);
+        impl ConduitTx for RejectCallTx {
+            type Error = std::io::Error;
+            type Msg = MessageFamily;
+            type Prepared = CapturedMessage;
+            fn prepare_send(&self, item: Message<'_>) -> Result<Self::Prepared, Self::Error> {
+                if matches!(
+                    &item.payload,
+                    MessagePayload::RequestMessage(RequestMessage {
+                        body: RequestBody::Call(_),
+                        ..
+                    })
+                ) {
+                    return Err(std::io::Error::other("injected call preparation failure"));
+                }
+                self.0.prepare_send(item)
+            }
+            async fn send_prepared(&self, item: Self::Prepared) -> Result<(), Self::Error> {
+                self.0.send_prepared(item).await
+            }
+            async fn close(self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let (connection, lane) = make_capturing_connection(sent.clone());
+        let sender = lane.sender.clone();
+        let core = connection.connection_core.clone();
+        core.inner.lock().unwrap().tx =
+            Some(Arc::new(RejectCallTx(CapturingTx { sent: sent.clone() })));
+        let driver = crate::Driver::new(lane, ());
+        let binder = driver.caller();
+        let (_paired_tx, input) = vox_types::channel::<u32>();
+        let args = Args { input };
+        let mut declared = Vec::new();
+        let result = sender
+            .send_with_binder_and_method_observing_channels(
+                ConnectionMessage::Request(RequestMessage {
+                    id: RequestId(77),
+                    body: RequestBody::Call(vox_types::RequestCall {
+                        method_id: vox_types::MethodId(1),
+                        channels: Vec::new(),
+                        args: vox_types::Payload::outgoing(&args),
+                        schemas: Default::default(),
+                        metadata: Metadata::default(),
+                    }),
+                }),
+                Some(&binder),
+                None,
+                |ids| declared.extend_from_slice(ids),
+            )
+            .await;
+        assert!(result.is_err());
+        assert_eq!(declared.len(), 1);
+        let channel = ConnectionMessage::Channel(vox_types::ChannelMessage {
+            id: declared[0],
+            body: vox_types::ChannelBody::Close(vox_types::ChannelClose {
+                metadata: Metadata::default(),
+            }),
+        });
+        let outcome = tokio::time::timeout(Duration::from_millis(200), sender.send(channel)).await;
+        let unexpected_frames = sent.lock().unwrap().len();
+        core.force_stop_admission();
+        connection.outbound_abort.abort();
+        assert!(
+            matches!(outcome, Ok(Err(()))),
+            "channel must fail, without remaining blocked or reaching the transport; outcome: {outcome:?}, frames: {unexpected_frames}"
+        );
+        assert_eq!(unexpected_frames, 0, "undeclared channel sent a frame");
+    }
+
+    #[tokio::test]
+    #[ignore = "diagnostic: queue-full can open an undeclared channel and retain prepared state"]
+    async fn full_queue_does_not_open_channels_from_rejected_call() {
+        #[derive(facet::Facet)]
+        struct Args {
+            input: vox_types::Rx<u32>,
+        }
+        struct StalledTx(Mutex<Option<oneshot::Sender<()>>>);
+        impl ConduitTx for StalledTx {
+            type Error = std::io::Error;
+            type Msg = MessageFamily;
+            type Prepared = ();
+            fn prepare_send(&self, _: Message<'_>) -> Result<(), Self::Error> {
+                Ok(())
+            }
+            async fn send_prepared(&self, _: ()) -> Result<(), Self::Error> {
+                if let Some(started) = self.0.lock().unwrap().take() {
+                    let _ = started.send(());
+                }
+                std::future::pending().await
+            }
+            async fn close(self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        fn channel() -> vox_types::ChannelMessage<'static> {
+            vox_types::ChannelMessage {
+                id: vox_types::ChannelId(99),
+                body: vox_types::ChannelBody::Close(vox_types::ChannelClose {
+                    metadata: Metadata::default(),
+                }),
+            }
+        }
+        let (_open_tx, open_rx) = mpsc::channel("full_call.open", 1);
+        let (_close_tx, close_rx) = mpsc::channel("full_call.close", 1);
+        let (control_tx, control_rx) = mpsc::unbounded_channel("full_call.control");
+        let (started_tx, started_rx) = oneshot::channel("full_call.started");
+        let mut connection = Connection::pre_handshake(
+            StalledTx(Mutex::new(Some(started_tx))),
+            PendingRx,
+            None,
+            open_rx,
+            close_rx,
+            control_tx,
+            control_rx,
+            None,
+            None,
+        );
+        let lane = connection
+            .establish_from_handshake(test_handshake(
+                ConnectionSettings {
+                    parity: Parity::Odd,
+                    max_concurrent_requests: 1,
+                    initial_channel_credit: 1,
+                },
+                ConnectionSettings {
+                    parity: Parity::Even,
+                    max_concurrent_requests: 1,
+                    initial_channel_credit: 1,
+                },
+            ))
+            .unwrap();
+        let sender = lane.sender.clone();
+        let core = connection.connection_core.clone();
+        let driver = crate::Driver::new(lane, ());
+        let binder = driver.caller();
+        let first_sender = sender.clone();
+        let first = tokio::spawn(async move {
+            first_sender
+                .send(ConnectionMessage::Channel(channel()))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let capacity = core.outbound_queue_stats().1;
+        for _ in 0..capacity {
+            sender
+                .try_send_channel_with_writer_schema(channel(), None)
+                .unwrap();
+        }
+        assert_eq!(core.outbound_queue_stats(), (capacity, capacity));
+        let (_paired_tx, input) = vox_types::channel::<u32>();
+        let args = Args { input };
+        let declared = Arc::new(Mutex::new(Vec::new()));
+        let declared_out = declared.clone();
+        let observed_core = core.clone();
+        *core.before_admission_commit.lock().unwrap() = Some(Box::new(move || {
+            *declared_out.lock().unwrap() = observed_core
+                .channel_gates
+                .lock()
+                .unwrap()
+                .keys()
+                .copied()
+                .collect();
+        }));
+        let rejected = core.try_send_with_options(
+            Message {
+                lane_id: sender.lane_id(),
+                payload: MessagePayload::RequestMessage(RequestMessage {
+                    id: RequestId(77),
+                    body: RequestBody::Call(vox_types::RequestCall {
+                        method_id: vox_types::MethodId(1),
+                        channels: Vec::new(),
+                        args: vox_types::Payload::outgoing(&args),
+                        schemas: Default::default(),
+                        metadata: Metadata::default(),
+                    }),
+                }),
+            },
+            Some(&binder),
+            None,
+            None,
+            Vec::new(),
+        );
+        let registered = declared.lock().unwrap().clone();
+        assert_eq!(
+            registered.len(),
+            1,
+            "the call must register its channel gate"
+        );
+        assert_eq!(registered[0].0, sender.lane_id());
+        let channel_open = core.channel_gate_open(registered[0].0, registered[0].1);
+        let state = core
+            .inner
+            .lock()
+            .unwrap()
+            .conns
+            .get(&sender.lane_id())
+            .unwrap()
+            .clone();
+        let stale_request = state
+            .lock()
+            .unwrap()
+            .inflight_outgoing
+            .contains_key(&RequestId(77));
+        first.abort();
+        let _ = first.await;
+        connection.outbound_abort.abort();
+        assert!(matches!(rejected, Err(TrySendError::Full(()))));
+        assert!(
+            !channel_open && !stale_request,
+            "rejected call opened channel: {channel_open}, retained request: {stale_request}"
+        );
+    }
+
+    #[tokio::test]
     async fn shutdown_wakes_producer_waiting_for_outbound_capacity() {
         struct StalledTx(Mutex<Option<oneshot::Sender<()>>>);
         impl ConduitTx for StalledTx {

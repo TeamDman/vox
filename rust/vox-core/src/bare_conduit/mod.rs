@@ -133,6 +133,10 @@ impl<F: MsgFamily, LTx: LinkTx + MaybeSend + 'static> ConduitTx for BareConduitT
             .map_err(BareConduitError::Io)
     }
 
+    fn send_success_is_locally_settled(&self) -> bool {
+        self.link_tx.send_success_is_locally_settled()
+    }
+
     async fn close(self) -> std::io::Result<()> {
         self.link_tx.close().await
     }

@@ -158,6 +158,15 @@ top of it.
 > if the transport cannot currently accept another payload, the send future
 > MUST wait (or error) before the payload becomes visible to the receiver.
 
+> r[link.tx.local-settled]
+>
+> A link MAY explicitly report that successful send completion means all local
+> work for that payload has settled, including any required flush, and that the
+> link has no independently running write for that payload. This capability
+> defaults to false and applies to every supported send path, including
+> descriptor-bearing sends. It says nothing about peer receipt or processing
+> and makes no claim about a failed or cancelled send.
+
 > r[link.message.empty]
 >
 > Links MUST support empty payloads (`len = 0`).

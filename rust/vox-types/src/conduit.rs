@@ -61,6 +61,13 @@ pub trait ConduitTx {
         prepared: Self::Prepared,
     ) -> impl Future<Output = Result<(), Self::Error>> + MaybeSend + '_;
 
+    /// Whether successful completion leaves no outstanding local write or
+    /// flush for that message. This does not prove peer receipt and does not
+    /// apply to failed or cancelled sends.
+    fn send_success_is_locally_settled(&self) -> bool {
+        false
+    }
+
     /// Graceful close of the outbound direction.
     async fn close(self) -> std::io::Result<()>
     where

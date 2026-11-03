@@ -72,6 +72,12 @@ impl MemoryLinkTx {
 }
 
 impl LinkTx for MemoryLinkTx {
+    // A successful send moves the frame into the in-process channel; no
+    // background writer remains. It does not imply that the peer processed it.
+    fn send_success_is_locally_settled(&self) -> bool {
+        true
+    }
+
     async fn send(&self, bytes: Vec<u8>) -> std::io::Result<()> {
         #[cfg(unix)]
         {
@@ -178,5 +184,22 @@ mod tests {
             assert_eq!(payload(&received), *expected);
         }
         assert!(rx_b.recv().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn memory_send_completion_is_local_queue_acceptance() {
+        let (a, b) = memory_link_pair(1);
+        let (tx, _rx) = a.split();
+        let (_peer_tx, mut peer_rx) = b.split();
+        assert!(tx.send_success_is_locally_settled());
+        tx.send(b"first".to_vec()).await.unwrap();
+        let mut second = Box::pin(tx.send(b"second".to_vec()));
+        assert!(matches!(
+            futures_util::poll!(&mut second),
+            std::task::Poll::Pending
+        ));
+        assert_eq!(payload(&peer_rx.recv().await.unwrap().unwrap()), b"first");
+        second.await.unwrap();
+        assert_eq!(payload(&peer_rx.recv().await.unwrap().unwrap()), b"second");
     }
 }

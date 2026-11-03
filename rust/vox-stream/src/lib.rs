@@ -552,6 +552,11 @@ impl StreamLinkTx {
 }
 
 impl LinkTx for StreamLinkTx {
+    // r[impl link.tx.local-settled]
+    fn send_success_is_locally_settled(&self) -> bool {
+        true
+    }
+
     async fn send(&self, bytes: Vec<u8>) -> io::Result<()> {
         let _ = frame_len_prefix(bytes.len())?;
         // r[impl link.tx.send]

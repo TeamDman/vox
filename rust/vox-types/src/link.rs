@@ -65,6 +65,15 @@ pub trait LinkTx: MaybeSend + MaybeSync + 'static {
     /// internal queue or write path.
     fn send(&self, bytes: Vec<u8>) -> impl Future<Output = std::io::Result<()>> + MaybeSend + '_;
 
+    /// Whether a successful send means this payload has no outstanding local
+    /// transport write or flush work for every supported send path, including
+    /// descriptor-bearing sends. Does not cover errors, cancellation, or peer
+    /// receipt. Transports must opt in only when they provide this proof.
+    // r[impl link.tx.local-settled]
+    fn send_success_is_locally_settled(&self) -> bool {
+        false
+    }
+
     /// Graceful close of the outbound direction.
     // r[impl link.tx.close]
     fn close(self) -> impl Future<Output = std::io::Result<()>> + MaybeSend

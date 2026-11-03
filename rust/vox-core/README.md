@@ -87,8 +87,8 @@ lane-open quota sends a rejection and closes it. The live-lane quota is reusable
 after a lane closes. Locally opened lanes and application-created resources
 remain the application's responsibility.
 
-If a resource-triggered rejection cannot be flushed within one second, the
-runtime stops waiting, cancels its outbound worker, and calls the conduit's
+If a resource-triggered rejection or protocol-error response cannot be flushed
+within one second, the runtime stops waiting, cancels its outbound worker, and calls the conduit's
 `abort` hook. `BareConduit` forwards this to the link; on native targets,
 `StreamLink` aborts its writer task. The default hook on other conduits and
 links is a no-op, and the WASM task abort is a no-op, so those environments

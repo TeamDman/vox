@@ -2717,19 +2717,22 @@ impl Connection {
                 description,
             } => {
                 trace!(%conn_id, %description, "protocol close requested");
-                let _ = self
-                    .connection_core
-                    .send(
-                        Message {
-                            lane_id: LaneId::CONTROL,
-                            payload: MessagePayload::ProtocolError(vox_types::ProtocolError {
-                                description: &description,
-                            }),
-                        },
-                        None,
-                        None,
-                    )
-                    .await;
+                let send = self.connection_core.send(
+                    Message {
+                        lane_id: LaneId::CONTROL,
+                        payload: MessagePayload::ProtocolError(vox_types::ProtocolError {
+                            description: &description,
+                        }),
+                    },
+                    None,
+                    None,
+                );
+                if self.resource_limits.is_some() {
+                    let _ = vox_types::time::tokio::timeout(Duration::from_secs(1), send).await;
+                    self.resource_exhausted = true;
+                } else {
+                    let _ = send.await;
+                }
                 self.close_all_connections(ConnectionCloseReason::Protocol);
                 false
             }
@@ -4217,6 +4220,36 @@ mod tests {
             .expect("blocked worker must release its conduit")
             .unwrap();
         assert!(retained_core.inner.lock().unwrap().tx.is_none());
+
+        let (_open_tx, open_rx) = mpsc::channel("test.open.protocol_stalled", 1);
+        let (_close_tx, close_rx) = mpsc::channel("test.close.protocol_stalled", 1);
+        let (control_tx, control_rx) = mpsc::unbounded_channel("test.control.protocol_stalled");
+        let (dropped_tx, dropped_rx) = oneshot::channel("test.protocol_stalled_tx.dropped");
+        let mut connection = Connection::pre_handshake(
+            StalledTx(Some(dropped_tx)),
+            PendingRx,
+            None,
+            open_rx,
+            close_rx,
+            control_tx.clone(),
+            control_rx,
+            None,
+            None,
+        );
+        connection.resource_limits = Some(hardened_test_limits());
+        control_tx
+            .send(DropControlRequest::ProtocolClose {
+                conn_id: LaneId(2),
+                description: "peer exceeded request limit".into(),
+            })
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), connection.run())
+            .await
+            .expect("protocol close must stop when the peer does not read");
+        tokio::time::timeout(Duration::from_secs(2), dropped_rx)
+            .await
+            .expect("blocked protocol-error send must release its conduit")
+            .unwrap();
     }
 
     #[tokio::test]

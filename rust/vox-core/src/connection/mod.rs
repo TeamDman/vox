@@ -1659,9 +1659,15 @@ impl Connection {
                         Ok(Some(msg)) => {
                             // Capture the frame's descriptors before the next
                             // recv overwrites them; thread them with the msg.
+                            #[cfg(unix)]
                             let fds = self.rx.take_frame_fds();
+                            #[cfg(not(unix))]
+                            self.rx.take_frame_fds();
                             let limits = self.resource_limits;
+                            #[cfg(unix)]
                             let processing = self.handle_message(msg, fds, &mut keepalive_runtime);
+                            #[cfg(not(unix))]
+                            let processing = self.handle_message(msg, (), &mut keepalive_runtime);
                             if let Some(limits) = limits {
                                 if vox_types::time::tokio::timeout(
                                     limits.max_message_processing_time,

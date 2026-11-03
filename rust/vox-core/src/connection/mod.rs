@@ -2953,6 +2953,7 @@ struct OutboundBatch {
     conn_id: LaneId,
     request_id: Option<RequestId>,
     outgoing_call: Option<(RequestId, vox_types::MethodId)>,
+    incoming_response: Option<(RequestId, vox_types::MethodId)>,
     payload_kind: &'static str,
     conn_state: Arc<std::sync::Mutex<SendConnState>>,
     tx: Arc<dyn DynConduitTx>,
@@ -2983,6 +2984,15 @@ async fn run_outbound_worker(mut rx: mpsc::Receiver<OutboundBatch>) {
                 .expect("send conn state mutex poisoned")
                 .inflight_outgoing
                 .insert(request_id, method_id);
+        }
+        if let Some((request_id, method_id)) = batch.incoming_response {
+            let mut state = batch
+                .conn_state
+                .lock()
+                .expect("send conn state mutex poisoned");
+            if state.inflight_incoming.get(&request_id) == Some(&method_id) {
+                state.inflight_incoming.remove(&request_id);
+            }
         }
         trace!(
             conn_id = %batch.conn_id,
@@ -3277,6 +3287,7 @@ impl ConnectionCore {
         extra_schema_sends: Vec<PendingSchemaSend>,
     ) -> Result<PreparedOutboundBatch, PrepareOutboundError> {
         let conn_id = msg.lane_id;
+        let mut incoming_response = None;
         let outgoing_call = match &msg.payload {
             MessagePayload::RequestMessage(RequestMessage {
                 id,
@@ -3350,16 +3361,18 @@ impl ConnectionCore {
                         }
                         RequestBody::Response(resp) => {
                             if let Some(method_id) =
-                                conn_state_guard.inflight_incoming.remove(&req.id)
-                                && let Some(schema_send) = Self::plan_response_schema_send(
+                                conn_state_guard.inflight_incoming.get(&req.id).copied()
+                            {
+                                incoming_response = Some((req.id, method_id));
+                                if let Some(schema_send) = Self::plan_response_schema_send(
                                     &mut conn_state_guard,
                                     req.id,
                                     method_id,
                                     resp,
                                     forwarded_schemas,
-                                )
-                            {
-                                schema_sends.push(schema_send);
+                                ) {
+                                    schema_sends.push(schema_send);
+                                }
                             }
                             resp.schemas = Default::default();
                         }
@@ -3453,6 +3466,7 @@ impl ConnectionCore {
                 conn_id,
                 request_id,
                 outgoing_call,
+                incoming_response,
                 payload_kind,
                 conn_state,
                 tx,
@@ -4873,6 +4887,68 @@ mod tests {
         assert_eq!(
             core.take_outgoing_call_method(lane.sender.lane_id(), request_id),
             Some(method_id)
+        );
+        connection.outbound_abort.abort();
+    }
+
+    #[tokio::test]
+    async fn prepared_response_keeps_binding_until_worker_accepts_it() {
+        let (connection, lane) = make_capturing_connection(Arc::new(Mutex::new(Vec::new())));
+        let core = connection.connection_core.clone();
+        let lane_id = lane.sender.lane_id();
+        let request_id = RequestId(77);
+        let method_id = vox_types::MethodId(9);
+        core.record_incoming_call(lane_id, request_id, method_id);
+        let ret: Result<u32, vox_types::VoxError<core::convert::Infallible>> = Ok(7);
+        let prepare = || {
+            core.prepare_outbound_batch(
+                Message {
+                    lane_id,
+                    payload: MessagePayload::RequestMessage(RequestMessage {
+                        id: request_id,
+                        body: RequestBody::Response(RequestResponse {
+                            metadata: Metadata::default(),
+                            ret: vox_types::Payload::outgoing(&ret),
+                            schemas: Default::default(),
+                        }),
+                    }),
+                },
+                None,
+                None,
+                None,
+                Vec::new(),
+            )
+            .ok()
+            .expect("prepare response")
+        };
+        let state = core
+            .inner
+            .lock()
+            .unwrap()
+            .conns
+            .get(&lane_id)
+            .unwrap()
+            .clone();
+        let abandoned = prepare();
+        drop(abandoned);
+        assert_eq!(
+            state.lock().unwrap().inflight_incoming.get(&request_id),
+            Some(&method_id)
+        );
+        let (batch, result, gates) = prepare();
+        assert!(gates.is_empty());
+        assert_eq!(
+            state.lock().unwrap().inflight_incoming.get(&request_id),
+            Some(&method_id)
+        );
+        assert!(core.outbound_tx.send(batch).await.is_ok());
+        result.await.unwrap().unwrap();
+        assert!(
+            !state
+                .lock()
+                .unwrap()
+                .inflight_incoming
+                .contains_key(&request_id)
         );
         connection.outbound_abort.abort();
     }

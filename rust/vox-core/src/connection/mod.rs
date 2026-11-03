@@ -1456,12 +1456,17 @@ impl Connection {
         Rx: ConduitRx<Msg = MessageFamily> + MaybeSend + 'static,
     {
         let (outbound_tx, outbound_rx) = mpsc::channel("connection.outbound", 256);
+        let (admission_stopped_tx, admission_stopped_rx) = watch::channel(false);
         let connection_core = Arc::new(ConnectionCore {
             inner: std::sync::Mutex::new(ConnectionCoreInner {
                 tx: Some(Arc::new(tx) as Arc<dyn DynConduitTx>),
                 conns: HashMap::new(),
             }),
             outbound_tx,
+            admission: vox_rt::sync::Mutex::new("connection.outbound_admission", false),
+            admission_stopped: std::sync::atomic::AtomicBool::new(false),
+            admission_stopped_tx,
+            admission_stopped_rx,
             observer: observer.clone(),
             channel_gates: std::sync::Mutex::new(HashMap::new()),
         });
@@ -1741,6 +1746,21 @@ impl Connection {
                     control_rx_closed = true;
                 }
             }
+        }
+
+        // Partial gate for every terminal path, including observed EOF and
+        // protocol failures. A later integration must carry one absolute
+        // shutdown deadline through admission, drain and transport close.
+        if !self.connection_core.admission_is_stopped()
+            && vox_types::time::tokio::timeout(
+                Duration::from_secs(1),
+                self.connection_core.stop_outbound_admission(),
+            )
+            .await
+            .is_err()
+        {
+            self.connection_core.force_stop_admission();
+            self.outbound_abort.abort();
         }
 
         if self.resource_exhausted {
@@ -2696,6 +2716,18 @@ impl Connection {
         match req {
             DropControlRequest::Shutdown => {
                 trace!("connection shutdown requested");
+                // Partial shutdown gate: close admission promptly. Connection
+                // drain, protocol close and transport teardown remain separate.
+                if vox_types::time::tokio::timeout(
+                    Duration::from_secs(1),
+                    self.connection_core.stop_outbound_admission(),
+                )
+                .await
+                .is_err()
+                {
+                    self.connection_core.force_stop_admission();
+                    self.outbound_abort.abort();
+                }
                 false
             }
             DropControlRequest::ResourceClose => {
@@ -2880,6 +2912,10 @@ struct ChannelGate {
 pub(crate) struct ConnectionCore {
     inner: std::sync::Mutex<ConnectionCoreInner>,
     outbound_tx: mpsc::Sender<OutboundBatch>,
+    admission: vox_rt::sync::Mutex<bool>,
+    admission_stopped: std::sync::atomic::AtomicBool,
+    admission_stopped_tx: watch::Sender<bool>,
+    admission_stopped_rx: watch::Receiver<bool>,
     observer: Option<VoxObserverHandle>,
     /// Open gates for channels the local side opened but whose declaring Call has not
     /// yet been enqueued. Keyed by channel id; entries removed when opened.
@@ -3109,6 +3145,35 @@ fn gated_channel_id(msg: &Message<'_>) -> Option<vox_types::ChannelId> {
 }
 
 impl ConnectionCore {
+    fn admission_is_stopped(&self) -> bool {
+        self.admission_stopped
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn force_stop_admission(&self) {
+        self.admission_stopped
+            .store(true, std::sync::atomic::Ordering::Release);
+        let _ = self.admission_stopped_tx.send(true);
+    }
+
+    async fn wait_admission_stopped(&self) {
+        let mut stopped = self.admission_stopped_rx.clone();
+        if *stopped.borrow() {
+            return;
+        }
+        while stopped.changed().await.is_ok() {
+            if *stopped.borrow() {
+                return;
+            }
+        }
+    }
+
+    async fn stop_outbound_admission(&self) {
+        let mut closed = self.admission.lock().await;
+        *closed = true;
+        self.force_stop_admission();
+    }
+
     pub(crate) fn outbound_queue_stats(&self) -> (usize, usize) {
         let capacity = self.outbound_tx.max_capacity();
         let available = self.outbound_tx.capacity();
@@ -3397,10 +3462,20 @@ impl ConnectionCore {
         declared_channels: impl FnOnce(&[vox_types::ChannelId]),
     ) -> Result<(), ()> {
         let lane_id = msg.lane_id;
+        if self.admission_is_stopped() {
+            declared_channels(&[]);
+            return Err(());
+        }
         // r[impl rpc.channel.item] Hold an outbound channel item/close until the Call
         // that opened its channel has been enqueued — the sender upholds frame order.
         if let Some(channel_id) = gated_channel_id(&msg) {
-            self.await_channel_gate(channel_id).await;
+            let gate = self.await_channel_gate(channel_id).fuse();
+            let stopped = self.wait_admission_stopped().fuse();
+            futures_util::pin_mut!(gate, stopped);
+            futures_util::select_biased! {
+                () = stopped => { declared_channels(&[]); return Err(()); },
+                () = gate => {},
+            }
         }
         let (batch, result_rx, gated_channels) = match self.prepare_outbound_batch(
             msg,
@@ -3417,7 +3492,28 @@ impl ConnectionCore {
             }
         };
         declared_channels(&gated_channels);
-        let queued = self.outbound_tx.send(batch).await;
+        let queued = async {
+            let reserve = self.outbound_tx.clone().reserve_owned().fuse();
+            let stopped = self.wait_admission_stopped().fuse();
+            futures_util::pin_mut!(reserve, stopped);
+            let permit = futures_util::select_biased! {
+                () = stopped => return Err(()),
+                permit = reserve => permit.map_err(|_| ())?,
+            };
+            let admission = self.admission.lock().fuse();
+            let stopped = self.wait_admission_stopped().fuse();
+            futures_util::pin_mut!(admission, stopped);
+            let guard = futures_util::select_biased! {
+                () = stopped => return Err(()),
+                guard = admission => guard,
+            };
+            if *guard || self.admission_is_stopped() {
+                return Err(());
+            }
+            drop(permit.send(batch));
+            Ok::<(), ()>(())
+        }
+        .await;
         // This Call is now on the queue (or the queue is gone): release its channels'
         // gates so parked items follow it — unconditionally, so a failed enqueue never
         // strands a parked `tx.send`.
@@ -3459,6 +3555,9 @@ impl ConnectionCore {
         extra_schema_sends: Vec<PendingSchemaSend>,
     ) -> Result<(), TrySendError<()>> {
         let lane_id = msg.lane_id;
+        if self.admission_is_stopped() {
+            return Err(TrySendError::Closed(()));
+        }
         // r[impl rpc.channel.item] A channel item whose declaring Call hasn't been
         // enqueued yet can't go out (frame order); signal backpressure so the caller
         // retries — the async `send` path parks instead.
@@ -3480,6 +3579,22 @@ impl ConnectionCore {
                 return Err(TrySendError::Closed(()));
             }
         };
+        let guard = match self.admission.try_lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                self.open_channel_gates(&gated_channels);
+                return Err(if self.admission_is_stopped() {
+                    TrySendError::Closed(())
+                } else {
+                    TrySendError::Full(())
+                });
+            }
+        };
+        if *guard || self.admission_is_stopped() {
+            drop(guard);
+            self.open_channel_gates(&gated_channels);
+            return Err(TrySendError::Closed(()));
+        }
         let result = self.outbound_tx.try_send(batch).map_err(|err| match err {
             mpsc::error::TrySendError::Full(_) => {
                 if let Some(observer) = &self.observer {
@@ -3494,6 +3609,7 @@ impl ConnectionCore {
                 TrySendError::Closed(())
             }
         });
+        drop(guard);
         // Release this Call's channel gates now that it's been handed to the queue.
         self.open_channel_gates(&gated_channels);
         result
@@ -4221,7 +4337,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "diagnostic: a retained lane can currently send after shutdown"]
     async fn retained_lane_cannot_send_after_explicit_shutdown() {
         let sent = Arc::new(Mutex::new(Vec::new()));
         let (mut connection, _control) = make_capturing_connection(sent.clone());
@@ -4254,11 +4369,200 @@ mod tests {
             .await
             .unwrap();
         outcome.expect_err("retained lane accepted an outbound message after shutdown");
+        let late = vox_types::ChannelMessage {
+            id: vox_types::ChannelId(1),
+            body: vox_types::ChannelBody::Close(vox_types::ChannelClose {
+                metadata: Metadata::default(),
+            }),
+        };
+        assert!(matches!(
+            sender.try_send_channel_with_writer_schema(late, None),
+            Err(TrySendError::Closed(()))
+        ));
         assert_eq!(sent.lock().unwrap().len(), count_before);
     }
 
     #[tokio::test]
-    #[ignore = "diagnostic: shutdown currently leaves capacity-blocked producers waiting"]
+    async fn shutdown_wakes_producer_waiting_for_channel_gate() {
+        let (mut connection, lane) = make_capturing_connection(Arc::new(Mutex::new(Vec::new())));
+        let sender = lane.sender.clone();
+        let channel_id = vox_types::ChannelId(3);
+        connection.connection_core.register_channel_gate(channel_id);
+        let message = ConnectionMessage::Channel(vox_types::ChannelMessage {
+            id: channel_id,
+            body: vox_types::ChannelBody::Close(vox_types::ChannelClose {
+                metadata: Metadata::default(),
+            }),
+        });
+        let mut blocked = tokio::spawn(async move { sender.send(message).await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut blocked)
+                .await
+                .is_err()
+        );
+        connection
+            .control_tx
+            .send(DropControlRequest::Shutdown)
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), connection.run())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), blocked)
+            .await
+            .unwrap()
+            .unwrap()
+            .expect_err("shutdown allowed a gate-blocked send to succeed");
+    }
+
+    #[tokio::test]
+    async fn admission_cutoff_rejects_a_reserved_but_not_admitted_batch() {
+        let (connection, lane) = make_capturing_connection(Arc::new(Mutex::new(Vec::new())));
+        let sender = lane.sender.clone();
+        let core = connection.connection_core.clone();
+        let guard = core.admission.lock().await;
+        let mut stop = Box::pin(core.stop_outbound_admission());
+        assert!(matches!(
+            futures_util::poll!(&mut stop),
+            std::task::Poll::Pending
+        ));
+        let message = ConnectionMessage::Channel(vox_types::ChannelMessage {
+            id: vox_types::ChannelId(1),
+            body: vox_types::ChannelBody::Close(vox_types::ChannelClose {
+                metadata: Metadata::default(),
+            }),
+        });
+        let mut send = Box::pin(sender.send(message));
+        assert!(matches!(
+            futures_util::poll!(&mut send),
+            std::task::Poll::Pending
+        ));
+        drop(guard);
+        stop.await;
+        send.await
+            .expect_err("a batch reserved before cutoff but not admitted must fail");
+        connection.outbound_abort.abort();
+    }
+
+    #[tokio::test]
+    async fn admission_cutoff_preserves_batch_admitted_before_it() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let (connection, lane) = make_capturing_connection(sent.clone());
+        let sender = lane.sender.clone();
+        let core = connection.connection_core.clone();
+        let guard = core.admission.lock().await;
+        let message = ConnectionMessage::Channel(vox_types::ChannelMessage {
+            id: vox_types::ChannelId(1),
+            body: vox_types::ChannelBody::Close(vox_types::ChannelClose {
+                metadata: Metadata::default(),
+            }),
+        });
+        let mut send = Box::pin(sender.send(message));
+        assert!(matches!(
+            futures_util::poll!(&mut send),
+            std::task::Poll::Pending
+        ));
+        let mut stop = Box::pin(core.stop_outbound_admission());
+        assert!(matches!(
+            futures_util::poll!(&mut stop),
+            std::task::Poll::Pending
+        ));
+        drop(guard);
+        let (sent_result, ()) = tokio::join!(send, stop);
+        sent_result
+            .expect("batch admitted before cutoff must complete when the transport succeeds");
+        assert_eq!(sent.lock().unwrap().len(), 1);
+        connection.outbound_abort.abort();
+    }
+
+    #[tokio::test]
+    async fn admission_timeout_rejects_waiters_without_waiting_for_the_lock() {
+        let (mut connection, lane) = make_capturing_connection(Arc::new(Mutex::new(Vec::new())));
+        let sender = lane.sender.clone();
+        let core = connection.connection_core.clone();
+        let held = core.admission.lock().await;
+        let message = ConnectionMessage::Channel(vox_types::ChannelMessage {
+            id: vox_types::ChannelId(1),
+            body: vox_types::ChannelBody::Close(vox_types::ChannelClose {
+                metadata: Metadata::default(),
+            }),
+        });
+        let mut send = Box::pin(sender.send(message));
+        assert!(matches!(
+            futures_util::poll!(&mut send),
+            std::task::Poll::Pending
+        ));
+        connection
+            .control_tx
+            .send(DropControlRequest::Shutdown)
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), connection.run())
+            .await
+            .unwrap();
+        assert!(core.admission_is_stopped());
+        tokio::time::timeout(Duration::from_secs(1), &mut send)
+            .await
+            .unwrap()
+            .expect_err("waiter must fail without acquiring the held admission lock");
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn observed_eof_stops_outbound_admission() {
+        struct EofRx;
+        impl ConduitRx for EofRx {
+            type Error = std::io::Error;
+            type Msg = MessageFamily;
+            async fn recv(&mut self) -> Result<Option<SelfRef<Message<'static>>>, Self::Error> {
+                Ok(None)
+            }
+        }
+        let (_open_tx, open_rx) = mpsc::channel("eof_admission.open", 1);
+        let (_close_tx, close_rx) = mpsc::channel("eof_admission.close", 1);
+        let (control_tx, control_rx) = mpsc::unbounded_channel("eof_admission.control");
+        let mut connection = Connection::pre_handshake(
+            CapturingTx {
+                sent: Arc::new(Mutex::new(Vec::new())),
+            },
+            EofRx,
+            None,
+            open_rx,
+            close_rx,
+            control_tx,
+            control_rx,
+            None,
+            None,
+        );
+        let lane = connection
+            .establish_from_handshake(test_handshake(
+                ConnectionSettings {
+                    parity: Parity::Odd,
+                    max_concurrent_requests: 1,
+                    initial_channel_credit: 1,
+                },
+                ConnectionSettings {
+                    parity: Parity::Even,
+                    max_concurrent_requests: 1,
+                    initial_channel_credit: 1,
+                },
+            ))
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), connection.run())
+            .await
+            .unwrap();
+        let message = ConnectionMessage::Channel(vox_types::ChannelMessage {
+            id: vox_types::ChannelId(1),
+            body: vox_types::ChannelBody::Close(vox_types::ChannelClose {
+                metadata: Metadata::default(),
+            }),
+        });
+        lane.sender
+            .send(message)
+            .await
+            .expect_err("observed EOF must reject new sends");
+        connection.outbound_abort.abort();
+    }
+
+    #[tokio::test]
     async fn shutdown_wakes_producer_waiting_for_outbound_capacity() {
         struct StalledTx(Mutex<Option<oneshot::Sender<()>>>);
         impl ConduitTx for StalledTx {

@@ -65,6 +65,9 @@ pub trait ConduitTx {
     async fn close(self) -> std::io::Result<()>
     where
         Self: Sized;
+
+    /// Abort outbound work without waiting for a graceful flush, if supported.
+    fn abort(&self) {}
 }
 
 /// Receiving half of a [`Conduit`].

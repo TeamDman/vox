@@ -71,6 +71,10 @@ pub trait LinkTx: MaybeSend + MaybeSync + 'static {
     where
         Self: Sized;
 
+    /// Abort outbound work without waiting for a graceful flush, if supported.
+    /// The default does nothing; transports may retain their own tasks after it.
+    fn abort(&self) {}
+
     /// Whether this transport can carry file descriptors (`SCM_RIGHTS` over a
     /// Unix-domain socket). Only such links may carry [`Fd`](crate::fd::Fd)
     /// values; everything else (TCP, WebSocket, wasm) returns `false` and the

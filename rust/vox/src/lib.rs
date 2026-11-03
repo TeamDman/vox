@@ -266,9 +266,10 @@ pub use vox_core::{acceptor_on_link, initiator_on_link};
 #[cfg(feature = "runtime")]
 pub use vox_core::{
     AnonymousIdentityResolver, Connection, ConnectionConfig, ConnectionError, ConnectionHandle,
-    ConnectionKeepaliveConfig, IdentityResolver, IdentityResolverFn, LaneHandle, LaneRejectReason,
-    LaneRejection, LaneRequest, LaneState, PendingLane, VOX_LANE_REJECT_MESSAGE_METADATA_KEY,
-    VOX_LANE_REJECT_REASON_METADATA_KEY, identity_resolver_fn,
+    ConnectionKeepaliveConfig, ConnectionResourceLimits, IdentityResolver, IdentityResolverFn,
+    LaneHandle, LaneRejectReason, LaneRejection, LaneRequest, LaneState, PendingLane,
+    VOX_LANE_REJECT_MESSAGE_METADATA_KEY, VOX_LANE_REJECT_REASON_METADATA_KEY,
+    identity_resolver_fn,
 };
 
 // Connection acceptor

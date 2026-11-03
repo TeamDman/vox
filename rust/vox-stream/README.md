@@ -75,9 +75,15 @@ setting; this Rust **receive-only** policy does not cap Rust's outgoing frames.
 Outbound encoding still checks the independent `u32` prefix ceiling. Raising a
 bound deliberately increases memory exposure.
 
-This is a per-frame bound, not a per-process or per-connection byte budget: the
-existing queue can retain 128 received frames, plus a frame being read and frames
-held by consumers. It does not impose read deadlines or application upload quotas.
+This is a per-frame bound, not a per-process or per-connection byte budget. The
+receive queue defaults to 128 frames; before splitting, use
+`.receive_queue_capacity(NonZeroUsize::new(n).unwrap())` to choose a smaller
+capacity. `TcpLinkSource` applies the same setting on reconnects. The queue and
+reader may retain at most `n + 1` frame payloads, including the frame being read
+while the queue is full. At a configured frame limit `F`, that is at most
+`(n + 1) * F` payload bytes in this part of the transport, excluding allocation
+overhead, a consumer-held frame, Vox queues, decoding and application data.
+The limit does not impose read deadlines or application upload quotas.
 `FdStreamLink`/Unix `LocalLink` use separate descriptor-capable framing and are not
 covered by this fix; their accumulator and descriptor-count bounds remain separate
 work. WebSocket/tungstenite and browser transports have their own framing rules.

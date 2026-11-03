@@ -482,6 +482,7 @@ struct DriverShared {
     local_initial_channel_credit: u32,
     // r[impl rpc.flow-control.credit.initial]
     peer_initial_channel_credit: u32,
+    max_peer_channel_credit: Option<u32>,
     // r[impl rpc.flow-control.max-concurrent-requests.outbound]
     outbound_request_limit: Semaphore,
     // r[impl rpc.flow-control.max-concurrent-requests.inbound]
@@ -2408,6 +2409,7 @@ impl<H: Handler<DriverReplySink>> Driver<H> {
             closed_rx,
             local_settings,
             peer_settings,
+            max_peer_channel_credit,
             parity,
             observer,
             peer_identity,
@@ -2447,6 +2449,7 @@ impl<H: Handler<DriverReplySink>> Driver<H> {
                 channel_schema_roles: SyncMutex::new("driver.channel_schema_roles", HashMap::new()),
                 local_initial_channel_credit: local_settings.initial_channel_credit,
                 peer_initial_channel_credit: peer_settings.initial_channel_credit,
+                max_peer_channel_credit,
                 outbound_request_limit: Semaphore::new(
                     "driver.outbound_request_limit",
                     peer_settings.max_concurrent_requests as usize,
@@ -3185,6 +3188,15 @@ impl<H: Handler<DriverReplySink>> Driver<H> {
                     "driver received channel credit"
                 );
                 if let Some(semaphore) = self.shared.channel_credits.lock().get(&chan_id) {
+                    if let Some(max) = self.shared.max_peer_channel_credit
+                        && (additional as usize
+                            > (max as usize).saturating_sub(semaphore.available_permits()))
+                    {
+                        if let Some(control_tx) = &self.drop_control_seed {
+                            let _ = control_tx.send(DropControlRequest::ResourceClose);
+                        }
+                        return;
+                    }
                     semaphore.add_permits(additional as usize);
                 }
             }

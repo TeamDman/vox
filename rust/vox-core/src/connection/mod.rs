@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     future::Future,
     pin::Pin,
     sync::{Arc, Mutex},
@@ -32,6 +32,37 @@ pub use builders::*;
 pub struct ConnectionKeepaliveConfig {
     pub ping_interval: Duration,
     pub pong_timeout: Duration,
+}
+
+/// Opt-in per-connection resource ceilings for untrusted peers.
+///
+/// Lane-open, peer-call, channel-ID, and schema budgets are lifetime quotas: exceeding a
+/// quota closes the connection. Reconnect to obtain a fresh
+/// budget. These limits do not constrain the transport, decoder, application
+/// allocations, or locally initiated work; configure those independently.
+#[derive(Debug, Clone, Copy)]
+pub struct ConnectionResourceLimits {
+    /// Simultaneously active or pending service lanes (control lane excluded).
+    pub max_service_lanes: usize,
+    /// Total peer lane-open attempts over this connection's lifetime.
+    pub max_peer_lane_opens: usize,
+    /// Maximum locally advertised concurrent requests on an incoming lane.
+    pub max_inbound_requests_per_lane: u32,
+    /// Maximum locally advertised initial per-channel credit.
+    pub max_initial_channel_credit: u32,
+    /// Largest peer initial credit and, for Driver lanes, available credit
+    /// after a grant. Raw and proxy lane consumers must enforce grants themselves.
+    pub max_peer_channel_credit: u32,
+    /// Maximum peer-advertised concurrent request limit accepted.
+    pub max_peer_concurrent_requests: u32,
+    /// Total peer call messages accepted over one lane's lifetime.
+    pub max_peer_calls_per_lane: usize,
+    /// Distinct peer-supplied channel IDs over one lane's lifetime.
+    pub max_peer_channel_ids_per_lane: usize,
+    /// Schema messages or inline schemas accepted over one lane's lifetime.
+    pub max_schemas_per_lane: usize,
+    /// Sum of bytes in those schemas, counting replacements again.
+    pub max_schema_bytes_per_lane: usize,
 }
 
 pub const VOX_LANE_REJECT_REASON_METADATA_KEY: &str = "vox-lane-reject-reason";
@@ -497,6 +528,7 @@ struct CloseRequest {
 #[derive(Debug, Clone)]
 pub(crate) enum DropControlRequest {
     Shutdown,
+    ResourceClose,
     Close(LaneId),
     ProtocolClose {
         conn_id: LaneId,
@@ -694,6 +726,10 @@ pub struct Connection {
     peer_connection_settings: Option<ConnectionSettings>,
     peer_identity: PeerIdentity,
     peer_evidence: PeerEvidence,
+    resource_limits: Option<ConnectionResourceLimits>,
+    peer_lane_opens: usize,
+    resource_exhausted: bool,
+    outbound_abort: futures_util::future::AbortHandle,
 
     /// Service lane state (active, pending inbound, pending outbound).
     conns: BTreeMap<LaneId, ConnectionSlot>,
@@ -749,6 +785,10 @@ pub struct LaneState {
     /// Per-lane schema recv tracker.
     schema_recv_tracker: Arc<vox_types::SchemaRecvTracker>,
     lane_grant: Arc<Mutex<LaneGrant>>,
+    peer_channel_ids: HashSet<vox_types::ChannelId>,
+    received_schema_count: usize,
+    received_schema_bytes: usize,
+    peer_calls: usize,
 }
 
 #[derive(Debug)]
@@ -1060,6 +1100,7 @@ pub struct LaneHandle {
     pub(crate) closed_rx: watch::Receiver<Option<ConnectionCloseReason>>,
     pub(crate) local_settings: ConnectionSettings,
     pub(crate) peer_settings: ConnectionSettings,
+    pub(crate) max_peer_channel_credit: Option<u32>,
     /// The parity this side should use for allocating request/channel IDs.
     pub parity: Parity,
     pub(crate) observer: Option<VoxObserverHandle>,
@@ -1210,6 +1251,7 @@ pub async fn proxy_lanes(left: LaneHandle, right: LaneHandle) -> Result<(), Conn
         closed_rx: _left_closed_rx,
         local_settings: _left_local_settings,
         peer_settings: _left_peer_settings,
+        max_peer_channel_credit: _left_max_peer_channel_credit,
         parity: _left_parity,
         observer: _left_observer,
         peer_identity: _left_peer_identity,
@@ -1225,6 +1267,7 @@ pub async fn proxy_lanes(left: LaneHandle, right: LaneHandle) -> Result<(), Conn
         closed_rx: _right_closed_rx,
         local_settings: _right_local_settings,
         peer_settings: _right_peer_settings,
+        max_peer_channel_credit: _right_max_peer_channel_credit,
         parity: _right_parity,
         observer: _right_observer,
         peer_identity: _right_peer_identity,
@@ -1412,14 +1455,14 @@ impl Connection {
         let (outbound_tx, outbound_rx) = mpsc::channel("connection.outbound", 256);
         let connection_core = Arc::new(ConnectionCore {
             inner: std::sync::Mutex::new(ConnectionCoreInner {
-                tx: Arc::new(tx) as Arc<dyn DynConduitTx>,
+                tx: Some(Arc::new(tx) as Arc<dyn DynConduitTx>),
                 conns: HashMap::new(),
             }),
             outbound_tx,
             observer: observer.clone(),
             channel_gates: std::sync::Mutex::new(HashMap::new()),
         });
-        spawn_outbound_worker(outbound_rx);
+        let outbound_abort = spawn_outbound_worker(outbound_rx);
         Connection {
             rx: Box::new(rx),
             role: ConnectionRole::Initiator, // overwritten in establish_as_*
@@ -1433,6 +1476,10 @@ impl Connection {
             peer_connection_settings: None,
             peer_identity: PeerIdentity::anonymous(),
             peer_evidence: PeerEvidence::none(),
+            resource_limits: None,
+            peer_lane_opens: 0,
+            resource_exhausted: false,
+            outbound_abort,
             conns: BTreeMap::new(),
             conn_ids: IdAllocator::new(Parity::Odd), // overwritten in establish_as_*
             lane_acceptor,
@@ -1503,6 +1550,10 @@ impl Connection {
                 closed_tx,
                 schema_recv_tracker: Arc::new(vox_types::SchemaRecvTracker::new()),
                 lane_grant: Arc::clone(&lane_grant_state),
+                peer_channel_ids: HashSet::new(),
+                received_schema_count: 0,
+                received_schema_bytes: 0,
+                peer_calls: 0,
             }),
         );
 
@@ -1514,6 +1565,9 @@ impl Connection {
             closed_rx,
             local_settings: handle_local_settings,
             peer_settings: handle_peer_settings,
+            max_peer_channel_credit: self
+                .resource_limits
+                .map(|limits| limits.max_peer_channel_credit),
             parity,
             observer: self.observer.clone(),
             peer_identity: self.peer_identity.clone(),
@@ -1587,10 +1641,10 @@ impl Connection {
                 .fuse();
                 futures_util::pin_mut!(msg, open, close, control, keepalive);
                 futures_util::select_biased! {
+                    req = control => RunEvent::Control(req),
                     msg = msg => RunEvent::Message(msg),
                     req = open => RunEvent::Open(req),
                     req = close => RunEvent::Close(req),
-                    req = control => RunEvent::Control(req),
                     () = keepalive => RunEvent::Keepalive,
                 }
             };
@@ -1610,6 +1664,10 @@ impl Connection {
                             self.handle_message(msg, fds, &mut keepalive_runtime).await;
                             #[cfg(not(unix))]
                             self.handle_message(msg, (), &mut keepalive_runtime).await;
+                            if self.resource_exhausted {
+                                self.close_all_connections(ConnectionCloseReason::Local);
+                                break;
+                            }
                         }
                         Ok(None) => {
                             vox_types::dlog!(
@@ -1668,6 +1726,20 @@ impl Connection {
             }
         }
 
+        if self.resource_exhausted {
+            self.outbound_abort.abort();
+            let mut inner = self
+                .connection_core
+                .inner
+                .lock()
+                .expect("connection core mutex poisoned");
+            inner.conns.clear();
+            let tx = inner.tx.take();
+            drop(inner);
+            if let Some(tx) = tx {
+                tx.abort();
+            }
+        }
         // Drop all lane slots so per-lane drivers exit immediately.
         self.close_all_connections(ConnectionCloseReason::ConnectionShutdown);
         trace!("connection recv loop exited");
@@ -1681,8 +1753,75 @@ impl Connection {
     ) {
         let msg_ref = msg.get();
         let conn_id = msg_ref.lane_id;
+        if let Some(limits) = self.resource_limits
+            && let Some(ConnectionSlot::Active(state)) = self.conns.get_mut(&conn_id)
+        {
+            if matches!(&msg_ref.payload,
+                MessagePayload::RequestMessage(request) if matches!(&request.body, RequestBody::Call(_)))
+            {
+                if state.peer_calls >= limits.max_peer_calls_per_lane {
+                    self.resource_exhausted = true;
+                    return;
+                }
+                state.peer_calls += 1;
+            }
+            if let MessagePayload::ChannelMessage(channel) = &msg_ref.payload
+                && let vox_types::ChannelBody::GrantCredit(grant) = &channel.body
+                && grant.additional > limits.max_peer_channel_credit
+            {
+                self.resource_exhausted = true;
+                return;
+            }
+            let ids: &[vox_types::ChannelId] = match &msg_ref.payload {
+                MessagePayload::RequestMessage(request) => match &request.body {
+                    RequestBody::Call(call) => &call.channels,
+                    _ => &[],
+                },
+                MessagePayload::ChannelMessage(channel) => std::slice::from_ref(&channel.id),
+                _ => &[],
+            };
+            for id in ids {
+                if !state.peer_channel_ids.contains(id) {
+                    if state.peer_channel_ids.len() >= limits.max_peer_channel_ids_per_lane {
+                        self.resource_exhausted = true;
+                        return;
+                    }
+                    state.peer_channel_ids.insert(*id);
+                }
+            }
+            let schema_len = match &msg_ref.payload {
+                MessagePayload::SchemaMessage(schema) => Some(schema.schemas.0.len()),
+                MessagePayload::RequestMessage(request) => match &request.body {
+                    RequestBody::Call(call) if !call.schemas.is_empty() => {
+                        Some(call.schemas.0.len())
+                    }
+                    RequestBody::Response(response) if !response.schemas.is_empty() => {
+                        Some(response.schemas.0.len())
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(bytes) = schema_len {
+                if state.received_schema_count >= limits.max_schemas_per_lane
+                    || bytes
+                        > limits
+                            .max_schema_bytes_per_lane
+                            .saturating_sub(state.received_schema_bytes)
+                {
+                    self.resource_exhausted = true;
+                    return;
+                }
+                state.received_schema_count += 1;
+                state.received_schema_bytes += bytes;
+            }
+        }
         match &msg_ref.payload {
             MessagePayload::Ping(ping) => {
+                if self.resource_limits.is_some() && !conn_id.is_control() {
+                    self.resource_exhausted = true;
+                    return;
+                }
                 // r[impl connection.keepalive]
                 let _ = self
                     .connection_core
@@ -1758,6 +1897,9 @@ impl Connection {
                 self.handle_inbound_reject(conn_id, reject);
             }
             MessagePayload::RequestMessage(r) => {
+                if !matches!(self.conns.get(&conn_id), Some(ConnectionSlot::Active(_))) {
+                    return;
+                }
                 let r_ref = r.get();
                 vox_types::dlog!(
                     "[connection {:?}] recv request: conn={:?} req={:?} body={} method={:?}",
@@ -1994,10 +2136,70 @@ impl Connection {
             .await;
     }
 
+    // A peer that stops reading must not keep the connection alive forever
+    // after a local limit is hit. The send is attempted before closing.
+    async fn send_resource_reject(
+        &mut self,
+        conn_id: LaneId,
+        reason: LaneRejectReason,
+        message: &'static str,
+    ) {
+        let result = vox_types::time::tokio::timeout(
+            Duration::from_secs(1),
+            Self::send_lane_reject(
+                Arc::clone(&self.connection_core),
+                conn_id,
+                LaneRejection::with_message(reason, message),
+            ),
+        )
+        .await;
+        if result.is_err() {
+            self.resource_exhausted = true;
+        }
+    }
+
     // r[impl lane.open]
     // r[impl lane.wire]
     // r[impl lane.open.result]
+    // r[impl lane.open.wire.rejection]
+    // r[impl lane.open.settings]
     async fn handle_inbound_open(&mut self, conn_id: LaneId, open: SelfRef<LaneOpen>) {
+        if let Some(limits) = self.resource_limits {
+            if self.peer_lane_opens >= limits.max_peer_lane_opens {
+                self.resource_exhausted = true;
+                self.send_resource_reject(
+                    conn_id,
+                    LaneRejectReason::NotReady,
+                    "lane open budget exhausted",
+                )
+                .await;
+                return;
+            }
+            self.peer_lane_opens += 1;
+            let service_lanes =
+                self.conns.len() - usize::from(self.conns.contains_key(&LaneId::CONTROL));
+            if service_lanes >= limits.max_service_lanes {
+                self.send_resource_reject(
+                    conn_id,
+                    LaneRejectReason::NotReady,
+                    "service lane limit reached",
+                )
+                .await;
+                return;
+            }
+            let settings = &open.get().connection_settings;
+            if settings.initial_channel_credit > limits.max_peer_channel_credit
+                || settings.max_concurrent_requests > limits.max_peer_concurrent_requests
+            {
+                self.send_resource_reject(
+                    conn_id,
+                    LaneRejectReason::PolicyRejected,
+                    "peer lane settings exceed resource limits",
+                )
+                .await;
+                return;
+            }
+        }
         let establishment_started_at = observe_establishment_started(
             self.observer.as_ref(),
             self.role,
@@ -2105,8 +2307,22 @@ impl Connection {
 
         let our_settings = ConnectionSettings {
             parity: open.connection_settings.parity.other(),
-            max_concurrent_requests: open.connection_settings.max_concurrent_requests,
-            initial_channel_credit: open.connection_settings.initial_channel_credit,
+            max_concurrent_requests: self.resource_limits.map_or(
+                open.connection_settings.max_concurrent_requests,
+                |limits| {
+                    self.local_connection_settings
+                        .max_concurrent_requests
+                        .min(limits.max_inbound_requests_per_lane)
+                },
+            ),
+            initial_channel_credit: self.resource_limits.map_or(
+                open.connection_settings.initial_channel_credit,
+                |limits| {
+                    self.local_connection_settings
+                        .initial_channel_credit
+                        .min(limits.max_initial_channel_credit)
+                },
+            ),
         };
 
         // Create the service lane handle and activate it.
@@ -2246,6 +2462,20 @@ impl Connection {
         let slot = self.remove_connection(&conn_id);
         match slot {
             Some(ConnectionSlot::PendingOutbound(mut pending))
+                if self.resource_limits.is_some_and(|limits| {
+                    accept.connection_settings.initial_channel_credit
+                        > limits.max_peer_channel_credit
+                        || accept.connection_settings.max_concurrent_requests
+                            > limits.max_peer_concurrent_requests
+                }) =>
+            {
+                if let Some(tx) = pending.result_tx.take() {
+                    let _ = tx.send(Err(ConnectionError::Protocol(
+                        "peer lane settings exceed resource limits".into(),
+                    )));
+                }
+            }
+            Some(ConnectionSlot::PendingOutbound(mut pending))
                 if accept.connection_settings.initial_channel_credit == 0 =>
             {
                 observe_establishment_finished(
@@ -2328,6 +2558,19 @@ impl Connection {
     // r[impl lane.open]
     // r[impl lane.wire]
     async fn handle_open_request(&mut self, req: OpenRequest) {
+        if let Some(limits) = self.resource_limits {
+            let service_lanes =
+                self.conns.len() - usize::from(self.conns.contains_key(&LaneId::CONTROL));
+            if service_lanes >= limits.max_service_lanes
+                || req.settings.initial_channel_credit > limits.max_initial_channel_credit
+                || req.settings.max_concurrent_requests > limits.max_inbound_requests_per_lane
+            {
+                let _ = req.result_tx.send(Err(ConnectionError::Protocol(
+                    "local lane settings exceed resource limits".into(),
+                )));
+                return;
+            }
+        }
         if req.settings.initial_channel_credit == 0 {
             let _ = req.result_tx.send(Err(ConnectionError::Protocol(
                 "initial_channel_credit must be greater than zero".into(),
@@ -2436,6 +2679,10 @@ impl Connection {
         match req {
             DropControlRequest::Shutdown => {
                 trace!("connection shutdown requested");
+                false
+            }
+            DropControlRequest::ResourceClose => {
+                self.resource_exhausted = true;
                 false
             }
             DropControlRequest::Close(conn_id) => {
@@ -2752,10 +2999,14 @@ async fn run_outbound_worker(mut rx: mpsc::Receiver<OutboundBatch>) {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn spawn_outbound_worker(rx: mpsc::Receiver<OutboundBatch>) {
+fn spawn_outbound_worker(rx: mpsc::Receiver<OutboundBatch>) -> futures_util::future::AbortHandle {
+    let (abort, registration) = futures_util::future::AbortHandle::new_pair();
+    let worker = async move {
+        let _ = futures_util::future::Abortable::new(run_outbound_worker(rx), registration).await;
+    };
     if tokio::runtime::Handle::try_current().is_ok() {
-        tokio::spawn(run_outbound_worker(rx));
-        return;
+        tokio::spawn(worker);
+        return abort;
     }
 
     std::thread::spawn(move || {
@@ -2763,13 +3014,18 @@ fn spawn_outbound_worker(rx: mpsc::Receiver<OutboundBatch>) {
             .enable_all()
             .build()
             .expect("build outbound worker runtime");
-        runtime.block_on(run_outbound_worker(rx));
+        runtime.block_on(worker);
     });
+    abort
 }
 
 #[cfg(target_arch = "wasm32")]
-fn spawn_outbound_worker(rx: mpsc::Receiver<OutboundBatch>) {
-    wasm_bindgen_futures::spawn_local(run_outbound_worker(rx));
+fn spawn_outbound_worker(rx: mpsc::Receiver<OutboundBatch>) -> futures_util::future::AbortHandle {
+    let (abort, registration) = futures_util::future::AbortHandle::new_pair();
+    wasm_bindgen_futures::spawn_local(async move {
+        let _ = futures_util::future::Abortable::new(run_outbound_worker(rx), registration).await;
+    });
+    abort
 }
 
 struct SendConnState {
@@ -2802,7 +3058,7 @@ impl SendConnState {
 
 struct ConnectionCoreInner {
     /// Underlying conduit (tx end)
-    tx: Arc<dyn DynConduitTx>,
+    tx: Option<Arc<dyn DynConduitTx>>,
 
     /// Per-connection state re: sent schemas, etc.
     conns: HashMap<LaneId, Arc<std::sync::Mutex<SendConnState>>>,
@@ -2947,7 +3203,11 @@ impl ConnectionCore {
         );
         let (tx, conn_state, schema_sends) = {
             let mut inner = self.inner.lock().expect("connection core mutex poisoned");
-            let tx = inner.tx.clone();
+            let Some(tx) = inner.tx.clone() else {
+                return Err(PrepareOutboundError {
+                    gated_channels: Vec::new(),
+                });
+            };
             let conn_state = get_or_create_send_conn_state(&mut inner, conn_id);
             drop(inner);
 
@@ -3484,6 +3744,7 @@ impl ConnectionCore {
 }
 
 pub trait DynConduitTx: MaybeSend + MaybeSync {
+    fn abort(&self) {}
     fn prepare_msg<'a>(
         self: Arc<Self>,
         msg: Message<'a>,
@@ -3504,6 +3765,9 @@ impl<T> DynConduitTx for T
 where
     T: ConduitTx<Msg = MessageFamily> + MaybeSend + MaybeSync + 'static,
 {
+    fn abort(&self) {
+        ConduitTx::abort(self);
+    }
     fn prepare_msg<'a>(
         self: Arc<Self>,
         msg: Message<'a>,
@@ -3783,6 +4047,318 @@ mod tests {
                 metadata: vox_types::Metadata::default(),
             },
         )
+    }
+
+    fn hardened_test_limits() -> ConnectionResourceLimits {
+        ConnectionResourceLimits {
+            max_service_lanes: 1,
+            max_peer_lane_opens: 2,
+            max_inbound_requests_per_lane: 64,
+            max_initial_channel_credit: 16,
+            max_peer_channel_credit: 64,
+            max_peer_concurrent_requests: 64,
+            max_peer_calls_per_lane: 64,
+            max_peer_channel_ids_per_lane: 2,
+            max_schemas_per_lane: 2,
+            max_schema_bytes_per_lane: 4,
+        }
+    }
+
+    fn inbound_open(credit: u32, requests: u32) -> SelfRef<LaneOpen> {
+        SelfRef::owning(
+            Backing::Boxed(Box::default()),
+            LaneOpen {
+                connection_settings: ConnectionSettings {
+                    parity: Parity::Even,
+                    max_concurrent_requests: requests,
+                    initial_channel_credit: credit,
+                },
+                metadata: vox_types::metadata().str("vox-service", "test").build(),
+            },
+        )
+    }
+
+    struct RetainLanes(Arc<Mutex<Vec<LaneHandle>>>);
+    impl LaneAcceptor for RetainLanes {
+        fn accept(&self, _: &LaneRequest, pending: PendingLane) -> Result<(), LaneRejection> {
+            self.0.lock().unwrap().push(pending.into_handle());
+            Ok(())
+        }
+    }
+
+    // r[verify lane.open.wire.rejection]
+    // r[verify lane.open.settings]
+    #[tokio::test]
+    async fn resource_limits_bound_lane_flood_and_use_local_settings() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let (mut connection, _control) = make_capturing_connection(sent.clone());
+        let lanes = Arc::new(Mutex::new(Vec::new()));
+        connection.lane_acceptor = Some(Arc::new(RetainLanes(lanes.clone())));
+        connection.resource_limits = Some(hardened_test_limits());
+        connection.local_connection_settings.initial_channel_credit = 2;
+        connection.local_connection_settings.max_concurrent_requests = 3;
+
+        connection
+            .handle_inbound_open(LaneId(2), inbound_open(32, 40))
+            .await;
+        let guard = lanes.lock().unwrap();
+        assert_eq!(guard.len(), 1);
+        assert_eq!(guard[0].local_settings.initial_channel_credit, 2);
+        assert_eq!(guard[0].local_settings.max_concurrent_requests, 3);
+        drop(guard);
+        connection
+            .handle_inbound_open(LaneId(4), inbound_open(32, 40))
+            .await;
+        assert!(!connection.conns.contains_key(&LaneId(4)));
+        connection.remove_connection_with_reason(&LaneId(2), ConnectionCloseReason::Local);
+        connection
+            .handle_inbound_open(LaneId(6), inbound_open(32, 40))
+            .await;
+        assert!(connection.resource_exhausted);
+        assert!(!connection.conns.contains_key(&LaneId(6)));
+        assert_eq!(sent.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn oversized_peer_lane_settings_are_rejected_before_activation() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let (mut connection, _control) = make_capturing_connection(sent.clone());
+        let lanes = Arc::new(Mutex::new(Vec::new()));
+        connection.lane_acceptor = Some(Arc::new(RetainLanes(lanes.clone())));
+        connection.resource_limits = Some(hardened_test_limits());
+        connection
+            .handle_inbound_open(LaneId(2), inbound_open(u32::MAX, 1))
+            .await;
+        connection
+            .handle_inbound_open(LaneId(4), inbound_open(1, u32::MAX))
+            .await;
+        assert!(lanes.lock().unwrap().is_empty());
+        assert!(!connection.conns.contains_key(&LaneId(2)));
+        assert!(!connection.conns.contains_key(&LaneId(4)));
+        assert_eq!(sent.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn rejected_lane_does_not_wait_forever_for_stalled_peer() {
+        struct StalledTx(Option<oneshot::Sender<()>>);
+        impl Drop for StalledTx {
+            fn drop(&mut self) {
+                if let Some(done) = self.0.take() {
+                    let _ = done.send(());
+                }
+            }
+        }
+        impl ConduitTx for StalledTx {
+            type Error = std::io::Error;
+            type Msg = MessageFamily;
+            type Prepared = ();
+            fn prepare_send(&self, _: Message<'_>) -> Result<(), Self::Error> {
+                Ok(())
+            }
+            async fn send_prepared(&self, _: ()) -> Result<(), Self::Error> {
+                std::future::pending().await
+            }
+            async fn close(self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        struct OpenRx(Option<SelfRef<Message<'static>>>);
+        impl ConduitRx for OpenRx {
+            type Error = std::io::Error;
+            type Msg = MessageFamily;
+            async fn recv(&mut self) -> Result<Option<SelfRef<Message<'static>>>, Self::Error> {
+                if let Some(message) = self.0.take() {
+                    Ok(Some(message))
+                } else {
+                    std::future::pending().await
+                }
+            }
+        }
+        let (_open_tx, open_rx) = mpsc::channel("test.open.stalled", 1);
+        let (_close_tx, close_rx) = mpsc::channel("test.close.stalled", 1);
+        let (control_tx, control_rx) = mpsc::unbounded_channel("test.control.stalled");
+        let (dropped_tx, dropped_rx) = oneshot::channel("test.stalled_tx.dropped");
+        let message = Message {
+            lane_id: LaneId(2),
+            payload: MessagePayload::LaneOpen(LaneOpen {
+                connection_settings: ConnectionSettings {
+                    parity: Parity::Even,
+                    max_concurrent_requests: 1,
+                    initial_channel_credit: 1,
+                },
+                metadata: Metadata::default(),
+            }),
+        };
+        let mut connection = Connection::pre_handshake(
+            StalledTx(Some(dropped_tx)),
+            OpenRx(Some(SelfRef::owning(
+                Backing::Boxed(Box::default()),
+                message,
+            ))),
+            None,
+            open_rx,
+            close_rx,
+            control_tx,
+            control_rx,
+            None,
+            None,
+        );
+        connection.resource_limits = Some(ConnectionResourceLimits {
+            max_peer_lane_opens: 0,
+            ..hardened_test_limits()
+        });
+        let retained_core = connection.connection_core.clone();
+        tokio::time::timeout(Duration::from_secs(3), connection.run())
+            .await
+            .expect("connection must stop when its rejection cannot be sent");
+        assert!(connection.resource_exhausted);
+        tokio::time::timeout(Duration::from_secs(2), dropped_rx)
+            .await
+            .expect("blocked worker must release its conduit")
+            .unwrap();
+        assert!(retained_core.inner.lock().unwrap().tx.is_none());
+    }
+
+    #[tokio::test]
+    async fn resource_limits_bound_unregistered_channel_flood() {
+        let (mut connection, mut control) =
+            make_capturing_connection(Arc::new(Mutex::new(Vec::new())));
+        connection.resource_limits = Some(hardened_test_limits());
+        for id in [1, 1, 3, 5] {
+            let message = Message {
+                lane_id: LaneId::CONTROL,
+                payload: MessagePayload::ChannelMessage(vox_types::ChannelMessage {
+                    id: vox_types::ChannelId(id),
+                    body: vox_types::ChannelBody::Close(vox_types::ChannelClose {
+                        metadata: Metadata::default(),
+                    }),
+                }),
+            };
+            connection
+                .handle_message(
+                    SelfRef::owning(Backing::Boxed(Box::default()), message),
+                    Default::default(),
+                    &mut None,
+                )
+                .await;
+        }
+        assert!(connection.resource_exhausted);
+        let Some(ConnectionSlot::Active(state)) = connection.conns.get(&LaneId::CONTROL) else {
+            panic!("missing control lane")
+        };
+        assert_eq!(state.peer_channel_ids.len(), 2);
+        for _ in 0..3 {
+            assert!(control.rx.recv().await.is_some());
+        }
+        assert!(control.rx.try_recv().is_err());
+        connection.close_all_connections(ConnectionCloseReason::Local);
+        control.closed().await;
+        assert_eq!(control.close_reason(), Some(ConnectionCloseReason::Local));
+    }
+
+    #[tokio::test]
+    async fn oversized_single_grant_is_rejected_before_routing() {
+        let (mut connection, mut control) =
+            make_capturing_connection(Arc::new(Mutex::new(Vec::new())));
+        connection.resource_limits = Some(hardened_test_limits());
+        let message = Message {
+            lane_id: LaneId::CONTROL,
+            payload: MessagePayload::ChannelMessage(vox_types::ChannelMessage {
+                id: vox_types::ChannelId(1),
+                body: vox_types::ChannelBody::GrantCredit(vox_types::ChannelGrantCredit {
+                    additional: u32::MAX,
+                }),
+            }),
+        };
+        connection
+            .handle_message(
+                SelfRef::owning(Backing::Boxed(Box::default()), message),
+                Default::default(),
+                &mut None,
+            )
+            .await;
+        assert!(connection.resource_exhausted);
+        assert!(control.rx.try_recv().is_err());
+        let Some(ConnectionSlot::Active(state)) = connection.conns.get(&LaneId::CONTROL) else {
+            panic!("missing control lane")
+        };
+        assert!(state.peer_channel_ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn peer_call_lifetime_budget_bounds_request_bookkeeping() {
+        let (mut connection, mut control) =
+            make_capturing_connection(Arc::new(Mutex::new(Vec::new())));
+        connection.resource_limits = Some(ConnectionResourceLimits {
+            max_peer_calls_per_lane: 2,
+            ..hardened_test_limits()
+        });
+        for id in [1, 3, 5] {
+            let message = Message {
+                lane_id: LaneId::CONTROL,
+                payload: MessagePayload::RequestMessage(RequestMessage {
+                    id: RequestId(id),
+                    body: RequestBody::Call(RequestCall {
+                        channels: Vec::new(),
+                        method_id: vox_types::MethodId(id),
+                        args: Payload::Encoded(&[]),
+                        schemas: Default::default(),
+                        metadata: Default::default(),
+                    }),
+                }),
+            };
+            connection
+                .handle_message(
+                    SelfRef::owning(Backing::Boxed(Box::default()), message),
+                    Default::default(),
+                    &mut None,
+                )
+                .await;
+        }
+        assert!(connection.resource_exhausted);
+        let Some(ConnectionSlot::Active(state)) = connection.conns.get(&LaneId::CONTROL) else {
+            panic!("missing control lane")
+        };
+        assert_eq!(state.peer_calls, 2);
+        assert!(control.rx.recv().await.is_some());
+        assert!(control.rx.recv().await.is_some());
+        assert!(control.rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn schema_budget_counts_replacements_and_checks_before_retaining() {
+        let (mut connection, _control) =
+            make_capturing_connection(Arc::new(Mutex::new(Vec::new())));
+        connection.resource_limits = Some(hardened_test_limits());
+        for bytes in [vec![1, 2], vec![3, 4], vec![5]] {
+            let message = Message {
+                lane_id: LaneId::CONTROL,
+                payload: MessagePayload::SchemaMessage(SchemaMessage {
+                    method_id: vox_types::MethodId(1),
+                    direction: BindingDirection::Args,
+                    schemas: vox_types::SchemaBytes(bytes),
+                }),
+            };
+            connection
+                .handle_message(
+                    SelfRef::owning(Backing::Boxed(Box::default()), message),
+                    Default::default(),
+                    &mut None,
+                )
+                .await;
+        }
+        assert!(connection.resource_exhausted);
+        let Some(ConnectionSlot::Active(state)) = connection.conns.get(&LaneId::CONTROL) else {
+            panic!("missing control lane")
+        };
+        assert_eq!(state.received_schema_count, 2);
+        assert_eq!(state.received_schema_bytes, 4);
+        assert_eq!(
+            state
+                .schema_recv_tracker
+                .writer_schema_bytes(vox_types::MethodId(1), BindingDirection::Args),
+            Some(vec![3, 4])
+        );
     }
 
     // r[verify rpc.observability.connection-errors]

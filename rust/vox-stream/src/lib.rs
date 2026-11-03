@@ -446,6 +446,10 @@ impl LinkTx for StreamLinkTx {
         drop(self.tx);
         self.writer_task.await.map_err(io::Error::other)?
     }
+
+    fn abort(&self) {
+        self.writer_task.abort();
+    }
 }
 
 // Decode as unsigned and check the local policy before narrowing or allocating.
@@ -1320,6 +1324,33 @@ mod tests {
         let _ = release_tx.send(());
         assert_eq!(recorded_rx.await.unwrap(), b"committed".to_vec());
         link_tx.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn aborting_sender_stops_stalled_writer() {
+        struct Dropped(Option<oneshot::Sender<()>>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                if let Some(sender) = self.0.take() {
+                    let _ = sender.send(());
+                }
+            }
+        }
+        let (tx, _rx) = mpsc::channel::<QueuedFrame>("drop_stalled_writer", 1);
+        let (started_tx, started_rx) = oneshot::channel("stalled_writer_started");
+        let (dropped_tx, dropped_rx) = oneshot::channel("stalled_writer_dropped");
+        let writer_task = vox_rt::spawn(async move {
+            let _guard = Dropped(Some(dropped_tx));
+            let _ = started_tx.send(());
+            std::future::pending::<io::Result<()>>().await
+        });
+        let link_tx = StreamLinkTx { tx, writer_task };
+        started_rx.await.unwrap();
+        link_tx.abort();
+        tokio::time::timeout(std::time::Duration::from_secs(2), dropped_rx)
+            .await
+            .expect("aborting the sender should stop its blocked writer")
+            .unwrap();
     }
 
     // r[verify link.tx.close]

@@ -18,8 +18,8 @@ use crate::{
 
 use super::{
     AnonymousIdentityResolver, CloseRequest, Connection, ConnectionError, ConnectionHandle,
-    ConnectionKeepaliveConfig, IdentityResolver, LaneAcceptor, OpenRequest,
-    observe_establishment_finished, observe_establishment_finished_with_details,
+    ConnectionKeepaliveConfig, ConnectionResourceLimits, IdentityResolver, LaneAcceptor,
+    OpenRequest, observe_establishment_finished, observe_establishment_finished_with_details,
     observe_establishment_started,
 };
 
@@ -512,6 +512,7 @@ pub struct ConnectionInitiatorBuilder<C> {
     conduit: C,
     handshake_result: HandshakeResult,
     config: ConnectionConfig,
+    resource_limits: Option<ConnectionResourceLimits>,
 }
 
 impl<C> ConnectionInitiatorBuilder<C> {
@@ -522,9 +523,15 @@ impl<C> ConnectionInitiatorBuilder<C> {
             conduit,
             handshake_result,
             config,
+            resource_limits: None,
         }
     }
 
+    /// Set opt-in ceilings on resources controlled by the remote peer.
+    pub fn resource_limits(mut self, limits: ConnectionResourceLimits) -> Self {
+        self.resource_limits = Some(limits);
+        self
+    }
     pub fn on_lane(mut self, acceptor: impl LaneAcceptor) -> Self {
         self.config.lane_acceptor = Some(Arc::new(acceptor));
         self
@@ -587,9 +594,15 @@ impl<C> ConnectionInitiatorBuilder<C> {
             conduit,
             handshake_result,
             config,
+            resource_limits,
         } = self;
         let peer_identity = handshake_result.peer_identity.clone();
         let peer_evidence = handshake_result.peer_evidence.clone();
+        validate_resource_settings(
+            resource_limits,
+            &config.connection_settings,
+            Some(&handshake_result.peer_settings),
+        )?;
         validate_negotiated_connection_settings(&config.connection_settings, &handshake_result)?;
         let (tx, rx) = conduit.split();
         let (open_tx, open_rx) = mpsc::channel::<OpenRequest>("connection.open", 4);
@@ -606,6 +619,7 @@ impl<C> ConnectionInitiatorBuilder<C> {
             config.keepalive,
             config.observer.clone(),
         );
+        connection.resource_limits = resource_limits;
         let control_lane = connection.establish_from_handshake(handshake_result)?;
         let mut control_driver = crate::Driver::new(control_lane, ());
         let control_caller = crate::Caller::new(control_driver.caller());
@@ -643,12 +657,17 @@ impl<C> ConnectionInitiatorBuilder<C> {
 pub struct ConnectionSourceInitiatorBuilder<S> {
     source: S,
     config: ConnectionConfig,
+    resource_limits: Option<ConnectionResourceLimits>,
 }
 
 impl<S> ConnectionSourceInitiatorBuilder<S> {
     fn new(source: S) -> Self {
         let config = ConnectionConfig::default();
-        Self { source, config }
+        Self {
+            source,
+            config,
+            resource_limits: None,
+        }
     }
 
     pub fn parity(mut self, parity: Parity) -> Self {
@@ -694,6 +713,11 @@ impl<S> ConnectionSourceInitiatorBuilder<S> {
         self
     }
 
+    /// Set opt-in ceilings on resources controlled by the remote peer.
+    pub fn resource_limits(mut self, limits: ConnectionResourceLimits) -> Self {
+        self.resource_limits = Some(limits);
+        self
+    }
     pub fn on_lane(mut self, acceptor: impl LaneAcceptor) -> Self {
         self.config.lane_acceptor = Some(Arc::new(acceptor));
         self
@@ -760,7 +784,11 @@ impl<S> ConnectionSourceInitiatorBuilder<S> {
         <S::Link as Link>::Tx: MaybeSend + MaybeSync + 'static,
         <S::Link as Link>::Rx: MaybeSend + 'static,
     {
-        let Self { mut source, config } = self;
+        let Self {
+            mut source,
+            config,
+            resource_limits,
+        } = self;
 
         {
             {
@@ -773,6 +801,7 @@ impl<S> ConnectionSourceInitiatorBuilder<S> {
                     link,
                     config,
                     peer_evidence,
+                    resource_limits,
                 )
                 .await
             }
@@ -783,12 +812,17 @@ impl<S> ConnectionSourceInitiatorBuilder<S> {
 pub struct ConnectionTransportInitiatorBuilder<L> {
     link: L,
     config: ConnectionConfig,
+    resource_limits: Option<ConnectionResourceLimits>,
 }
 
 impl<L> ConnectionTransportInitiatorBuilder<L> {
     fn new(link: L) -> Self {
         let config = ConnectionConfig::default();
-        Self { link, config }
+        Self {
+            link,
+            config,
+            resource_limits: None,
+        }
     }
 
     pub fn parity(mut self, parity: Parity) -> Self {
@@ -834,6 +868,11 @@ impl<L> ConnectionTransportInitiatorBuilder<L> {
         self
     }
 
+    /// Set opt-in ceilings on resources controlled by the remote peer.
+    pub fn resource_limits(mut self, limits: ConnectionResourceLimits) -> Self {
+        self.resource_limits = Some(limits);
+        self
+    }
     pub fn on_lane(mut self, acceptor: impl LaneAcceptor) -> Self {
         self.config.lane_acceptor = Some(Arc::new(acceptor));
         self
@@ -900,9 +939,13 @@ impl<L> ConnectionTransportInitiatorBuilder<L> {
         L::Tx: MaybeSend + MaybeSync + 'static,
         L::Rx: MaybeSend + 'static,
     {
-        let Self { link, config } = self;
+        let Self {
+            link,
+            config,
+            resource_limits,
+        } = self;
         let link = initiate_transport_observed(link, config.observer.as_ref()).await?;
-        Self::finish_with_bare_parts(link, config, PeerEvidence::none()).await
+        Self::finish_with_bare_parts(link, config, PeerEvidence::none(), resource_limits).await
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -914,9 +957,13 @@ impl<L> ConnectionTransportInitiatorBuilder<L> {
         L::Tx: MaybeSend + MaybeSync + 'static,
         L::Rx: MaybeSend + 'static,
     {
-        let Self { link, config } = self;
+        let Self {
+            link,
+            config,
+            resource_limits,
+        } = self;
         let link = initiate_transport_observed(link, config.observer.as_ref()).await?;
-        Self::finish_with_bare_parts(link, config, PeerEvidence::none()).await
+        Self::finish_with_bare_parts(link, config, PeerEvidence::none(), resource_limits).await
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -936,12 +983,14 @@ impl<L> ConnectionTransportInitiatorBuilder<L> {
         mut link: SplitLink<L::Tx, L::Rx>,
         config: ConnectionConfig,
         peer_evidence: PeerEvidence,
+        resource_limits: Option<ConnectionResourceLimits>,
     ) -> Result<ConnectionHandle, ConnectionError>
     where
         L: Link + 'static,
         L::Tx: MaybeSend + MaybeSync + 'static,
         L::Rx: MaybeSend + 'static,
     {
+        validate_resource_settings(resource_limits, &config.connection_settings, None)?;
         let handshake_result = match handshake_as_initiator_observed(
             &link.tx,
             &mut link.rx,
@@ -968,7 +1017,7 @@ impl<L> ConnectionTransportInitiatorBuilder<L> {
             BareConduit::with_message_plan(link, message_plan),
             handshake_result,
         );
-        Self::apply_common_parts(builder, config)
+        Self::apply_common_parts(builder, config, resource_limits)
             .establish_connection()
             .await
     }
@@ -977,8 +1026,10 @@ impl<L> ConnectionTransportInitiatorBuilder<L> {
     fn apply_common_parts<C>(
         mut builder: ConnectionInitiatorBuilder<C>,
         config: ConnectionConfig,
+        resource_limits: Option<ConnectionResourceLimits>,
     ) -> ConnectionInitiatorBuilder<C> {
         builder.config = config;
+        builder.resource_limits = resource_limits;
         builder
     }
 }
@@ -987,6 +1038,7 @@ pub struct ConnectionAcceptorBuilder<C> {
     conduit: C,
     handshake_result: HandshakeResult,
     config: ConnectionConfig,
+    resource_limits: Option<ConnectionResourceLimits>,
 }
 
 impl<C> ConnectionAcceptorBuilder<C> {
@@ -997,9 +1049,15 @@ impl<C> ConnectionAcceptorBuilder<C> {
             conduit,
             handshake_result,
             config,
+            resource_limits: None,
         }
     }
 
+    /// Set opt-in ceilings on resources controlled by the remote peer.
+    pub fn resource_limits(mut self, limits: ConnectionResourceLimits) -> Self {
+        self.resource_limits = Some(limits);
+        self
+    }
     pub fn on_lane(mut self, acceptor: impl LaneAcceptor) -> Self {
         self.config.lane_acceptor = Some(Arc::new(acceptor));
         self
@@ -1059,9 +1117,15 @@ impl<C> ConnectionAcceptorBuilder<C> {
             conduit,
             handshake_result,
             config,
+            resource_limits,
         } = self;
         let peer_identity = handshake_result.peer_identity.clone();
         let peer_evidence = handshake_result.peer_evidence.clone();
+        validate_resource_settings(
+            resource_limits,
+            &config.connection_settings,
+            Some(&handshake_result.peer_settings),
+        )?;
         validate_negotiated_connection_settings(&config.connection_settings, &handshake_result)?;
         let (tx, rx) = conduit.split();
         let (open_tx, open_rx) = mpsc::channel::<OpenRequest>("connection.open", 4);
@@ -1078,6 +1142,7 @@ impl<C> ConnectionAcceptorBuilder<C> {
             config.keepalive,
             config.observer.clone(),
         );
+        connection.resource_limits = resource_limits;
         let control_lane = connection.establish_from_handshake(handshake_result)?;
         let mut control_driver = crate::Driver::new(control_lane, ());
         let control_caller = crate::Caller::new(control_driver.caller());
@@ -1115,6 +1180,7 @@ pub struct ConnectionTransportAcceptorBuilder<L: Link> {
     link: L,
     peer_evidence: PeerEvidence,
     config: ConnectionConfig,
+    resource_limits: Option<ConnectionResourceLimits>,
 }
 
 impl<L: Link> ConnectionTransportAcceptorBuilder<L> {
@@ -1122,6 +1188,7 @@ impl<L: Link> ConnectionTransportAcceptorBuilder<L> {
         Self {
             link,
             peer_evidence: PeerEvidence::none(),
+            resource_limits: None,
             config: ConnectionConfig::with_settings(ConnectionSettings {
                 parity: Parity::Even,
                 max_concurrent_requests: 64,
@@ -1176,6 +1243,11 @@ impl<L: Link> ConnectionTransportAcceptorBuilder<L> {
         self
     }
 
+    /// Set opt-in ceilings on resources controlled by the remote peer.
+    pub fn resource_limits(mut self, limits: ConnectionResourceLimits) -> Self {
+        self.resource_limits = Some(limits);
+        self
+    }
     pub fn on_lane(mut self, acceptor: impl LaneAcceptor) -> Self {
         self.config.lane_acceptor = Some(Arc::new(acceptor));
         self
@@ -1214,7 +1286,9 @@ impl<L: Link> ConnectionTransportAcceptorBuilder<L> {
             link,
             peer_evidence,
             config,
+            resource_limits,
         } = self;
+        validate_resource_settings(resource_limits, &config.connection_settings, None)?;
         let mut link = accept_transport_observed(link, config.observer.as_ref()).await?;
         let handshake_result = match handshake_as_acceptor_observed(
             &link.tx,
@@ -1242,7 +1316,7 @@ impl<L: Link> ConnectionTransportAcceptorBuilder<L> {
             BareConduit::with_message_plan(link, message_plan),
             handshake_result,
         );
-        Self::apply_common_parts(builder, config)
+        Self::apply_common_parts(builder, config, resource_limits)
             .establish_connection()
             .await
     }
@@ -1263,10 +1337,41 @@ impl<L: Link> ConnectionTransportAcceptorBuilder<L> {
     fn apply_common_parts<C>(
         mut builder: ConnectionAcceptorBuilder<C>,
         config: ConnectionConfig,
+        resource_limits: Option<ConnectionResourceLimits>,
     ) -> ConnectionAcceptorBuilder<C> {
         builder.config = config;
+        builder.resource_limits = resource_limits;
         builder
     }
+}
+
+fn validate_resource_settings(
+    limits: Option<ConnectionResourceLimits>,
+    local: &ConnectionSettings,
+    peer: Option<&ConnectionSettings>,
+) -> Result<(), ConnectionError> {
+    if let Some(limits) = limits {
+        if limits.max_initial_channel_credit == 0
+            || limits.max_peer_channel_credit == 0
+            || limits.max_peer_channel_credit as usize > (usize::MAX >> 3)
+            || limits.max_peer_concurrent_requests as usize > (usize::MAX >> 3)
+            || local.initial_channel_credit > limits.max_initial_channel_credit
+            || local.max_concurrent_requests > limits.max_inbound_requests_per_lane
+        {
+            return Err(ConnectionError::Protocol(
+                "local settings exceed resource limits".into(),
+            ));
+        }
+        if let Some(peer) = peer
+            && (peer.initial_channel_credit > limits.max_peer_channel_credit
+                || peer.max_concurrent_requests > limits.max_peer_concurrent_requests)
+        {
+            return Err(ConnectionError::Protocol(
+                "peer settings exceed resource limits".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_negotiated_connection_settings(

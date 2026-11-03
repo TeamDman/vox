@@ -2,17 +2,422 @@ use std::sync::{Arc, Mutex};
 
 use vox_rt::task::FutureExt;
 use vox_types::{
-    ChannelBinder, ConnectionCloseReason, ConnectionSettings, DriverEvent, IncomingChannelMessage,
-    LaneId, MethodId, Parity, Payload, ReplySink, RequestCall, RequestResponse, SelfRef,
-    VoxObserver, VoxObserverHandle,
+    ChannelBinder, ChannelSink, ConnectionCloseReason, ConnectionSettings, DriverEvent,
+    IncomingChannelMessage, LaneId, MethodId, Parity, Payload, ReplySink, RequestCall,
+    RequestResponse, SelfRef, VoxObserver, VoxObserverHandle,
 };
 
 use super::utils::*;
 use crate::Driver;
 use crate::connection::{
-    ConnectionError, LaneAcceptor, LaneRejectReason, LaneRejection, LaneRequest, PendingLane,
-    VOX_LANE_REJECT_REASON_METADATA_KEY, acceptor_conduit, initiator_conduit,
+    ConnectionError, ConnectionResourceLimits, LaneAcceptor, LaneRejectReason, LaneRejection,
+    LaneRequest, PendingLane, VOX_LANE_REJECT_REASON_METADATA_KEY, acceptor_conduit,
+    initiator_conduit,
 };
+
+// r[verify lane.open.wire.rejection]
+// r[verify lane.open.settings]
+#[tokio::test]
+async fn bounded_acceptor_uses_local_limits_and_reclaims_live_lane_slot() {
+    let (client_conduit, server_conduit) = message_conduit_pair();
+    let mut server_handshake = test_acceptor_handshake();
+    server_handshake.our_settings.initial_channel_credit = 2;
+    server_handshake.our_settings.max_concurrent_requests = 3;
+    let mut client_handshake = test_initiator_handshake();
+    client_handshake.peer_settings = server_handshake.our_settings.clone();
+    let limits = ConnectionResourceLimits {
+        max_service_lanes: 1,
+        max_peer_lane_opens: 4,
+        max_inbound_requests_per_lane: 3,
+        max_initial_channel_credit: 2,
+        max_peer_channel_credit: 16,
+        max_peer_concurrent_requests: 64,
+        max_peer_calls_per_lane: 100,
+        max_peer_channel_ids_per_lane: 8,
+        max_schemas_per_lane: 8,
+        max_schema_bytes_per_lane: 1_000_000,
+    };
+    let server = acceptor_conduit(server_conduit, server_handshake)
+        .resource_limits(limits)
+        .on_lane(EchoAcceptor)
+        .establish_connection()
+        .await
+        .unwrap();
+    let client = initiator_conduit(client_conduit, client_handshake)
+        .establish_connection()
+        .await
+        .unwrap();
+    let settings = ConnectionSettings {
+        parity: Parity::Odd,
+        max_concurrent_requests: 64,
+        initial_channel_credit: 16,
+    };
+    let metadata = || vox_types::metadata().str("vox-service", "Echo").build();
+    let first = client
+        .open_lane_handle(settings.clone(), metadata())
+        .await
+        .unwrap();
+    assert_eq!(first.peer_settings.max_concurrent_requests, 3);
+    assert_eq!(first.peer_settings.initial_channel_credit, 2);
+    let rejected = client.open_lane_handle(settings.clone(), metadata()).await;
+    assert!(matches!(rejected, Err(ConnectionError::Rejected(_))));
+    client
+        .close_lane(first.lane_id(), Default::default())
+        .await
+        .unwrap();
+    let replacement = client.open_lane_handle(settings, metadata()).await.unwrap();
+    assert_eq!(replacement.peer_settings.initial_channel_credit, 2);
+    server.shutdown().unwrap();
+    client.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn transport_builder_propagates_resource_limits_through_handshake() {
+    let (client_link, server_link) = crate::memory_link_pair(64);
+    let limits = ConnectionResourceLimits {
+        max_service_lanes: 1,
+        max_peer_lane_opens: 4,
+        max_inbound_requests_per_lane: 3,
+        max_initial_channel_credit: 2,
+        max_peer_channel_credit: 16,
+        max_peer_concurrent_requests: 64,
+        max_peer_calls_per_lane: 100,
+        max_peer_channel_ids_per_lane: 8,
+        max_schemas_per_lane: 8,
+        max_schema_bytes_per_lane: 1_000_000,
+    };
+    let server_task = tokio::spawn(async move {
+        crate::acceptor_on(server_link)
+            .max_concurrent_requests(3)
+            .channel_capacity(2)
+            .resource_limits(limits)
+            .on_lane(EchoAcceptor)
+            .establish_connection()
+            .await
+            .unwrap()
+    });
+    let client = crate::initiator_on(client_link)
+        .establish_connection()
+        .await
+        .unwrap();
+    let server = server_task.await.unwrap();
+    let lane = client
+        .open_lane_handle(
+            ConnectionSettings {
+                parity: Parity::Odd,
+                max_concurrent_requests: 64,
+                initial_channel_credit: 16,
+            },
+            vox_types::metadata().str("vox-service", "Echo").build(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(lane.peer_settings.max_concurrent_requests, 3);
+    assert_eq!(lane.peer_settings.initial_channel_credit, 2);
+    server.shutdown().unwrap();
+    client.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn bounded_acceptor_closes_on_unknown_channel_flood() {
+    struct KeepLane(Arc<Mutex<Vec<crate::LaneHandle>>>);
+    impl LaneAcceptor for KeepLane {
+        fn accept(&self, _: &LaneRequest, pending: PendingLane) -> Result<(), LaneRejection> {
+            self.0.lock().unwrap().push(pending.into_handle());
+            Ok(())
+        }
+    }
+    let (client_conduit, server_conduit) = message_conduit_pair();
+    let kept = Arc::new(Mutex::new(Vec::new()));
+    let limits = ConnectionResourceLimits {
+        max_service_lanes: 1,
+        max_peer_lane_opens: 4,
+        max_inbound_requests_per_lane: 64,
+        max_initial_channel_credit: 16,
+        max_peer_channel_credit: 16,
+        max_peer_concurrent_requests: 64,
+        max_peer_calls_per_lane: 100,
+        max_peer_channel_ids_per_lane: 2,
+        max_schemas_per_lane: 8,
+        max_schema_bytes_per_lane: 1_000_000,
+    };
+    let server = acceptor_conduit(server_conduit, test_acceptor_handshake())
+        .resource_limits(limits)
+        .on_lane(KeepLane(kept.clone()))
+        .establish_connection()
+        .await
+        .unwrap();
+    let client = initiator_conduit(client_conduit, test_initiator_handshake())
+        .establish_connection()
+        .await
+        .unwrap();
+    let lane = client
+        .open_lane_handle(
+            ConnectionSettings {
+                parity: Parity::Odd,
+                max_concurrent_requests: 64,
+                initial_channel_credit: 16,
+            },
+            vox_types::metadata().str("vox-service", "test").build(),
+        )
+        .await
+        .unwrap();
+    for id in [1, 3, 5] {
+        let _ = lane
+            .sender
+            .send(crate::connection::ConnectionMessage::Channel(
+                vox_types::ChannelMessage {
+                    id: vox_types::ChannelId(id),
+                    body: vox_types::ChannelBody::Close(vox_types::ChannelClose {
+                        metadata: Default::default(),
+                    }),
+                },
+            ))
+            .await;
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(2), server.closed())
+        .await
+        .expect("resource exhaustion should close the connection");
+    assert!(kept.lock().unwrap()[0].close_reason().is_some());
+}
+
+#[tokio::test]
+async fn bounded_acceptor_preserves_delivery_before_receiver_registration() {
+    struct KeepLane(Arc<Mutex<Option<crate::LaneHandle>>>);
+    impl LaneAcceptor for KeepLane {
+        fn accept(&self, _: &LaneRequest, pending: PendingLane) -> Result<(), LaneRejection> {
+            *self.0.lock().unwrap() = Some(pending.into_handle());
+            Ok(())
+        }
+    }
+    let (client_conduit, server_conduit) = message_conduit_pair();
+    let kept = Arc::new(Mutex::new(None));
+    let limits = ConnectionResourceLimits {
+        max_service_lanes: 1,
+        max_peer_lane_opens: 4,
+        max_inbound_requests_per_lane: 64,
+        max_initial_channel_credit: 16,
+        max_peer_channel_credit: 16,
+        max_peer_concurrent_requests: 64,
+        max_peer_calls_per_lane: 100,
+        max_peer_channel_ids_per_lane: 2,
+        max_schemas_per_lane: 8,
+        max_schema_bytes_per_lane: 1_000_000,
+    };
+    let server = acceptor_conduit(server_conduit, test_acceptor_handshake())
+        .resource_limits(limits)
+        .on_lane(KeepLane(kept.clone()))
+        .establish_connection()
+        .await
+        .unwrap();
+    let client = initiator_conduit(client_conduit, test_initiator_handshake())
+        .establish_connection()
+        .await
+        .unwrap();
+    let lane = client
+        .open_lane_handle(
+            ConnectionSettings {
+                parity: Parity::Odd,
+                max_concurrent_requests: 64,
+                initial_channel_credit: 16,
+            },
+            vox_types::metadata().str("vox-service", "test").build(),
+        )
+        .await
+        .unwrap();
+    let mut driver = Driver::new(kept.lock().unwrap().take().unwrap(), ());
+    let caller = driver.caller();
+    tokio::spawn(async move { driver.run().await });
+    let channel_id = vox_types::ChannelId(1);
+    let value = 123u32;
+    lane.sender
+        .send(crate::connection::ConnectionMessage::Channel(
+            vox_types::ChannelMessage {
+                id: channel_id,
+                body: vox_types::ChannelBody::Item(vox_types::ChannelItem {
+                    item: Payload::outgoing(&value),
+                }),
+            },
+        ))
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if caller.debug_snapshot().lanes[0]
+                .open_channels
+                .iter()
+                .any(|channel| channel.channel_id == channel_id)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("item should be processed before receiver registration");
+    let mut rx = caller.register_rx_channel(channel_id).receiver;
+    let received = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let IncomingChannelMessage::Item(item) = received else {
+        panic!("expected item")
+    };
+    let Payload::Encoded(bytes) = item.get().item else {
+        panic!("expected encoded item")
+    };
+    assert_eq!(vox_phon::from_slice::<u32>(bytes).unwrap(), value);
+    server.shutdown().unwrap();
+    client.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn bounded_acceptor_rejects_oversized_credit_grants() {
+    struct KeepLane(Arc<Mutex<Option<crate::LaneHandle>>>);
+    impl LaneAcceptor for KeepLane {
+        fn accept(&self, _: &LaneRequest, pending: PendingLane) -> Result<(), LaneRejection> {
+            *self.0.lock().unwrap() = Some(pending.into_handle());
+            Ok(())
+        }
+    }
+    let (client_conduit, server_conduit) = message_conduit_pair();
+    let kept = Arc::new(Mutex::new(None));
+    let limits = ConnectionResourceLimits {
+        max_service_lanes: 1,
+        max_peer_lane_opens: 4,
+        max_inbound_requests_per_lane: 64,
+        max_initial_channel_credit: 16,
+        max_peer_channel_credit: 16,
+        max_peer_concurrent_requests: 64,
+        max_peer_calls_per_lane: 100,
+        max_peer_channel_ids_per_lane: 2,
+        max_schemas_per_lane: 8,
+        max_schema_bytes_per_lane: 1_000_000,
+    };
+    let server = acceptor_conduit(server_conduit, test_acceptor_handshake())
+        .resource_limits(limits)
+        .on_lane(KeepLane(kept.clone()))
+        .establish_connection()
+        .await
+        .unwrap();
+    let client = initiator_conduit(client_conduit, test_initiator_handshake())
+        .establish_connection()
+        .await
+        .unwrap();
+    let lane = client
+        .open_lane_handle(
+            ConnectionSettings {
+                parity: Parity::Odd,
+                max_concurrent_requests: 64,
+                initial_channel_credit: 16,
+            },
+            vox_types::metadata().str("vox-service", "test").build(),
+        )
+        .await
+        .unwrap();
+    let mut driver = Driver::new(kept.lock().unwrap().take().unwrap(), ());
+    let caller = driver.caller();
+    let (channel_id, sink) = caller.create_tx_channel();
+    tokio::spawn(async move { driver.run().await });
+    sink.send_payload(Payload::outgoing(&0u32)).await.unwrap();
+    for _ in 0..2 {
+        lane.sender
+            .send(crate::connection::ConnectionMessage::Channel(
+                vox_types::ChannelMessage {
+                    id: channel_id,
+                    body: vox_types::ChannelBody::GrantCredit(vox_types::ChannelGrantCredit {
+                        additional: 1,
+                    }),
+                },
+            ))
+            .await
+            .unwrap();
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(2), server.closed())
+        .await
+        .expect("oversized grant should close the connection");
+}
+
+#[tokio::test]
+async fn bounded_acceptor_enforces_local_concurrent_request_limit() {
+    struct Hold;
+    impl vox_types::Handler<crate::DriverReplySink> for Hold {
+        async fn handle(
+            &self,
+            _: SelfRef<RequestCall<'static>>,
+            _: crate::DriverReplySink,
+            _: Arc<vox_types::SchemaRecvTracker>,
+        ) {
+            std::future::pending::<()>().await;
+        }
+    }
+    struct HoldAcceptor;
+    impl LaneAcceptor for HoldAcceptor {
+        fn accept(&self, _: &LaneRequest, pending: PendingLane) -> Result<(), LaneRejection> {
+            pending.handle_with(Hold);
+            Ok(())
+        }
+    }
+    let (client_conduit, server_conduit) = message_conduit_pair();
+    let mut server_handshake = test_acceptor_handshake();
+    server_handshake.our_settings.max_concurrent_requests = 1;
+    let mut client_handshake = test_initiator_handshake();
+    client_handshake.peer_settings = server_handshake.our_settings.clone();
+    let limits = ConnectionResourceLimits {
+        max_service_lanes: 1,
+        max_peer_lane_opens: 4,
+        max_inbound_requests_per_lane: 1,
+        max_initial_channel_credit: 16,
+        max_peer_channel_credit: 16,
+        max_peer_concurrent_requests: 64,
+        max_peer_calls_per_lane: 100,
+        max_peer_channel_ids_per_lane: 2,
+        max_schemas_per_lane: 8,
+        max_schema_bytes_per_lane: 1_000_000,
+    };
+    let server = acceptor_conduit(server_conduit, server_handshake)
+        .resource_limits(limits)
+        .on_lane(HoldAcceptor)
+        .establish_connection()
+        .await
+        .unwrap();
+    let client = initiator_conduit(client_conduit, client_handshake)
+        .establish_connection()
+        .await
+        .unwrap();
+    let lane = client
+        .open_lane_handle(
+            ConnectionSettings {
+                parity: Parity::Odd,
+                max_concurrent_requests: 64,
+                initial_channel_credit: 16,
+            },
+            vox_types::metadata().str("vox-service", "test").build(),
+        )
+        .await
+        .unwrap();
+    let value = 0u32;
+    for id in [1, 3] {
+        lane.sender
+            .send(crate::connection::ConnectionMessage::Request(
+                vox_types::RequestMessage {
+                    id: vox_types::RequestId(id),
+                    body: vox_types::RequestBody::Call(RequestCall {
+                        channels: Vec::new(),
+                        method_id: MethodId(1),
+                        args: Payload::outgoing(&value),
+                        schemas: Default::default(),
+                        metadata: Default::default(),
+                    }),
+                },
+            ))
+            .await
+            .unwrap();
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(2), server.closed())
+        .await
+        .expect("excess concurrent requests should close the connection");
+}
 
 #[derive(Clone, Copy)]
 struct ConstHandler(u32);

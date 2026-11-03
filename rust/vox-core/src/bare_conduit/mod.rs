@@ -136,6 +136,10 @@ impl<F: MsgFamily, LTx: LinkTx + MaybeSend + 'static> ConduitTx for BareConduitT
     async fn close(self) -> std::io::Result<()> {
         self.link_tx.close().await
     }
+
+    fn abort(&self) {
+        self.link_tx.abort();
+    }
 }
 
 // ---------------------------------------------------------------------------

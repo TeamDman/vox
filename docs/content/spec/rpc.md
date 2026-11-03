@@ -461,6 +461,11 @@ weight = 12
 > channel controls how many items the sender may send by granting credit.
 > The sender MUST NOT send a `ChannelItem` if it has zero credit. Each
 > sent `ChannelItem` consumes one unit of credit.
+> A driver-backed receiver MUST reject an item sent beyond the credit it has
+> granted rather than block its lane while waiting for mailbox capacity.
+> Ordered writer-schema metadata MUST use a separate bounded budget so it
+> cannot consume item-credit slots; exceeding that budget closes the lane or
+> connection instead of silently dropping a schema update.
 
 > r[rpc.flow-control.credit.initial]
 >

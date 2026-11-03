@@ -2786,6 +2786,145 @@ async fn full_early_item_mailbox_terminal(reset: bool) {
     );
 }
 
+// r[verify rpc.flow-control.credit]
+#[tokio::test]
+async fn peer_item_beyond_granted_credit_closes_connection_without_stalling() {
+    let (client, _server, server_connection) = captured_test_lane_pair(()).await;
+    let sender = client.caller.driver().connection_sender().clone();
+    let value = 123_u32;
+    for _ in 0..17 {
+        let _result = sender
+            .send(crate::connection::ConnectionMessage::Channel(
+                ChannelMessage {
+                    id: ChannelId(778),
+                    body: ChannelBody::Item(ChannelItem {
+                        item: Payload::outgoing(&value),
+                    }),
+                },
+            ))
+            .await;
+    }
+    tokio::time::timeout(Duration::from_secs(2), server_connection.closed())
+        .await
+        .expect("over-credit peer must close the connection promptly");
+}
+
+// r[verify rpc.flow-control.credit.grant]
+#[tokio::test]
+async fn consumed_items_replenish_credit_across_multiple_windows() {
+    let (client, server, _connection) = captured_test_lane_pair(()).await;
+    let (channel_id, sink) = server.caller.driver().create_tx_channel();
+    let mut tx = Tx::<u32>::unbound();
+    let sink: Arc<dyn ChannelSink> = sink;
+    tx.bind(sink);
+    let mut rx: Rx<u32> = vox_types::channel::with_channel_binder(client.caller.driver(), || {
+        channel_id.try_into().expect("bind rx")
+    });
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let send = async {
+            for value in 0..64 {
+                tx.send(value)
+                    .await
+                    .expect("send within replenished credit");
+            }
+            tx.close(Metadata::default()).await.unwrap();
+        };
+        let receive = async {
+            for value in 0..64 {
+                let item = rx.recv().await.unwrap().expect("missing item");
+                assert_eq!(*item.get(), value);
+            }
+            assert!(rx.recv().await.unwrap().is_none());
+        };
+        tokio::join!(send, receive);
+    })
+    .await
+    .expect("credit replenishment stalled");
+}
+
+// r[verify schema.exchange.channels]
+// r[verify rpc.channel.delivery.reliable]
+#[tokio::test]
+async fn writer_schemas_use_a_separate_bounded_ordered_mailbox_budget() {
+    let (client, server, _connection) = captured_test_lane_pair(EchoHandler).await;
+    let sender = client.caller.driver().connection_sender().clone();
+    let channel_id = ChannelId(779);
+    let value = 123_u32;
+    for _ in 0..16 {
+        sender
+            .send(crate::connection::ConnectionMessage::Channel(
+                ChannelMessage {
+                    id: channel_id,
+                    body: ChannelBody::Item(ChannelItem {
+                        item: Payload::outgoing(&value),
+                    }),
+                },
+            ))
+            .await
+            .unwrap();
+    }
+    let barrier_call = || RequestCall {
+        channels: Vec::new(),
+        method_id: MethodId(1),
+        args: Payload::outgoing(&value),
+        schemas: Default::default(),
+        metadata: Default::default(),
+    };
+    client.caller.call(barrier_call()).await.unwrap();
+    let encoded = vox_phon::schema_bytes::<u32>().unwrap();
+    let bundle = Arc::new(vox_phon::parse_schema_bytes(&encoded).unwrap());
+    let driver = server.caller.driver();
+    for _ in 0..16 {
+        assert!(
+            driver
+                .test_deliver_writer_schema(channel_id, Arc::clone(&bundle))
+                .is_ok()
+        );
+    }
+    assert!(matches!(
+        driver.test_deliver_writer_schema(channel_id, Arc::clone(&bundle)),
+        Err(vox_types::ChannelMailboxTrySendError::Full(_))
+    ));
+    sender
+        .send(crate::connection::ConnectionMessage::Channel(
+            ChannelMessage {
+                id: channel_id,
+                body: ChannelBody::Close(ChannelClose {
+                    metadata: Metadata::default(),
+                }),
+            },
+        ))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), client.caller.call(barrier_call()))
+        .await
+        .expect("schema-filled mailbox stalled the lane")
+        .unwrap();
+    assert!(
+        driver
+            .test_deliver_writer_schema(channel_id, bundle)
+            .is_ok()
+    );
+    let mut rx = driver.register_rx_channel(channel_id).receiver;
+    for _ in 0..16 {
+        assert!(matches!(
+            rx.recv().await,
+            Some(IncomingChannelMessage::Item(_))
+        ));
+    }
+    for _ in 0..16 {
+        assert!(matches!(
+            rx.recv().await,
+            Some(IncomingChannelMessage::WriterSchema(_))
+        ));
+    }
+    assert!(matches!(
+        rx.recv().await,
+        Some(IncomingChannelMessage::Close(_))
+    ));
+    assert!(rx.recv().await.is_none());
+}
+
 #[tokio::test]
 async fn unsolicited_response_id_is_ignored_and_does_not_break_calls() {
     let (caller, server_caller, _server_connection) = captured_test_lane_pair(EchoHandler).await;

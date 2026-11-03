@@ -44,8 +44,13 @@ Upstream project: <https://github.com/bearcove/vox>. Teamy fork: <https://github
 ## Resource limits for an untrusted peer
 
 Connection builders accept an opt-in `ConnectionResourceLimits` via
-`.resource_limits(limits)`. The default is `None`, preserving the existing
-unlimited policy. The configured local handshake settings must fit the local
+`.resource_limits(limits)`. The default is `None`, without connection-level
+lifetime quotas. Driver channel mailboxes still have a fixed maximum of 16
+pending writer-schema updates per channel, separate from item credit; exceeding
+that limit closes the connection rather than blocking the lane. Driver-backed
+receivers reject items exceeding advertised credit. Raw and proxy lanes must
+enforce their own corresponding inbound-credit and queue bounds. The
+configured local handshake settings must fit the local
 request and initial-credit ceilings; peer handshake and service-lane settings
 that exceed the peer ceilings are rejected. An accepted peer lane advertises
 the locally configured request limit and channel capacity, rather than copying
@@ -110,7 +115,8 @@ For byte streams also set `StreamLink::max_receive_frame_bytes` and
 `StreamLink::receive_queue_capacity` **before** creating the connection. The
 stream receive queue can hold its configured number of complete frames plus
 one frame being read. In addition, each active lane has a 64-message routing
-queue and each inbound channel has a queue sized by local initial credit; frames
+queue and each inbound channel has item slots sized by local initial credit,
+up to 16 separate ordered writer-schema slots, and a terminal slot; frames
 may remain held by handlers and consumers. Multiply the configured counts by
 the maximum frame size when assessing memory, then account separately for
 decoding, schema plans, outbound queues, allocator overhead, TLS, application

@@ -447,6 +447,20 @@ pub struct ChannelMailboxSendError<T> {
     item: T,
 }
 
+/// Failure to enqueue without waiting. `Full` preserves the unsent item.
+#[derive(Debug)]
+pub enum ChannelMailboxTrySendError<T> {
+    Full(T),
+    Closed(T),
+}
+
+#[derive(Clone, Copy)]
+enum MailboxClass {
+    Item,
+    Control,
+    Forced,
+}
+
 impl<T> std::fmt::Debug for ChannelMailboxSendError<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ChannelMailboxSendError")
@@ -467,8 +481,10 @@ struct ChannelMailboxState<T> {
 }
 
 struct ChannelMailboxInner<T> {
-    queue: VecDeque<T>,
+    queue: VecDeque<(T, MailboxClass)>,
     capacity: usize,
+    item_count: usize,
+    control_count: usize,
     receiver_closed: bool,
     sender_count: usize,
 }
@@ -491,6 +507,8 @@ pub fn channel_mailbox<T>(
         inner: Mutex::new(ChannelMailboxInner {
             queue: VecDeque::with_capacity(capacity),
             capacity,
+            item_count: 0,
+            control_count: 0,
             receiver_closed: false,
             sender_count: 1,
         }),
@@ -552,10 +570,12 @@ impl<T> ChannelMailboxSender<T> {
                         item: item.take().expect("mailbox item already sent"),
                     });
                 }
-                if guard.queue.len() < guard.capacity {
-                    guard
-                        .queue
-                        .push_back(item.take().expect("mailbox item already sent"));
+                if guard.item_count < guard.capacity {
+                    guard.item_count += 1;
+                    guard.queue.push_back((
+                        item.take().expect("mailbox item already sent"),
+                        MailboxClass::Item,
+                    ));
                     drop(guard);
                     self.state.not_empty.notify_waiters();
                     return Ok(());
@@ -575,7 +595,52 @@ impl<T> ChannelMailboxSender<T> {
         if guard.receiver_closed {
             return Err(ChannelMailboxSendError { item });
         }
-        guard.queue.push_back(item);
+        guard.queue.push_back((item, MailboxClass::Forced));
+        drop(guard);
+        self.state.not_empty.notify_waiters();
+        Ok(())
+    }
+
+    /// Enqueue one item without waiting for space or consuming control slots.
+    pub fn try_send(&self, item: T) -> Result<(), ChannelMailboxTrySendError<T>> {
+        self.try_send_class(item, MailboxClass::Item, 0)
+    }
+
+    /// Enqueue ordered metadata using a separate, caller-supplied bounded quota.
+    pub fn try_send_control(
+        &self,
+        item: T,
+        max_control: usize,
+    ) -> Result<(), ChannelMailboxTrySendError<T>> {
+        self.try_send_class(item, MailboxClass::Control, max_control)
+    }
+
+    fn try_send_class(
+        &self,
+        item: T,
+        class: MailboxClass,
+        max_control: usize,
+    ) -> Result<(), ChannelMailboxTrySendError<T>> {
+        let mut guard = self
+            .state
+            .inner
+            .lock()
+            .expect("channel mailbox mutex poisoned");
+        if guard.receiver_closed {
+            return Err(ChannelMailboxTrySendError::Closed(item));
+        }
+        match class {
+            MailboxClass::Item if guard.item_count >= guard.capacity => {
+                return Err(ChannelMailboxTrySendError::Full(item));
+            }
+            MailboxClass::Control if guard.control_count >= max_control => {
+                return Err(ChannelMailboxTrySendError::Full(item));
+            }
+            MailboxClass::Item => guard.item_count += 1,
+            MailboxClass::Control => guard.control_count += 1,
+            MailboxClass::Forced => unreachable!(),
+        }
+        guard.queue.push_back((item, class));
         drop(guard);
         self.state.not_empty.notify_waiters();
         Ok(())
@@ -595,6 +660,8 @@ impl<T> Drop for ChannelMailboxReceiver<T> {
             .expect("channel mailbox mutex poisoned");
         guard.receiver_closed = true;
         guard.queue.clear();
+        guard.item_count = 0;
+        guard.control_count = 0;
         drop(guard);
         self.state.not_full.notify_waiters();
         self.state.not_empty.notify_waiters();
@@ -610,7 +677,12 @@ impl<T> ChannelMailboxReceiver<T> {
                     .inner
                     .lock()
                     .expect("channel mailbox mutex poisoned");
-                if let Some(item) = guard.queue.pop_front() {
+                if let Some((item, class)) = guard.queue.pop_front() {
+                    match class {
+                        MailboxClass::Item => guard.item_count -= 1,
+                        MailboxClass::Control => guard.control_count -= 1,
+                        MailboxClass::Forced => {}
+                    }
                     drop(guard);
                     self.state.not_full.notify_waiters();
                     return Some(item);
@@ -2342,6 +2414,33 @@ pub trait ChannelBinder: crate::MaybeSend + crate::MaybeSync {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn mailbox_bounds_item_and_control_slots_separately_in_order() {
+        use super::{ChannelMailboxTrySendError, channel_mailbox};
+
+        let (sender, mut receiver) = channel_mailbox("test.separate.budgets", 1);
+        sender.try_send("item").unwrap();
+        sender.try_send_control("schema", 1).unwrap();
+        assert!(matches!(
+            sender.try_send("extra"),
+            Err(ChannelMailboxTrySendError::Full("extra"))
+        ));
+        assert!(matches!(
+            sender.try_send_control("extra-schema", 1),
+            Err(ChannelMailboxTrySendError::Full("extra-schema"))
+        ));
+        sender.force_send("terminal").unwrap();
+        assert_eq!(receiver.recv().await, Some("item"));
+        assert_eq!(receiver.recv().await, Some("schema"));
+        assert_eq!(receiver.recv().await, Some("terminal"));
+        sender.try_send_control("reused-schema-slot", 1).unwrap();
+        assert_eq!(receiver.recv().await, Some("reused-schema-slot"));
+        drop(receiver);
+        assert!(matches!(
+            sender.try_send("closed"),
+            Err(ChannelMailboxTrySendError::Closed("closed"))
+        ));
+    }
     use super::*;
     use crate::{Backing, ChannelClose, ChannelItem, ChannelReset, Metadata, SelfRef};
     use std::sync::atomic::{AtomicUsize, Ordering};

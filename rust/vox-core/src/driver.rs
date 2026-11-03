@@ -16,11 +16,11 @@ use vox_rt::task::FutureExt as _;
 use vox_types::{
     BoxFut, CallResult, ChannelBinder, ChannelBody, ChannelClose, ChannelCloseSignal,
     ChannelCreditReplenisher, ChannelCreditReplenisherHandle, ChannelEventContext, ChannelId,
-    ChannelItem, ChannelMailboxReceiver, ChannelMailboxSender, ChannelMessage, ChannelSink,
-    CreditSink, Handler, IdAllocator, IncomingChannelMessage, LaneId, MaybeSend, MaybeSendFuture,
-    MaybeSync, Parity, Payload, ReplySink, RequestAuthorizationContext, RequestBody, RequestCall,
-    RequestCancel, RequestId, RequestMessage, RequestResponse, RequestTerminationReason, SelfRef,
-    TrySendError, TxError, VoxError, channel_mailbox,
+    ChannelItem, ChannelMailboxReceiver, ChannelMailboxSender, ChannelMailboxTrySendError,
+    ChannelMessage, ChannelSink, CreditSink, Handler, IdAllocator, IncomingChannelMessage, LaneId,
+    MaybeSend, MaybeSendFuture, MaybeSync, Parity, Payload, ReplySink, RequestAuthorizationContext,
+    RequestBody, RequestCall, RequestCancel, RequestId, RequestMessage, RequestResponse,
+    RequestTerminationReason, SelfRef, TrySendError, TxError, VoxError, channel_mailbox,
 };
 use vox_types::{
     ChannelCloseReason, ChannelDebugContext, ChannelDirection, ChannelEvent, ChannelResetReason,
@@ -35,6 +35,10 @@ use crate::connection::{
     ConnectionMessage, ConnectionSender, DropControlRequest, FailureDisposition, LaneHandle,
 };
 use vox_rt::sync::mpsc;
+
+// Independent of item credit; excess pending writer schemas close the
+// connection instead of blocking the lane or allocating without bound.
+const MAX_PENDING_CHANNEL_SCHEMAS: usize = 16;
 
 /// A pending response for one outbound request attempt.
 ///
@@ -971,6 +975,34 @@ impl DriverShared {
         Some(delivered)
     }
 
+    fn deliver_writer_schema(
+        &self,
+        channel_id: ChannelId,
+        bundle: Arc<vox_phon::SchemaBundle>,
+    ) -> Result<(), ChannelMailboxTrySendError<IncomingChannelMessage>> {
+        let lifecycle = self.channel_lifecycle.lock();
+        if lifecycle.all_closed || lifecycle.terminal.contains(&channel_id) {
+            return Ok(());
+        }
+        let sender = self.inbound_channel_sender(channel_id);
+        sender.try_send_control(
+            IncomingChannelMessage::WriterSchema(bundle),
+            MAX_PENDING_CHANNEL_SCHEMAS,
+        )
+    }
+
+    fn deliver_item(
+        &self,
+        channel_id: ChannelId,
+        item: IncomingChannelMessage,
+    ) -> Option<Result<(), ChannelMailboxTrySendError<IncomingChannelMessage>>> {
+        let lifecycle = self.channel_lifecycle.lock();
+        if lifecycle.all_closed || lifecycle.terminal.contains(&channel_id) {
+            return None;
+        }
+        Some(self.inbound_channel_sender(channel_id).try_send(item))
+    }
+
     fn register_inbound_channel_receiver(
         &self,
         channel_id: ChannelId,
@@ -1894,6 +1926,15 @@ pub struct DriverCaller {
 }
 
 impl DriverCaller {
+    #[cfg(test)]
+    pub(crate) fn test_deliver_writer_schema(
+        &self,
+        channel_id: ChannelId,
+        bundle: Arc<vox_phon::SchemaBundle>,
+    ) -> Result<(), ChannelMailboxTrySendError<IncomingChannelMessage>> {
+        self.shared.deliver_writer_schema(channel_id, bundle)
+    }
+
     /// Allocate a channel ID and create a credit-controlled sink for outbound items.
     ///
     /// The returned sink enforces credit; the semaphore is registered so
@@ -2266,6 +2307,9 @@ pub struct Driver<H: Handler<DriverReplySink>> {
     local_control_rx: mpsc::UnboundedReceiver<DriverLocalControl>,
     handler: Arc<H>,
     shared: Arc<DriverShared>,
+    /// Remaining item credits advertised to each inbound channel peer.
+    inbound_item_credit: BTreeMap<ChannelId, u32>,
+    protocol_failed: std::sync::atomic::AtomicBool,
     /// In-flight server-side handlers, keyed by request ID. Holds the
     /// `AbortHandle` for the corresponding entry in `handler_futs`. Used to
     /// abort handlers on cancel.
@@ -2415,6 +2459,8 @@ impl<H: Handler<DriverReplySink>> Driver<H> {
     }
 
     fn protocol_violation(&self, description: String) {
+        self.protocol_failed
+            .store(true, std::sync::atomic::Ordering::Release);
         tracing::warn!(
             conn_id = ?self.sender.lane_id(),
             %description,
@@ -2496,6 +2542,8 @@ impl<H: Handler<DriverReplySink>> Driver<H> {
                 peer_request_parity: peer_settings.parity,
                 observer,
             }),
+            inbound_item_credit: BTreeMap::new(),
+            protocol_failed: std::sync::atomic::AtomicBool::new(false),
             in_flight_handlers: BTreeMap::new(),
             handler_futs: FuturesUnordered::new(),
             local_control_tx,
@@ -2599,6 +2647,22 @@ impl<H: Handler<DriverReplySink>> Driver<H> {
     /// loop waiting for a handler to finish.
     pub async fn run(&mut self) {
         loop {
+            if self
+                .protocol_failed
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                // Stop accepting peer input while the connection processes the
+                // protocol-close request, but preserve its reported close reason.
+                // A stalled close must not retain the driver indefinitely.
+                if self.closed_rx.borrow().is_none() {
+                    let _ = vox_types::time::tokio::timeout(
+                        Duration::from_secs(2),
+                        self.closed_rx.changed(),
+                    )
+                    .await;
+                }
+                break;
+            }
             tracing::trace!("driver select loop top");
             let idle_sleep_duration = self.shared.next_request_idle_sleep_duration();
             let has_handlers = !self.handler_futs.is_empty();
@@ -2819,6 +2883,21 @@ impl<H: Handler<DriverReplySink>> Driver<H> {
                 channel_id,
                 additional,
             } => {
+                if self.shared.is_channel_terminal(channel_id) {
+                    return;
+                }
+                let Some(available) = self.inbound_item_credit.get(&channel_id).copied() else {
+                    self.protocol_violation("credit granted before an incoming item".into());
+                    return;
+                };
+                let Some(next) = available.checked_add(additional) else {
+                    self.protocol_violation("inbound channel credit overflow".into());
+                    return;
+                };
+                if next > self.shared.local_initial_channel_credit {
+                    self.protocol_violation("inbound channel credit exceeds capacity".into());
+                    return;
+                }
                 self.shared.observe_channel(channel_id, None, |channel| {
                     ChannelEvent::CreditGranted {
                         channel,
@@ -2826,7 +2905,7 @@ impl<H: Handler<DriverReplySink>> Driver<H> {
                     }
                 });
                 self.shared.mark_outbound_progress();
-                let _ = self
+                let sent = self
                     .sender
                     .send(ConnectionMessage::Channel(ChannelMessage {
                         id: channel_id,
@@ -2835,6 +2914,9 @@ impl<H: Handler<DriverReplySink>> Driver<H> {
                         }),
                     }))
                     .await;
+                if sent.is_ok() && !self.shared.is_channel_terminal(channel_id) {
+                    self.inbound_item_credit.insert(channel_id, next);
+                }
             }
         }
     }
@@ -2924,10 +3006,19 @@ impl<H: Handler<DriverReplySink>> Driver<H> {
                 }
             };
             for channel_id in channels {
-                let sender = self.shared.inbound_channel_sender(channel_id);
-                let _ = sender
-                    .send(IncomingChannelMessage::WriterSchema(Arc::clone(&bundle)))
-                    .await;
+                match self
+                    .shared
+                    .deliver_writer_schema(channel_id, Arc::clone(&bundle))
+                {
+                    Ok(()) | Err(ChannelMailboxTrySendError::Closed(_)) => {}
+                    Err(ChannelMailboxTrySendError::Full(_)) => {
+                        self.protocol_violation(format!(
+                            "channel {:?} exceeded pending writer schema budget",
+                            channel_id
+                        ));
+                        return;
+                    }
+                }
             }
         }
     }
@@ -3116,6 +3207,19 @@ impl<H: Handler<DriverReplySink>> Driver<H> {
                     return;
                 }
 
+                let remaining = self
+                    .inbound_item_credit
+                    .entry(chan_id)
+                    .or_insert(self.shared.local_initial_channel_credit);
+                if *remaining == 0 {
+                    self.protocol_violation(format!(
+                        "channel {:?} exceeded granted item credit",
+                        chan_id
+                    ));
+                    return;
+                }
+                *remaining -= 1;
+
                 tracing::trace!(
                     conn_id = self.sender.lane_id().0,
                     channel_id = chan_id.0,
@@ -3125,22 +3229,31 @@ impl<H: Handler<DriverReplySink>> Driver<H> {
                     ChannelBody::Item(item) => item,
                     _ => unreachable!(),
                 });
-                let sender = self.shared.inbound_channel_sender(chan_id);
-                if sender
-                    .send(IncomingChannelMessage::Item(item))
-                    .await
-                    .is_err()
+                match self
+                    .shared
+                    .deliver_item(chan_id, IncomingChannelMessage::Item(item))
                 {
-                    self.shared.record_inbound_item_not_enqueued(chan_id);
-                    self.shared.channel_senders.lock().remove(&chan_id);
-                    self.shared.channel_receivers.lock().remove(&chan_id);
-                    self.close_outbound_channel(chan_id);
-                    let _ = self
-                        .local_control_tx
-                        .send(DriverLocalControl::ResetChannel {
-                            channel_id: chan_id,
-                        });
-                    return;
+                    None => return,
+                    Some(Ok(())) => {}
+                    Some(Err(ChannelMailboxTrySendError::Full(_))) => {
+                        self.protocol_violation(format!(
+                            "channel {:?} item mailbox exceeds advertised credit",
+                            chan_id
+                        ));
+                        return;
+                    }
+                    Some(Err(ChannelMailboxTrySendError::Closed(_))) => {
+                        self.shared.record_inbound_item_not_enqueued(chan_id);
+                        self.shared.channel_senders.lock().remove(&chan_id);
+                        self.shared.channel_receivers.lock().remove(&chan_id);
+                        self.close_outbound_channel(chan_id);
+                        let _ = self
+                            .local_control_tx
+                            .send(DriverLocalControl::ResetChannel {
+                                channel_id: chan_id,
+                            });
+                        return;
+                    }
                 }
                 self.shared
                     .observe_channel(chan_id, None, |channel| ChannelEvent::ItemReceived {

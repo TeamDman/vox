@@ -537,6 +537,7 @@ struct CloseRequest {
     conn_id: LaneId,
     metadata: Metadata,
     result_tx: vox_rt::sync::oneshot::Sender<Result<(), ConnectionError>>,
+    deadline: Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -605,6 +606,23 @@ fn send_drop_control(
     req: DropControlRequest,
 ) -> Result<(), ()> {
     tx.send(req).map_err(|_| ())
+}
+
+/// Dropping an in-progress close request leaves its wire outcome uncertain.
+/// Request connection termination; a control request is not teardown proof.
+struct CloseRequestAbortGuard {
+    control: mpsc::UnboundedSender<DropControlRequest>,
+    armed: bool,
+}
+
+impl Drop for CloseRequestAbortGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                send_drop_control(&self.control, DropControlRequest::ResourceClose)
+            }));
+        }
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -734,17 +752,42 @@ impl ConnectionHandle {
         metadata: Metadata,
     ) -> Result<(), ConnectionError> {
         let (result_tx, result_rx) = vox_rt::sync::oneshot::channel("connection.close_result");
-        self.close_tx
-            .send(CloseRequest {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut guard = CloseRequestAbortGuard {
+            control: self.control_tx.clone(),
+            armed: true,
+        };
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| ConnectionError::Protocol("lane close deadline elapsed".into()))?;
+        vox_types::time::tokio::timeout(
+            remaining,
+            self.close_tx.send(CloseRequest {
                 conn_id: lane_id,
                 metadata,
                 result_tx,
-            })
+                deadline,
+            }),
+        )
+        .await
+        .map_err(|_| ConnectionError::Protocol("lane close deadline elapsed".into()))?
+        .map_err(|_| ConnectionError::Protocol("connection closed".into()))?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| ConnectionError::Protocol("lane close deadline elapsed".into()))?;
+        let result = vox_types::time::tokio::timeout(remaining, result_rx)
             .await
+            .map_err(|_| ConnectionError::Protocol("lane close deadline elapsed".into()))?
             .map_err(|_| ConnectionError::Protocol("connection closed".into()))?;
-        result_rx
-            .await
-            .map_err(|_| ConnectionError::Protocol("connection closed".into()))?
+        if deadline <= Instant::now() {
+            return Err(ConnectionError::Protocol(
+                "lane close deadline elapsed".into(),
+            ));
+        }
+        guard.armed = false;
+        result
     }
 
     /// Request shutdown of the entire connection and all lanes.
@@ -3340,49 +3383,87 @@ impl Connection {
             )));
             return;
         }
-
-        // Remove the connection slot — this drops conn_tx and causes the
-        // Driver to exit cleanly.
-        if self
-            .remove_connection_with_reason(&req.conn_id, ConnectionCloseReason::Local)
-            .is_none()
-        {
-            let _ = req.result_tx.send(Err(ConnectionError::Protocol(
-                "connection not found".into(),
-            )));
-            return;
-        }
-
-        if self.resource_exhausted {
-            let _ = req.result_tx.send(Err(ConnectionError::Protocol(
-                "lane retirement has an unsettled or unknown outcome".into(),
-            )));
-            return;
-        }
-
-        // Send LaneClose to the peer.
-        let send_result = self
-            .connection_core
-            .send(
-                Message {
-                    lane_id: req.conn_id,
-                    payload: MessagePayload::LaneClose(LaneClose {
-                        metadata: req.metadata,
-                    }),
-                },
-                None,
-                None,
-            )
+        let result = self
+            .close_lane_gracefully(req.conn_id, req.metadata, req.deadline)
             .await;
+        let _ = req.result_tx.send(result);
+    }
 
-        if send_result.is_err() {
-            let _ = req.result_tx.send(Err(ConnectionError::Protocol(
-                "failed to send LaneClose".into(),
-            )));
-            return;
+    /// Close lane admission, fence already-admitted work, and only then send
+    /// LaneClose. A failure after beginning is uncertain and terminates the
+    /// connection rather than reporting a graceful close.
+    async fn close_lane_gracefully(
+        &mut self,
+        conn_id: LaneId,
+        metadata: Metadata,
+        deadline: Instant,
+    ) -> Result<(), ConnectionError> {
+        let generation = match self.conns.get(&conn_id) {
+            Some(ConnectionSlot::Active(state)) => Some(state.generation.clone()),
+            Some(ConnectionSlot::PendingOutbound(_)) => None,
+            _ => return Err(ConnectionError::Protocol("connection not found".into())),
+        };
+        let core = self.connection_core.clone();
+        let result = async {
+            if !core.guarded_responses {
+                return Err("transport cannot establish local write settlement");
+            }
+            if let Some(generation) = &generation {
+                generation
+                    .try_begin_drain()
+                    .map_err(|_| "lane admission cutoff could not be established")?;
+            }
+            core.fence_outbound(deadline)
+                .await
+                .map_err(|_| "lane drain did not complete")?;
+            if let Some(generation) = &generation {
+                generation
+                    .try_finish_drain()
+                    .map_err(|_| "lane write settlement is uncertain")?;
+            }
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .filter(|remaining| !remaining.is_zero())
+                .ok_or("lane close deadline elapsed")?;
+            vox_types::time::tokio::timeout(
+                remaining,
+                core.send(
+                    Message {
+                        lane_id: conn_id,
+                        payload: MessagePayload::LaneClose(LaneClose { metadata }),
+                    },
+                    None,
+                    None,
+                ),
+            )
+            .await
+            .map_err(|_| "lane close deadline elapsed")?
+            .map_err(|_| "failed to send LaneClose")?;
+            if deadline <= Instant::now() {
+                return Err("lane close deadline elapsed");
+            }
+            Ok(())
         }
-
-        let _ = req.result_tx.send(Ok(()));
+        .await;
+        if let Err(reason) = result {
+            self.resource_exhausted = true;
+            core.force_stop_admission();
+            self.outbound_abort.abort();
+            return Err(ConnectionError::Protocol(reason.into()));
+        }
+        if self
+            .remove_connection_with_reason(&conn_id, ConnectionCloseReason::Local)
+            .is_none()
+            || self.resource_exhausted
+        {
+            self.resource_exhausted = true;
+            core.force_stop_admission();
+            self.outbound_abort.abort();
+            return Err(ConnectionError::Protocol(
+                "lane retirement has an unsettled outcome".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Attempt local drain and shared transport close under the original
@@ -3477,30 +3558,23 @@ impl Connection {
                     trace!("ignoring root close control request");
                     return true;
                 }
-
-                let removed = self
-                    .remove_connection_with_reason(&conn_id, ConnectionCloseReason::Local)
-                    .is_some();
-                if self.resource_exhausted {
-                    return false;
+                if !self.conns.contains_key(&conn_id) {
+                    return true;
                 }
-                if removed {
-                    let _ = self
-                        .connection_core
-                        .send(
-                            Message {
-                                lane_id: conn_id,
-                                payload: MessagePayload::LaneClose(LaneClose {
-                                    metadata: vox_types::Metadata::default(),
-                                }),
-                            },
-                            None,
-                            None,
-                        )
-                        .await;
+                match self
+                    .close_lane_gracefully(
+                        conn_id,
+                        vox_types::Metadata::default(),
+                        Instant::now() + Duration::from_secs(1),
+                    )
+                    .await
+                {
+                    Ok(()) => true,
+                    Err(error) => {
+                        warn!(%conn_id, %error, "local lane close incomplete");
+                        false
+                    }
                 }
-
-                true
             }
             DropControlRequest::ProtocolClose {
                 conn_id,
@@ -4149,7 +4223,9 @@ async fn run_outbound_worker(
             if locally_successful
                 && !matches!(
                     settlement,
-                    Ok(lane_retirement::LanePhase::Open | lane_retirement::LanePhase::Retired)
+                    Ok(lane_retirement::LanePhase::Open
+                        | lane_retirement::LanePhase::Draining
+                        | lane_retirement::LanePhase::Retired)
                 )
             {
                 result = Err(std::io::Error::new(
@@ -4486,6 +4562,18 @@ impl ConnectionCore {
         vox_types::time::tokio::timeout(remaining()?, self.stop_outbound_admission())
             .await
             .map_err(|_| FenceError::Deadline)?;
+        self.fence_outbound(deadline).await
+    }
+
+    /// Fence already-admitted queue work without closing admission for other
+    /// lanes. A caller must establish its own lane-specific admission cutoff.
+    async fn fence_outbound(&self, deadline: Instant) -> Result<(), FenceError> {
+        let remaining = || {
+            deadline
+                .checked_duration_since(Instant::now())
+                .filter(|duration| !duration.is_zero())
+                .ok_or(FenceError::Deadline)
+        };
         let (reached_tx, reached_rx) = oneshot::channel("connection.shutdown_fence");
         vox_types::time::tokio::timeout(
             remaining()?,
@@ -6827,6 +6915,235 @@ mod tests {
             outcome.is_err() && frames == 0,
             "prechecked old lane wrote after retirement: outcome={outcome:?}, frames={frames}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_lane_close_drains_admitted_batches_before_lane_close() {
+        struct FirstWriteGate {
+            started: Mutex<Option<oneshot::Sender<()>>>,
+            release: Mutex<Option<oneshot::Receiver<()>>>,
+            sent: Arc<Mutex<Vec<(LaneId, &'static str)>>>,
+        }
+        impl ConduitTx for FirstWriteGate {
+            type Error = std::io::Error;
+            type Msg = MessageFamily;
+            type Prepared = (LaneId, &'static str);
+            fn prepare_send(&self, message: Message<'_>) -> Result<Self::Prepared, Self::Error> {
+                let kind = match message.payload {
+                    MessagePayload::ChannelMessage(_) => "channel",
+                    MessagePayload::LaneClose(_) => "lane-close",
+                    _ => "other",
+                };
+                Ok((message.lane_id, kind))
+            }
+            fn send_success_is_locally_settled(&self) -> bool {
+                true
+            }
+            async fn send_prepared(&self, prepared: Self::Prepared) -> Result<(), Self::Error> {
+                let release = self.release.lock().unwrap().take();
+                if let Some(release) = release {
+                    if let Some(started) = self.started.lock().unwrap().take() {
+                        let _ = started.send(());
+                    }
+                    let _ = release.await;
+                }
+                self.sent.lock().unwrap().push(prepared);
+                Ok(())
+            }
+            async fn close(self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        fn channel() -> ChannelMessage<'static> {
+            ChannelMessage {
+                id: vox_types::ChannelId(3),
+                body: vox_types::ChannelBody::Close(vox_types::ChannelClose {
+                    metadata: Metadata::default(),
+                }),
+            }
+        }
+        let (_open_tx, open_rx) = mpsc::channel("lane_drain.open", 1);
+        let (_close_tx, close_rx) = mpsc::channel("lane_drain.close", 1);
+        let (control_tx, control_rx) = mpsc::unbounded_channel("lane_drain.control");
+        let (started_tx, started_rx) = oneshot::channel("lane_drain.started");
+        let (release_tx, release_rx) = oneshot::channel("lane_drain.release");
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let mut connection = Connection::pre_handshake(
+            FirstWriteGate {
+                started: Mutex::new(Some(started_tx)),
+                release: Mutex::new(Some(release_rx)),
+                sent: sent.clone(),
+            },
+            PendingRx,
+            None,
+            open_rx,
+            close_rx,
+            control_tx,
+            control_rx,
+            None,
+            None,
+        );
+        let settings = ConnectionSettings {
+            parity: Parity::Odd,
+            max_concurrent_requests: 4,
+            initial_channel_credit: 4,
+        };
+        let control = connection
+            .establish_from_handshake(test_handshake(settings.clone(), settings.clone()))
+            .unwrap();
+        let lane = connection.make_connection_handle(LaneId(2), settings.clone(), settings);
+        let first = tokio::spawn(async move {
+            control
+                .sender
+                .send(ConnectionMessage::Channel(channel()))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let sender_a = lane.sender.clone();
+        let sender_b = lane.sender.clone();
+        let queued_a =
+            tokio::spawn(async move { sender_a.send(ConnectionMessage::Channel(channel())).await });
+        let queued_b =
+            tokio::spawn(async move { sender_b.send(ConnectionMessage::Channel(channel())).await });
+        let core = connection.connection_core.clone();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while core.outbound_queue_stats().0 < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let generation = lane.sender.lane_generation.clone();
+        let (result_tx, result_rx) = oneshot::channel("lane_drain.close_result");
+        let close = tokio::spawn(async move {
+            connection
+                .handle_close_request(CloseRequest {
+                    conn_id: LaneId(2),
+                    metadata: Metadata::default(),
+                    result_tx,
+                    deadline: Instant::now() + Duration::from_secs(1),
+                })
+                .await;
+            connection
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while generation.phase() == lane_retirement::LanePhase::Open {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let late = tokio::time::timeout(
+            Duration::from_millis(200),
+            lane.sender.send(ConnectionMessage::Channel(channel())),
+        )
+        .await
+        .expect("post-cutoff send did not resolve");
+        assert!(late.is_err(), "post-cutoff send was admitted");
+        let _ = release_tx.send(());
+        assert!(first.await.unwrap().is_ok());
+        let result_a = queued_a.await.unwrap();
+        let result_b = queued_b.await.unwrap();
+        let close_result = result_rx.await.unwrap();
+        let connection = close.await.unwrap();
+        connection.outbound_abort.abort();
+        assert!(
+            result_a.is_ok() && result_b.is_ok(),
+            "admitted lane writes failed"
+        );
+        assert!(close_result.is_ok(), "graceful lane close failed");
+        assert_eq!(
+            *sent.lock().unwrap(),
+            vec![
+                (LaneId::CONTROL, "channel"),
+                (LaneId(2), "channel"),
+                (LaneId(2), "channel"),
+                (LaneId(2), "lane-close"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_local_lane_close_fails_without_sending_lane_close() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let (mut connection, _control) = make_settled_capturing_connection(sent.clone());
+        let settings = ConnectionSettings {
+            parity: Parity::Odd,
+            max_concurrent_requests: 1,
+            initial_channel_credit: 1,
+        };
+        let _lane =
+            connection.make_connection_handle(LaneId(2), settings.clone(), settings.clone());
+        let (result_tx, result_rx) = oneshot::channel("expired_lane_close.result");
+        connection
+            .handle_close_request(CloseRequest {
+                conn_id: LaneId(2),
+                metadata: Metadata::default(),
+                result_tx,
+                deadline: Instant::now(),
+            })
+            .await;
+        assert!(result_rx.await.unwrap().is_err());
+        assert!(sent.lock().unwrap().is_empty());
+        assert!(connection.resource_exhausted);
+        assert!(
+            connection
+                .try_make_connection_handle(LaneId(2), settings.clone(), settings)
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn unsettled_transport_lane_close_fails_without_sending_lane_close() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let (mut connection, _control) = make_capturing_connection(sent.clone());
+        let settings = ConnectionSettings {
+            parity: Parity::Odd,
+            max_concurrent_requests: 1,
+            initial_channel_credit: 1,
+        };
+        let _lane = connection.make_connection_handle(LaneId(2), settings.clone(), settings);
+        let (result_tx, result_rx) = oneshot::channel("unsettled_lane_close.result");
+        connection
+            .handle_close_request(CloseRequest {
+                conn_id: LaneId(2),
+                metadata: Metadata::default(),
+                result_tx,
+                deadline: Instant::now() + Duration::from_secs(1),
+            })
+            .await;
+        assert!(result_rx.await.unwrap().is_err());
+        assert!(connection.resource_exhausted);
+        assert!(sent.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelling_public_lane_close_requests_connection_abort() {
+        let (open_tx, _open_rx) = mpsc::channel("cancel_lane_close.open", 1);
+        let (close_tx, mut close_rx) = mpsc::channel("cancel_lane_close.close", 1);
+        let (control_tx, mut control_rx) = mpsc::unbounded_channel("cancel_lane_close.control");
+        let handle = ConnectionHandle {
+            open_tx,
+            close_tx,
+            control_tx,
+            peer_identity: PeerIdentity::anonymous(),
+            peer_evidence: PeerEvidence::none(),
+            _control_caller: None,
+        };
+        let task =
+            tokio::spawn(async move { handle.close_lane(LaneId(2), Metadata::default()).await });
+        let request = close_rx.recv().await.expect("close was not queued");
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(matches!(
+            control_rx.recv().await,
+            Some(DropControlRequest::ResourceClose)
+        ));
+        drop(request);
+        // The control request is not proof that the transport stopped.
     }
 
     #[tokio::test]
@@ -9643,6 +9960,7 @@ mod tests {
                 conn_id: LaneId(1),
                 metadata: vox_types::Metadata::default(),
                 result_tx: close_result_tx,
+                deadline: Instant::now() + Duration::from_secs(1),
             })
             .await;
 

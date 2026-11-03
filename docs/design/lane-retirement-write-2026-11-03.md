@@ -160,6 +160,28 @@ retained sender/gate references across multiple lane generations.
 This proposal does not complete response reservation, gate lifetime cleanup or
 connection shutdown, and does not authorize live transfer.
 
+### Local lane close review follow-up
+
+A review of `6303b9f1` found that local close retired a lane before its queued
+admitted batches ran, then could report successful `LaneClose` even though
+those batches failed. A deterministic test reproduced this. The local WIP now
+introduces a `Draining` state: the lane lifetime lock rejects new queue commits
+while allowing batches committed before that transition to take a write
+lease. A connection-worker fence waits for prior queue work before the lane is
+retired and `LaneClose` is sent. The focused regression checks two queued
+batches, their results, a rejected post-cutoff send, and wire order. Tests also
+cover an active lease, deadline failure, caller cancellation, and a transport
+that cannot prove local settlement.
+
+This is an unreviewed prototype. The fence is connection-wide and retains a
+sticky failure for an earlier rejected batch, so an unrelated prior rejection
+can conservatively fail a lane close. A timeout, cancellation, unavailable
+lane lock, or unqualified transport requests connection abort and reports an
+error; abort is not proof of writer termination. The local success result is
+not a peer receipt. Remote close, other transport implementations, real
+concurrent traffic, cancellation at every boundary, and the one-second budget
+need independent review and further qualification.
+
 ## Forwarded request identity: unresolved ingress boundary
 
 The connection currently inserts `(request ID, method ID)` into a mutable

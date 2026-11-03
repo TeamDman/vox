@@ -10,6 +10,8 @@ use std::sync::{Arc, Mutex};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum LanePhase {
     Open,
+    /// Admission is closed but previously queued batches may still write.
+    Draining,
     Retiring,
     Retired,
     Quarantined,
@@ -93,7 +95,7 @@ impl LaneLifetime {
         if state.phase == LanePhase::Quarantined {
             return Err(LaneWriteError::Quarantined);
         }
-        if state.phase != LanePhase::Open {
+        if !matches!(state.phase, LanePhase::Open | LanePhase::Draining) {
             return Err(LaneWriteError::NotOpen);
         }
         if state.active_write.is_some() {
@@ -129,8 +131,47 @@ impl LaneLifetime {
         Ok(Self::mark_retiring(&mut state))
     }
 
+    /// Close admission atomically against queue commit while keeping already
+    /// admitted work eligible for the worker. The owner must fence the queue
+    /// before calling `try_finish_drain` or sending LaneClose.
+    pub(super) fn try_begin_drain(&self) -> Result<(), LaneWriteError> {
+        let mut state = match self.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::WouldBlock) => return Err(LaneWriteError::Busy),
+            Err(std::sync::TryLockError::Poisoned(_)) => return Err(LaneWriteError::Poisoned),
+        };
+        if state.phase != LanePhase::Open {
+            return Err(LaneWriteError::NotOpen);
+        }
+        if state.unconfirmed_write {
+            state.phase = LanePhase::Quarantined;
+            return Err(LaneWriteError::Quarantined);
+        }
+        state.phase = LanePhase::Draining;
+        Ok(())
+    }
+
+    /// A worker fence must already have settled every earlier batch. Failure
+    /// here remains uncertain and cannot authorize LaneClose or ID reuse.
+    pub(super) fn try_finish_drain(&self) -> Result<(), LaneWriteError> {
+        let mut state = match self.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::WouldBlock) => return Err(LaneWriteError::Busy),
+            Err(std::sync::TryLockError::Poisoned(_)) => return Err(LaneWriteError::Poisoned),
+        };
+        if state.phase != LanePhase::Draining {
+            return Err(LaneWriteError::NotOpen);
+        }
+        if state.unconfirmed_write || state.active_write.is_some() {
+            state.phase = LanePhase::Quarantined;
+            return Err(LaneWriteError::Quarantined);
+        }
+        state.phase = LanePhase::Retired;
+        Ok(())
+    }
+
     fn mark_retiring(state: &mut LaneState) -> LanePhase {
-        if state.phase == LanePhase::Open {
+        if matches!(state.phase, LanePhase::Open | LanePhase::Draining) {
             state.phase = LanePhase::Retiring;
         }
         if state.phase == LanePhase::Retiring && state.active_write.is_none() {
@@ -165,11 +206,13 @@ impl LaneWriteLease {
         let Ok(state) = self.state.lock() else {
             return false;
         };
-        matches!(state.phase, LanePhase::Open | LanePhase::Retiring)
-            && state
-                .active_write
-                .as_ref()
-                .is_some_and(|active| Arc::ptr_eq(active, &self.token))
+        matches!(
+            state.phase,
+            LanePhase::Open | LanePhase::Draining | LanePhase::Retiring
+        ) && state
+            .active_write
+            .as_ref()
+            .is_some_and(|active| Arc::ptr_eq(active, &self.token))
     }
 
     /// A lease represents exactly one batch; it cannot authorize two replies.
@@ -181,11 +224,13 @@ impl LaneWriteLease {
         let Ok(state) = self.state.lock() else {
             return false;
         };
-        if !matches!(state.phase, LanePhase::Open | LanePhase::Retiring)
-            || !state
-                .active_write
-                .as_ref()
-                .is_some_and(|active| Arc::ptr_eq(active, &self.token))
+        if !matches!(
+            state.phase,
+            LanePhase::Open | LanePhase::Draining | LanePhase::Retiring
+        ) || !state
+            .active_write
+            .as_ref()
+            .is_some_and(|active| Arc::ptr_eq(active, &self.token))
         {
             return false;
         }
@@ -270,6 +315,48 @@ impl Drop for LaneWriteLease {
 mod tests {
     use super::*;
     use std::sync::{Barrier, mpsc};
+
+    #[test]
+    fn draining_rejects_new_admission_but_settles_previously_queued_work() {
+        let lane = LaneLifetime::new();
+        assert!(lane.commit_admission(|| ()).is_ok());
+        lane.try_begin_drain().unwrap();
+        assert!(matches!(
+            lane.commit_admission(|| ()),
+            Err(LaneWriteError::NotOpen)
+        ));
+        let lease = lane.acquire_write().unwrap();
+        assert_eq!(lease.settle(true).unwrap(), LanePhase::Draining);
+        lane.try_finish_drain().unwrap();
+        assert_eq!(lane.phase(), LanePhase::Retired);
+        assert!(matches!(lane.acquire_write(), Err(LaneWriteError::NotOpen)));
+    }
+
+    #[test]
+    fn draining_keeps_an_existing_write_lease_until_it_settles() {
+        let lane = LaneLifetime::new();
+        let lease = lane.acquire_write().unwrap();
+        lane.try_begin_drain().unwrap();
+        assert!(matches!(
+            lane.commit_admission(|| ()),
+            Err(LaneWriteError::NotOpen)
+        ));
+        assert_eq!(lease.settle(true).unwrap(), LanePhase::Draining);
+        lane.try_finish_drain().unwrap();
+        assert_eq!(lane.phase(), LanePhase::Retired);
+    }
+
+    #[test]
+    fn finishing_drain_with_a_live_write_quarantines_the_lane() {
+        let lane = LaneLifetime::new();
+        let _lease = lane.acquire_write().unwrap();
+        lane.try_begin_drain().unwrap();
+        assert!(matches!(
+            lane.try_finish_drain(),
+            Err(LaneWriteError::Quarantined)
+        ));
+        assert_eq!(lane.phase(), LanePhase::Quarantined);
+    }
 
     #[test]
     fn admission_commit_and_retirement_use_the_same_lock() {

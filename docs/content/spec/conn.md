@@ -179,6 +179,15 @@ top of it.
 > after it has received all payloads committed before the close began. A graceful
 > close MUST NOT cause loss or reordering of previously committed payloads.
 
+> r[link.tx.shared-close]
+>
+> A transport offering shared outbound close MUST establish one admission
+> cutoff: payloads admitted before it remain ordered before close, and later
+> payloads MUST fail. A bounded close MUST include admission, queueing, flush,
+> and transport shutdown in its deadline. On cancellation, failure or expiry,
+> it MUST initiate abort and MUST NOT report graceful close as successful.
+> Completion of a local flush or close does not establish receipt by the peer.
+
 > r[link.rx.recv]
 >
 > Receiving MUST yield exactly one payload per `recv` call, as an owned backing

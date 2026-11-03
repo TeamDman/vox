@@ -5,6 +5,7 @@
 //! framing.
 
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 use vox_rt::sync::{mpsc, oneshot};
@@ -113,9 +114,14 @@ pub struct StreamLink<R, W> {
 }
 
 #[derive(Debug)]
-struct QueuedFrame {
-    bytes: Vec<u8>,
-    flushed: oneshot::Sender<()>,
+enum QueuedWrite {
+    Frame {
+        bytes: Vec<u8>,
+        flushed: oneshot::Sender<()>,
+    },
+    Close {
+        completed: oneshot::Sender<io::Result<()>>,
+    },
 }
 
 impl<R, W> StreamLink<R, W> {
@@ -307,7 +313,7 @@ where
     type Rx = StreamLinkRx<BufReader<R>>;
 
     fn split(self) -> (Self::Tx, Self::Rx) {
-        let (tx_chan, mut rx_chan) = mpsc::channel::<QueuedFrame>("stream_link_tx", 128);
+        let (tx_chan, mut rx_chan) = mpsc::channel::<QueuedWrite>("stream_link_tx", 128);
         let (read_tx, read_rx) = mpsc::channel::<io::Result<Option<Backing>>>(
             "stream_link_rx",
             self.receive_queue_capacity.get(),
@@ -377,22 +383,57 @@ where
             // can validate immediately rather than blocking until the first real frame.
             writer.write_all(&link_prologue(false)).await?;
             writer.flush().await?;
-            while let Some(frame) = rx_chan.recv().await {
-                let len = frame_len_prefix(frame.bytes.len())?;
+            while let Some(message) = rx_chan.recv().await {
+                let QueuedWrite::Frame { bytes, flushed } = message else {
+                    if let QueuedWrite::Close { completed } = message {
+                        let result = writer.shutdown().await;
+                        let failed = result.is_err();
+                        let _ = completed.send(result);
+                        return if failed {
+                            Err(io::Error::other("stream shutdown failed"))
+                        } else {
+                            Ok(())
+                        };
+                    }
+                    unreachable!();
+                };
+                let len = frame_len_prefix(bytes.len())?;
                 writer.write_all(&len).await?;
-                writer.write_all(&frame.bytes).await?;
-                let mut flushed = vec![frame.flushed];
+                writer.write_all(&bytes).await?;
+                let mut flushed = vec![flushed];
+                let mut close = None;
                 // Drain any already-queued messages before flushing,
                 // so bursts coalesce into fewer syscalls.
-                while let Ok(frame) = rx_chan.try_recv() {
-                    let len = frame_len_prefix(frame.bytes.len())?;
-                    writer.write_all(&len).await?;
-                    writer.write_all(&frame.bytes).await?;
-                    flushed.push(frame.flushed);
+                while let Ok(message) = rx_chan.try_recv() {
+                    match message {
+                        QueuedWrite::Frame {
+                            bytes,
+                            flushed: done,
+                        } => {
+                            let len = frame_len_prefix(bytes.len())?;
+                            writer.write_all(&len).await?;
+                            writer.write_all(&bytes).await?;
+                            flushed.push(done);
+                        }
+                        QueuedWrite::Close { completed } => {
+                            close = Some(completed);
+                            break;
+                        }
+                    }
                 }
                 writer.flush().await?;
                 for flushed in flushed {
                     let _ = flushed.send(());
+                }
+                if let Some(completed) = close {
+                    let result = writer.shutdown().await;
+                    let failed = result.is_err();
+                    let _ = completed.send(result);
+                    return if failed {
+                        Err(io::Error::other("stream shutdown failed"))
+                    } else {
+                        Ok(())
+                    };
                 }
             }
             writer.shutdown().await?;
@@ -403,6 +444,8 @@ where
             StreamLinkTx {
                 tx: tx_chan,
                 writer_task,
+                admission: vox_rt::sync::Mutex::new("stream_link_admission", false),
+                close_claimed: AtomicBool::new(false),
             },
             StreamLinkRx {
                 rx: read_rx,
@@ -419,8 +462,83 @@ where
 
 /// Sending half of a [`StreamLink`].
 pub struct StreamLinkTx {
-    tx: mpsc::Sender<QueuedFrame>,
+    tx: mpsc::Sender<QueuedWrite>,
     writer_task: JoinHandle<io::Result<()>>,
+    admission: vox_rt::sync::Mutex<bool>,
+    close_claimed: AtomicBool,
+}
+
+struct AbortCloseOnDrop<'a> {
+    writer: &'a JoinHandle<io::Result<()>>,
+    completed: bool,
+}
+
+impl Drop for AbortCloseOnDrop<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.writer.abort();
+        }
+    }
+}
+
+impl StreamLinkTx {
+    // r[impl link.tx.shared-close]
+    /// Close the shared outbound stream after already admitted frames. The
+    /// budget covers admission, enqueue and shutdown; expiry aborts the writer.
+    /// An abort is asynchronous and does not prove the writer has stopped.
+    pub async fn close_shared_bounded(&self, budget: std::time::Duration) -> io::Result<()> {
+        if self.close_claimed.swap(true, Ordering::AcqRel) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "stream close already requested",
+            ));
+        }
+        let mut guard = AbortCloseOnDrop {
+            writer: &self.writer_task,
+            completed: false,
+        };
+        if budget.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "stream close deadline expired",
+            ));
+        }
+        let close = async {
+            let mut closed = self.admission.lock().await;
+            if *closed {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "stream already closing",
+                ));
+            }
+            *closed = true;
+            let (completed, wait) = oneshot::channel("stream_link_close");
+            self.tx
+                .send(QueuedWrite::Close { completed })
+                .await
+                .map_err(|_| {
+                    io::Error::new(io::ErrorKind::ConnectionReset, "stream writer task stopped")
+                })?;
+            drop(closed);
+            wait.await.map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::ConnectionReset,
+                    "stream writer stopped during close",
+                )
+            })?
+        };
+        match vox_types::time::tokio::timeout(budget, close).await {
+            Ok(Ok(())) => {
+                guard.completed = true;
+                Ok(())
+            }
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "stream close deadline expired",
+            )),
+        }
+    }
 }
 
 impl LinkTx for StreamLinkTx {
@@ -429,11 +547,19 @@ impl LinkTx for StreamLinkTx {
         // r[impl link.tx.send]
         // r[impl link.tx.cancel-safe]
         // r[impl link.message.empty]
+        let closed = self.admission.lock().await;
+        if *closed {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "stream already closing",
+            ));
+        }
         let permit = self.tx.clone().reserve_owned().await.map_err(|_| {
             io::Error::new(io::ErrorKind::ConnectionReset, "stream writer task stopped")
         })?;
         let (flushed, wait_for_flush) = oneshot::channel("stream_link_flushed");
-        drop(permit.send(QueuedFrame { bytes, flushed }));
+        drop(permit.send(QueuedWrite::Frame { bytes, flushed }));
+        drop(closed);
         wait_for_flush.await.map_err(|_| {
             io::Error::new(
                 io::ErrorKind::ConnectionReset,
@@ -978,6 +1104,18 @@ mod tests {
         }
     }
 
+    fn test_sender(
+        tx: mpsc::Sender<QueuedWrite>,
+        writer_task: JoinHandle<io::Result<()>>,
+    ) -> StreamLinkTx {
+        StreamLinkTx {
+            tx,
+            writer_task,
+            admission: vox_rt::sync::Mutex::new("stream_test_admission", false),
+            close_claimed: AtomicBool::new(false),
+        }
+    }
+
     // r[verify link]
     // r[verify link.split]
     // r[verify link.message]
@@ -1012,6 +1150,171 @@ mod tests {
             let msg = rx_b.recv().await.unwrap().unwrap();
             assert_eq!(payload(&msg), *expected);
         }
+    }
+
+    // r[verify link.tx.shared-close]
+    #[tokio::test]
+    async fn shared_close_flushes_admitted_frames_and_rejects_later_sends() {
+        let (a, b) = duplex_pair();
+        let (tx, _rx) = a.split();
+        let (_other_tx, mut other_rx) = b.split();
+        tx.send(b"first".to_vec()).await.unwrap();
+        tx.send(b"second".to_vec()).await.unwrap();
+        tx.close_shared_bounded(std::time::Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(payload(&other_rx.recv().await.unwrap().unwrap()), b"first");
+        assert_eq!(payload(&other_rx.recv().await.unwrap().unwrap()), b"second");
+        assert!(other_rx.recv().await.unwrap().is_none());
+        assert_eq!(
+            tx.send(b"late".to_vec()).await.unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe
+        );
+    }
+
+    #[tokio::test]
+    async fn simultaneous_shared_close_has_one_owner() {
+        let (a, b) = duplex_pair();
+        let (tx, _rx) = a.split();
+        let (_other_tx, mut other_rx) = b.split();
+        let (first, second) = tokio::join!(
+            tx.close_shared_bounded(std::time::Duration::from_secs(2)),
+            tx.close_shared_bounded(std::time::Duration::from_secs(2)),
+        );
+        assert_ne!(first.is_ok(), second.is_ok());
+        let error = first.err().or_else(|| second.err()).unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert!(other_rx.recv().await.unwrap().is_none());
+    }
+
+    // r[verify link.tx.shared-close]
+    #[tokio::test]
+    async fn shared_close_waits_for_a_frame_already_in_flight() {
+        let (tx, mut rx) = mpsc::channel::<QueuedWrite>("close_inflight", 2);
+        let (started, started_rx) = oneshot::channel("close_inflight_started");
+        let (release, release_rx) = oneshot::channel("close_inflight_release");
+        let writer = vox_rt::spawn(async move {
+            let QueuedWrite::Frame { bytes, flushed } = rx.recv().await.unwrap() else {
+                panic!("expected frame")
+            };
+            assert_eq!(bytes, b"first");
+            let _ = started.send(());
+            let _ = release_rx.await;
+            let _ = flushed.send(());
+            let QueuedWrite::Close { completed } = rx.recv().await.unwrap() else {
+                panic!("expected close")
+            };
+            let _ = completed.send(Ok(()));
+            Ok(())
+        });
+        let sender = std::sync::Arc::new(test_sender(tx, writer));
+        let sending = sender.clone();
+        let send = tokio::spawn(async move { sending.send(b"first".to_vec()).await });
+        started_rx.await.unwrap();
+        let closing = sender.clone();
+        let close = tokio::spawn(async move {
+            closing
+                .close_shared_bounded(std::time::Duration::from_secs(2))
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(!close.is_finished());
+        release.send(()).unwrap();
+        send.await.unwrap().unwrap();
+        close.await.unwrap().unwrap();
+        assert_eq!(
+            sender.send(b"late".to_vec()).await.unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe
+        );
+    }
+
+    // r[verify link.tx.shared-close]
+    #[tokio::test]
+    async fn cancelling_shared_close_aborts_writer() {
+        let (tx, mut rx) = mpsc::channel::<QueuedWrite>("cancel_shared_close", 1);
+        let (started, started_rx) = oneshot::channel("cancel_shared_close_started");
+        let (dropped, dropped_rx) = oneshot::channel("cancel_shared_close_dropped");
+        struct NotifyDrop(Option<oneshot::Sender<()>>);
+        impl Drop for NotifyDrop {
+            fn drop(&mut self) {
+                if let Some(done) = self.0.take() {
+                    let _ = done.send(());
+                }
+            }
+        }
+        let writer = vox_rt::spawn(async move {
+            let _guard = NotifyDrop(Some(dropped));
+            let QueuedWrite::Close { completed: _held } = rx.recv().await.unwrap() else {
+                panic!("expected close")
+            };
+            let _ = started.send(());
+            std::future::pending::<io::Result<()>>().await
+        });
+        let sender = std::sync::Arc::new(test_sender(tx, writer));
+        let closing = sender.clone();
+        let close = tokio::spawn(async move {
+            closing
+                .close_shared_bounded(std::time::Duration::from_secs(5))
+                .await
+        });
+        started_rx.await.unwrap();
+        close.abort();
+        let _cancelled = close.await.unwrap_err();
+        tokio::time::timeout(std::time::Duration::from_secs(2), dropped_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            sender.send(b"late".to_vec()).await.unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe
+        );
+    }
+
+    // r[verify link.tx.shared-close]
+    #[tokio::test]
+    async fn shared_close_deadline_aborts_stalled_writer_and_wakes_waiting_send() {
+        let (tx, rx) = mpsc::channel::<QueuedWrite>("close_blocked_writer", 1);
+        let (flushed, _wait) = oneshot::channel("close_blocked_frame");
+        tx.try_send(QueuedWrite::Frame {
+            bytes: vec![1],
+            flushed,
+        })
+        .unwrap();
+        let (started, started_rx) = oneshot::channel("close_blocked_started");
+        let (dropped, dropped_rx) = oneshot::channel("close_blocked_dropped");
+        struct NotifyDrop(Option<oneshot::Sender<()>>);
+        impl Drop for NotifyDrop {
+            fn drop(&mut self) {
+                if let Some(done) = self.0.take() {
+                    let _ = done.send(());
+                }
+            }
+        }
+        let writer_task = vox_rt::spawn(async move {
+            let _rx = rx;
+            let _guard = NotifyDrop(Some(dropped));
+            let _ = started.send(());
+            std::future::pending::<io::Result<()>>().await
+        });
+        let sender = std::sync::Arc::new(test_sender(tx, writer_task));
+        started_rx.await.unwrap();
+        let waiting = sender.clone();
+        let send = tokio::spawn(async move { waiting.send(vec![2]).await });
+        tokio::task::yield_now().await;
+        let error = sender
+            .close_shared_bounded(std::time::Duration::from_millis(50))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        tokio::time::timeout(std::time::Duration::from_secs(2), dropped_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let _send_error = tokio::time::timeout(std::time::Duration::from_secs(2), send)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
     }
 
     // r[verify link.message.empty]
@@ -1260,16 +1563,13 @@ mod tests {
     // r[verify transport.iroh.cancel-safe]
     #[tokio::test]
     async fn send_cancel_before_capacity_does_not_enqueue() {
-        let (tx, mut rx) = mpsc::channel::<QueuedFrame>("cancel_before_capacity", 1);
-        let link_tx = StreamLinkTx {
-            tx,
-            writer_task: vox_rt::spawn(async { Ok(()) }),
-        };
+        let (tx, mut rx) = mpsc::channel::<QueuedWrite>("cancel_before_capacity", 1);
+        let link_tx = test_sender(tx, vox_rt::spawn(async { Ok(()) }));
 
         let (flushed, _wait_for_flush) = oneshot::channel("first_flushed");
         link_tx
             .tx
-            .try_send(QueuedFrame {
+            .try_send(QueuedWrite::Frame {
                 bytes: b"first".to_vec(),
                 flushed,
             })
@@ -1285,7 +1585,10 @@ mod tests {
             );
         }
 
-        assert_eq!(rx.recv().await.unwrap().bytes, b"first".to_vec());
+        let QueuedWrite::Frame { bytes, .. } = rx.recv().await.unwrap() else {
+            panic!("expected frame")
+        };
+        assert_eq!(bytes, b"first".to_vec());
         assert!(matches!(
             rx.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
@@ -1298,19 +1601,22 @@ mod tests {
     // r[verify transport.iroh.cancel-safe]
     #[tokio::test]
     async fn send_cancel_after_enqueue_still_flushes_once() {
-        let (tx, mut rx) = mpsc::channel::<QueuedFrame>("cancel_after_enqueue", 1);
+        let (tx, mut rx) = mpsc::channel::<QueuedWrite>("cancel_after_enqueue", 1);
         let (started_tx, started_rx) = oneshot::channel("writer_started");
         let (release_tx, release_rx) = oneshot::channel("writer_release");
         let (recorded_tx, recorded_rx) = oneshot::channel("frame_recorded");
         let writer_task = vox_rt::spawn(async move {
-            let frame = rx.recv().await.expect("queued frame");
+            let QueuedWrite::Frame { bytes, flushed } = rx.recv().await.expect("queued frame")
+            else {
+                panic!("expected frame")
+            };
             let _ = started_tx.send(());
             let _ = release_rx.await;
-            let _ = recorded_tx.send(frame.bytes);
-            let _ = frame.flushed.send(());
+            let _ = recorded_tx.send(bytes);
+            let _ = flushed.send(());
             Ok(())
         });
-        let link_tx = StreamLinkTx { tx, writer_task };
+        let link_tx = test_sender(tx, writer_task);
 
         {
             let pending = link_tx.send(b"committed".to_vec());
@@ -1336,7 +1642,7 @@ mod tests {
                 }
             }
         }
-        let (tx, _rx) = mpsc::channel::<QueuedFrame>("drop_stalled_writer", 1);
+        let (tx, _rx) = mpsc::channel::<QueuedWrite>("drop_stalled_writer", 1);
         let (started_tx, started_rx) = oneshot::channel("stalled_writer_started");
         let (dropped_tx, dropped_rx) = oneshot::channel("stalled_writer_dropped");
         let writer_task = vox_rt::spawn(async move {
@@ -1344,7 +1650,7 @@ mod tests {
             let _ = started_tx.send(());
             std::future::pending::<io::Result<()>>().await
         });
-        let link_tx = StreamLinkTx { tx, writer_task };
+        let link_tx = test_sender(tx, writer_task);
         started_rx.await.unwrap();
         link_tx.abort();
         tokio::time::timeout(std::time::Duration::from_secs(2), dropped_rx)

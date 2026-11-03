@@ -4920,6 +4920,101 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "diagnostic: shutdown cannot interrupt a stalled message handler"]
+    async fn shutdown_interrupts_stalled_lane_rejection() {
+        struct StalledTx(Mutex<Option<oneshot::Sender<()>>>);
+        impl ConduitTx for StalledTx {
+            type Error = std::io::Error;
+            type Msg = MessageFamily;
+            type Prepared = ();
+            fn prepare_send(&self, _: Message<'_>) -> Result<(), Self::Error> {
+                Ok(())
+            }
+            async fn send_prepared(&self, _: ()) -> Result<(), Self::Error> {
+                if let Some(started) = self.0.lock().unwrap().take() {
+                    let _ = started.send(());
+                }
+                std::future::pending().await
+            }
+            async fn close(self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        struct OpenRx(Option<SelfRef<Message<'static>>>);
+        impl ConduitRx for OpenRx {
+            type Error = std::io::Error;
+            type Msg = MessageFamily;
+            async fn recv(&mut self) -> Result<Option<SelfRef<Message<'static>>>, Self::Error> {
+                if let Some(message) = self.0.take() {
+                    Ok(Some(message))
+                } else {
+                    std::future::pending().await
+                }
+            }
+        }
+        let (_open_tx, open_rx) = mpsc::channel("stalled_shutdown.open", 1);
+        let (_close_tx, close_rx) = mpsc::channel("stalled_shutdown.close", 1);
+        let (control_tx, control_rx) = mpsc::unbounded_channel("stalled_shutdown.control");
+        let (started_tx, started_rx) = oneshot::channel("stalled_shutdown.started");
+        let message = Message {
+            lane_id: LaneId(2),
+            payload: MessagePayload::LaneOpen(LaneOpen {
+                connection_settings: ConnectionSettings {
+                    parity: Parity::Even,
+                    max_concurrent_requests: 1,
+                    initial_channel_credit: 1,
+                },
+                metadata: Metadata::default(),
+            }),
+        };
+        let mut connection = Connection::pre_handshake(
+            StalledTx(Mutex::new(Some(started_tx))),
+            OpenRx(Some(SelfRef::owning(
+                Backing::Boxed(Box::default()),
+                message,
+            ))),
+            None,
+            open_rx,
+            close_rx,
+            control_tx.clone(),
+            control_rx,
+            None,
+            None,
+        );
+        connection
+            .establish_from_handshake(test_handshake(
+                ConnectionSettings {
+                    parity: Parity::Odd,
+                    max_concurrent_requests: 1,
+                    initial_channel_credit: 1,
+                },
+                ConnectionSettings {
+                    parity: Parity::Even,
+                    max_concurrent_requests: 1,
+                    initial_channel_credit: 1,
+                },
+            ))
+            .unwrap();
+        let worker_abort = connection.outbound_abort.clone();
+        let mut run = tokio::spawn(async move { connection.run().await });
+        tokio::time::timeout(Duration::from_secs(2), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        control_tx.send(DropControlRequest::Shutdown).unwrap();
+        let shutdown = tokio::time::timeout(Duration::from_millis(250), &mut run).await;
+        if shutdown.is_err() {
+            run.abort();
+            let _ = run.await;
+        }
+        worker_abort.abort();
+        assert!(
+            shutdown.is_ok(),
+            "shutdown was not observed while lane rejection was stalled"
+        );
+    }
+
+    #[tokio::test]
     async fn rejected_lane_does_not_wait_forever_for_stalled_peer() {
         struct StalledTx(Option<oneshot::Sender<()>>);
         impl Drop for StalledTx {

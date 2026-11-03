@@ -4190,6 +4190,43 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "diagnostic: a retained lane can currently send after shutdown"]
+    async fn retained_lane_cannot_send_after_explicit_shutdown() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let (mut connection, _control) = make_capturing_connection(sent.clone());
+        let lanes = Arc::new(Mutex::new(Vec::new()));
+        connection.lane_acceptor = Some(Arc::new(RetainLanes(lanes.clone())));
+        connection
+            .handle_inbound_open(LaneId(2), inbound_open(1, 1))
+            .await;
+        let sender = {
+            let held = lanes.lock().unwrap();
+            assert_eq!(held.len(), 1);
+            held[0].sender.clone()
+        };
+        connection
+            .control_tx
+            .send(DropControlRequest::Shutdown)
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), connection.run())
+            .await
+            .unwrap();
+        drop(connection);
+        let count_before = sent.lock().unwrap().len();
+        let message = ConnectionMessage::Channel(vox_types::ChannelMessage {
+            id: vox_types::ChannelId(1),
+            body: vox_types::ChannelBody::Close(vox_types::ChannelClose {
+                metadata: Metadata::default(),
+            }),
+        });
+        let outcome = tokio::time::timeout(Duration::from_secs(2), sender.send(message))
+            .await
+            .unwrap();
+        outcome.expect_err("retained lane accepted an outbound message after shutdown");
+        assert_eq!(sent.lock().unwrap().len(), count_before);
+    }
+
+    #[tokio::test]
     async fn rejected_lane_does_not_wait_forever_for_stalled_peer() {
         struct StalledTx(Option<oneshot::Sender<()>>);
         impl Drop for StalledTx {

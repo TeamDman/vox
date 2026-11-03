@@ -96,6 +96,9 @@ pub(crate) fn validate_link_prologue(
 /// independent of peer limits, outbound queues, and application payload quotas.
 pub const DEFAULT_MAX_RECEIVE_FRAME_BYTES: u32 = 16 * 1024 * 1024;
 
+/// Default number of complete incoming frames buffered by the stream reader.
+pub const DEFAULT_RECEIVE_QUEUE_CAPACITY: usize = 128;
+
 /// A [`Link`] over a byte stream with length-prefix framing.
 ///
 /// Wraps an `AsyncRead + AsyncWrite` pair. Each message is framed as
@@ -106,6 +109,7 @@ pub struct StreamLink<R, W> {
     reader: R,
     writer: W,
     max_receive_frame_bytes: u32,
+    receive_queue_capacity: std::num::NonZeroUsize,
 }
 
 #[derive(Debug)]
@@ -121,6 +125,8 @@ impl<R, W> StreamLink<R, W> {
             reader,
             writer,
             max_receive_frame_bytes: DEFAULT_MAX_RECEIVE_FRAME_BYTES,
+            receive_queue_capacity: std::num::NonZeroUsize::new(DEFAULT_RECEIVE_QUEUE_CAPACITY)
+                .expect("default receive queue capacity is nonzero"),
         }
     }
 
@@ -134,6 +140,18 @@ impl<R, W> StreamLink<R, W> {
     #[must_use]
     pub fn max_receive_frame_bytes(mut self, max: u32) -> Self {
         self.max_receive_frame_bytes = max;
+        self
+    }
+
+    /// Set the number of complete frames buffered by the reader task.
+    ///
+    /// Together with `max_receive_frame_bytes`, this bounds payload storage in
+    /// this queue to `(capacity + 1) * max_receive_frame_bytes`: the extra
+    /// frame may already be read while the queue is full. This excludes the
+    /// current consumer, downstream Vox queues, decoding and application data.
+    #[must_use]
+    pub fn receive_queue_capacity(mut self, capacity: std::num::NonZeroUsize) -> Self {
+        self.receive_queue_capacity = capacity;
         self
     }
 }
@@ -154,6 +172,7 @@ pub struct TcpLinkSource {
     resolve_timeout: std::time::Duration,
     connect_timeout: std::time::Duration,
     max_receive_frame_bytes: u32,
+    receive_queue_capacity: std::num::NonZeroUsize,
 }
 
 /// Default DNS resolution timeout.
@@ -177,6 +196,8 @@ impl TcpLinkSource {
             resolve_timeout: DEFAULT_RESOLVE_TIMEOUT,
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             max_receive_frame_bytes: DEFAULT_MAX_RECEIVE_FRAME_BYTES,
+            receive_queue_capacity: std::num::NonZeroUsize::new(DEFAULT_RECEIVE_QUEUE_CAPACITY)
+                .expect("default receive queue capacity is nonzero"),
         }
     }
 
@@ -185,6 +206,13 @@ impl TcpLinkSource {
     #[must_use]
     pub fn max_receive_frame_bytes(mut self, max: u32) -> Self {
         self.max_receive_frame_bytes = max;
+        self
+    }
+
+    /// Set the receive queue capacity for every produced link, including reconnects.
+    #[must_use]
+    pub fn receive_queue_capacity(mut self, capacity: std::num::NonZeroUsize) -> Self {
+        self.receive_queue_capacity = capacity;
         self
     }
 
@@ -229,7 +257,9 @@ impl LinkSource for TcpLinkSource {
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "TCP connect timed out"))??;
         stream.set_nodelay(self.nodelay)?;
         Ok(Attachment::initiator(
-            StreamLink::tcp(stream).max_receive_frame_bytes(self.max_receive_frame_bytes),
+            StreamLink::tcp(stream)
+                .max_receive_frame_bytes(self.max_receive_frame_bytes)
+                .receive_queue_capacity(self.receive_queue_capacity),
         ))
     }
 }
@@ -278,8 +308,10 @@ where
 
     fn split(self) -> (Self::Tx, Self::Rx) {
         let (tx_chan, mut rx_chan) = mpsc::channel::<QueuedFrame>("stream_link_tx", 128);
-        let (read_tx, read_rx) =
-            mpsc::channel::<io::Result<Option<Backing>>>("stream_link_rx", 128);
+        let (read_tx, read_rx) = mpsc::channel::<io::Result<Option<Backing>>>(
+            "stream_link_rx",
+            self.receive_queue_capacity.get(),
+        );
         let mut reader = self.reader;
         let max_receive_frame_bytes = self.max_receive_frame_bytes;
         let mut writer = BufWriter::new(self.writer);
@@ -1021,6 +1053,63 @@ mod tests {
             rx_a.recv().await.err().unwrap().kind(),
             io::ErrorKind::InvalidData
         );
+    }
+
+    #[tokio::test]
+    async fn receive_queue_bounds_read_ahead_to_capacity_plus_one_frame() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountedReader {
+            bytes: Vec<u8>,
+            read: Arc<AtomicUsize>,
+        }
+        impl AsyncRead for CountedReader {
+            fn poll_read(
+                self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+                buf: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<io::Result<()>> {
+                let offset = self.read.load(Ordering::SeqCst);
+                let count = buf.remaining().min(self.bytes.len() - offset);
+                buf.put_slice(&self.bytes[offset..offset + count]);
+                self.read.store(offset + count, Ordering::SeqCst);
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+        let mut bytes = link_prologue(false).to_vec();
+        for _ in 0..5 {
+            bytes.extend_from_slice(&4u32.to_le_bytes());
+            bytes.extend_from_slice(&[1; 4]);
+        }
+        let read = Arc::new(AtomicUsize::new(0));
+        let reader = CountedReader {
+            bytes,
+            read: read.clone(),
+        };
+        let (_tx, mut rx) = StreamLink::new(reader, tokio::io::sink())
+            .max_receive_frame_bytes(4)
+            .receive_queue_capacity(std::num::NonZeroUsize::new(2).unwrap())
+            .split();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while read.load(Ordering::SeqCst) < 6 + 3 * 8 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(read.load(Ordering::SeqCst), 6 + 3 * 8);
+        assert_eq!(payload(&rx.recv().await.unwrap().unwrap()), [1; 4]);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while read.load(Ordering::SeqCst) < 6 + 4 * 8 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     // r[verify transport.stream.receive-limit]

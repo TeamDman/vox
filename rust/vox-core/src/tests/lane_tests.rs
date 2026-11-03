@@ -36,6 +36,7 @@ async fn bounded_acceptor_uses_local_limits_and_reclaims_live_lane_slot() {
         max_peer_channel_ids_per_lane: 8,
         max_schemas_per_lane: 8,
         max_schema_bytes_per_lane: 1_000_000,
+        max_message_processing_time: std::time::Duration::from_secs(30),
     };
     let server = acceptor_conduit(server_conduit, server_handshake)
         .resource_limits(limits)
@@ -85,6 +86,7 @@ async fn transport_builder_propagates_resource_limits_through_handshake() {
         max_peer_channel_ids_per_lane: 8,
         max_schemas_per_lane: 8,
         max_schema_bytes_per_lane: 1_000_000,
+        max_message_processing_time: std::time::Duration::from_secs(30),
     };
     let server_task = tokio::spawn(async move {
         crate::acceptor_on(server_link)
@@ -140,6 +142,7 @@ async fn bounded_acceptor_closes_on_unknown_channel_flood() {
         max_peer_channel_ids_per_lane: 2,
         max_schemas_per_lane: 8,
         max_schema_bytes_per_lane: 1_000_000,
+        max_message_processing_time: std::time::Duration::from_secs(30),
     };
     let server = acceptor_conduit(server_conduit, test_acceptor_handshake())
         .resource_limits(limits)
@@ -203,6 +206,7 @@ async fn bounded_acceptor_preserves_delivery_before_receiver_registration() {
         max_peer_channel_ids_per_lane: 2,
         max_schemas_per_lane: 8,
         max_schema_bytes_per_lane: 1_000_000,
+        max_message_processing_time: std::time::Duration::from_secs(30),
     };
     let server = acceptor_conduit(server_conduit, test_acceptor_handshake())
         .resource_limits(limits)
@@ -293,6 +297,7 @@ async fn bounded_acceptor_rejects_oversized_credit_grants() {
         max_peer_channel_ids_per_lane: 2,
         max_schemas_per_lane: 8,
         max_schema_bytes_per_lane: 1_000_000,
+        max_message_processing_time: std::time::Duration::from_secs(30),
     };
     let server = acceptor_conduit(server_conduit, test_acceptor_handshake())
         .resource_limits(limits)
@@ -374,6 +379,7 @@ async fn bounded_acceptor_enforces_local_concurrent_request_limit() {
         max_peer_channel_ids_per_lane: 2,
         max_schemas_per_lane: 8,
         max_schema_bytes_per_lane: 1_000_000,
+        max_message_processing_time: std::time::Duration::from_secs(30),
     };
     let server = acceptor_conduit(server_conduit, server_handshake)
         .resource_limits(limits)

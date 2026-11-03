@@ -63,6 +63,9 @@ pub struct ConnectionResourceLimits {
     pub max_schemas_per_lane: usize,
     /// Sum of bytes in those schemas, counting replacements again.
     pub max_schema_bytes_per_lane: usize,
+    /// Maximum time to process one incoming message, including queue and
+    /// control-write backpressure. Exceeding it closes the connection.
+    pub max_message_processing_time: Duration,
 }
 
 pub const VOX_LANE_REJECT_REASON_METADATA_KEY: &str = "vox-lane-reject-reason";
@@ -1656,14 +1659,22 @@ impl Connection {
                         Ok(Some(msg)) => {
                             // Capture the frame's descriptors before the next
                             // recv overwrites them; thread them with the msg.
-                            #[cfg(unix)]
                             let fds = self.rx.take_frame_fds();
-                            #[cfg(not(unix))]
-                            self.rx.take_frame_fds();
-                            #[cfg(unix)]
-                            self.handle_message(msg, fds, &mut keepalive_runtime).await;
-                            #[cfg(not(unix))]
-                            self.handle_message(msg, (), &mut keepalive_runtime).await;
+                            let limits = self.resource_limits;
+                            let processing = self.handle_message(msg, fds, &mut keepalive_runtime);
+                            if let Some(limits) = limits {
+                                if vox_types::time::tokio::timeout(
+                                    limits.max_message_processing_time,
+                                    processing,
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    self.resource_exhausted = true;
+                                }
+                            } else {
+                                processing.await;
+                            }
                             if self.resource_exhausted {
                                 self.close_all_connections(ConnectionCloseReason::Local);
                                 break;
@@ -4064,6 +4075,7 @@ mod tests {
             max_peer_channel_ids_per_lane: 2,
             max_schemas_per_lane: 2,
             max_schema_bytes_per_lane: 4,
+            max_message_processing_time: Duration::from_secs(30),
         }
     }
 
@@ -4250,6 +4262,77 @@ mod tests {
             .await
             .expect("blocked protocol-error send must release its conduit")
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn resource_deadline_closes_connection_stalled_on_full_lane_queue() {
+        struct FloodRx(usize);
+        impl ConduitRx for FloodRx {
+            type Error = std::io::Error;
+            type Msg = MessageFamily;
+            async fn recv(&mut self) -> Result<Option<SelfRef<Message<'static>>>, Self::Error> {
+                if self.0 == 0 {
+                    return std::future::pending().await;
+                }
+                self.0 -= 1;
+                Ok(Some(SelfRef::owning(
+                    Backing::Boxed(Box::default()),
+                    Message {
+                        lane_id: LaneId::CONTROL,
+                        payload: MessagePayload::ChannelMessage(vox_types::ChannelMessage {
+                            id: vox_types::ChannelId(1),
+                            body: vox_types::ChannelBody::Close(vox_types::ChannelClose {
+                                metadata: Metadata::default(),
+                            }),
+                        }),
+                    },
+                )))
+            }
+        }
+        let (_open_tx, open_rx) = mpsc::channel("test.open.queue_stalled", 1);
+        let (_close_tx, close_rx) = mpsc::channel("test.close.queue_stalled", 1);
+        let (control_tx, control_rx) = mpsc::unbounded_channel("test.control.queue_stalled");
+        let mut connection = Connection::pre_handshake(
+            CapturingTx {
+                sent: Arc::new(Mutex::new(Vec::new())),
+            },
+            FloodRx(100),
+            None,
+            open_rx,
+            close_rx,
+            control_tx,
+            control_rx,
+            None,
+            None,
+        );
+        connection.resource_limits = Some(ConnectionResourceLimits {
+            max_message_processing_time: Duration::from_millis(25),
+            ..hardened_test_limits()
+        });
+        let mut control = connection
+            .establish_from_handshake(test_handshake(
+                ConnectionSettings {
+                    parity: Parity::Odd,
+                    max_concurrent_requests: 64,
+                    initial_channel_credit: 16,
+                },
+                ConnectionSettings {
+                    parity: Parity::Even,
+                    max_concurrent_requests: 64,
+                    initial_channel_credit: 16,
+                },
+            ))
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), connection.run())
+            .await
+            .expect("full lane queue must not stall hardened connection forever");
+        assert!(connection.resource_exhausted);
+        assert_eq!(control.close_reason(), Some(ConnectionCloseReason::Local));
+        let mut buffered = 0;
+        while control.rx.try_recv().is_ok() {
+            buffered += 1;
+        }
+        assert_eq!(buffered, 64);
     }
 
     #[tokio::test]

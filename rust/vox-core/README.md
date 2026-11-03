@@ -71,6 +71,7 @@ let limits = ConnectionResourceLimits {
     max_peer_channel_ids_per_lane: 64,
     max_schemas_per_lane: 128,
     max_schema_bytes_per_lane: 4 * 1024 * 1024,
+    max_message_processing_time: std::time::Duration::from_secs(30),
 };
 // Example with an already configured Link and a Mover lane acceptor:
 // vox_core::acceptor_on(link).max_concurrent_requests(4)
@@ -86,6 +87,12 @@ Exhausting a peer-call, channel or schema quota closes the connection; exhaustin
 lane-open quota sends a rejection and closes it. The live-lane quota is reusable
 after a lane closes. Locally opened lanes and application-created resources
 remain the application's responsibility.
+
+In bounded mode, `max_message_processing_time` also closes the connection if
+one inbound message cannot finish routing or sending its control response in
+time. This makes queue backpressure finite, so choose a value that allows the
+application to consume a full queue under expected load. It cannot preempt a
+blocking synchronous callback or replace handshake and application deadlines.
 
 If a resource-triggered rejection or protocol-error response cannot be flushed
 within one second, the runtime stops waiting, cancels its outbound worker, and calls the conduit's

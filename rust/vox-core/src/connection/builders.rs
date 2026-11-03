@@ -1353,6 +1353,7 @@ fn validate_resource_settings(
     if let Some(limits) = limits {
         if limits.max_initial_channel_credit == 0
             || limits.max_peer_channel_credit == 0
+            || limits.max_message_processing_time.is_zero()
             || limits.max_peer_channel_credit as usize > (usize::MAX >> 3)
             || limits.max_peer_concurrent_requests as usize > (usize::MAX >> 3)
             || local.initial_channel_credit > limits.max_initial_channel_credit

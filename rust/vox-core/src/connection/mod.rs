@@ -2952,6 +2952,7 @@ impl From<vox_types::ChannelWriterSchemaPlan> for PendingSchemaSend {
 struct OutboundBatch {
     conn_id: LaneId,
     request_id: Option<RequestId>,
+    outgoing_call: Option<(RequestId, vox_types::MethodId)>,
     payload_kind: &'static str,
     conn_state: Arc<std::sync::Mutex<SendConnState>>,
     tx: Arc<dyn DynConduitTx>,
@@ -2972,6 +2973,17 @@ struct PrepareOutboundError {
 
 async fn run_outbound_worker(mut rx: mpsc::Receiver<OutboundBatch>) {
     while let Some(batch) = rx.recv().await {
+        // Only a batch accepted by the queue can become an in-flight call. Do
+        // this before writing either its schema or its request to the transport,
+        // so a response cannot arrive before its method binding is registered.
+        if let Some((request_id, method_id)) = batch.outgoing_call {
+            batch
+                .conn_state
+                .lock()
+                .expect("send conn state mutex poisoned")
+                .inflight_outgoing
+                .insert(request_id, method_id);
+        }
         trace!(
             conn_id = %batch.conn_id,
             request_id = ?batch.request_id,
@@ -3265,6 +3277,13 @@ impl ConnectionCore {
         extra_schema_sends: Vec<PendingSchemaSend>,
     ) -> Result<PreparedOutboundBatch, PrepareOutboundError> {
         let conn_id = msg.lane_id;
+        let outgoing_call = match &msg.payload {
+            MessagePayload::RequestMessage(RequestMessage {
+                id,
+                body: RequestBody::Call(call),
+            }) => Some((*id, call.method_id)),
+            _ => None,
+        };
         let (request_id, payload_kind) = match &msg.payload {
             MessagePayload::RequestMessage(req) => {
                 let kind = match &req.body {
@@ -3433,6 +3452,7 @@ impl ConnectionCore {
             OutboundBatch {
                 conn_id,
                 request_id,
+                outgoing_call,
                 payload_kind,
                 conn_state,
                 tx,
@@ -3849,7 +3869,6 @@ impl ConnectionCore {
         call: &mut vox_types::RequestCall<'_>,
         forwarded_schemas: Option<&vox_types::SchemaRecvTracker>,
     ) -> Option<PendingSchemaSend> {
-        conn_state.inflight_outgoing.insert(request_id, method_id);
         // r[impl schema.exchange.caller]
         if conn_state
             .send_tracker
@@ -4813,6 +4832,49 @@ mod tests {
             !first_stranded && !second_stranded && !stale_request,
             "cancelled call left waiters stranded: {first_stranded}/{second_stranded}, stale request: {stale_request}"
         );
+    }
+
+    #[tokio::test]
+    async fn prepared_calls_become_inflight_only_when_worker_accepts_them() {
+        let (connection, lane) = make_capturing_connection(Arc::new(Mutex::new(Vec::new())));
+        let core = connection.connection_core.clone();
+        let request_id = RequestId(77);
+        let method_id = vox_types::MethodId(9);
+        let arg = 7u32;
+        let (batch, result, gates) = core
+            .prepare_outbound_batch(
+                Message {
+                    lane_id: lane.sender.lane_id(),
+                    payload: MessagePayload::RequestMessage(RequestMessage {
+                        id: request_id,
+                        body: RequestBody::Call(vox_types::RequestCall {
+                            method_id,
+                            channels: Vec::new(),
+                            args: vox_types::Payload::outgoing(&arg),
+                            schemas: Default::default(),
+                            metadata: Metadata::default(),
+                        }),
+                    }),
+                },
+                None,
+                None,
+                None,
+                Vec::new(),
+            )
+            .ok()
+            .expect("prepare call");
+        assert!(gates.is_empty());
+        assert_eq!(
+            core.take_outgoing_call_method(lane.sender.lane_id(), request_id),
+            None
+        );
+        assert!(core.outbound_tx.send(batch).await.is_ok());
+        result.await.unwrap().unwrap();
+        assert_eq!(
+            core.take_outgoing_call_method(lane.sender.lane_id(), request_id),
+            Some(method_id)
+        );
+        connection.outbound_abort.abort();
     }
 
     #[tokio::test]

@@ -3765,6 +3765,12 @@ impl ConnectionCore {
 
 pub trait DynConduitTx: MaybeSend + MaybeSync {
     fn abort(&self) {}
+    fn close_shared_bounded(self: Arc<Self>, _budget: Duration) -> OutboundSend {
+        Box::pin(std::future::ready(Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "shared bounded close is not supported by this conduit",
+        ))))
+    }
     fn prepare_msg<'a>(
         self: Arc<Self>,
         msg: Message<'a>,
@@ -3787,6 +3793,9 @@ where
 {
     fn abort(&self) {
         ConduitTx::abort(self);
+    }
+    fn close_shared_bounded(self: Arc<Self>, budget: Duration) -> OutboundSend {
+        Box::pin(async move { ConduitTx::close_shared_bounded(&*self, budget).await })
     }
     fn prepare_msg<'a>(
         self: Arc<Self>,
@@ -3914,6 +3923,28 @@ mod tests {
     }
 
     struct PendingRx;
+
+    #[tokio::test]
+    async fn unsupported_type_erased_conduit_does_not_claim_shared_close() {
+        let shared: Arc<dyn DynConduitTx> = Arc::new(CapturingTx {
+            sent: Arc::new(Mutex::new(Vec::new())),
+        });
+        let error = shared
+            .close_shared_bounded(Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+
+        use vox_types::Conduit;
+        let (link, _peer) = crate::memory_link_pair(4);
+        let (tx, _rx) = crate::BareConduit::<MessageFamily, _>::new(link).split();
+        let shared: Arc<dyn DynConduitTx> = Arc::new(tx);
+        let error = shared
+            .close_shared_bounded(Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    }
 
     impl ConduitRx for PendingRx {
         type Error = std::io::Error;
@@ -4224,6 +4255,111 @@ mod tests {
             .unwrap();
         outcome.expect_err("retained lane accepted an outbound message after shutdown");
         assert_eq!(sent.lock().unwrap().len(), count_before);
+    }
+
+    #[tokio::test]
+    #[ignore = "diagnostic: shutdown currently leaves capacity-blocked producers waiting"]
+    async fn shutdown_wakes_producer_waiting_for_outbound_capacity() {
+        struct StalledTx(Mutex<Option<oneshot::Sender<()>>>);
+        impl ConduitTx for StalledTx {
+            type Error = std::io::Error;
+            type Msg = MessageFamily;
+            type Prepared = ();
+            fn prepare_send(&self, _: Message<'_>) -> Result<(), Self::Error> {
+                Ok(())
+            }
+            async fn send_prepared(&self, _: ()) -> Result<(), Self::Error> {
+                let started = self.0.lock().unwrap().take();
+                if let Some(started) = started {
+                    let _ = started.send(());
+                }
+                std::future::pending().await
+            }
+            async fn close(self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        fn channel() -> vox_types::ChannelMessage<'static> {
+            vox_types::ChannelMessage {
+                id: vox_types::ChannelId(1),
+                body: vox_types::ChannelBody::Close(vox_types::ChannelClose {
+                    metadata: Metadata::default(),
+                }),
+            }
+        }
+        let (_open_tx, open_rx) = mpsc::channel("shutdown_capacity.open", 1);
+        let (_close_tx, close_rx) = mpsc::channel("shutdown_capacity.close", 1);
+        let (control_tx, control_rx) = mpsc::unbounded_channel("shutdown_capacity.control");
+        let (started, started_rx) = oneshot::channel("shutdown_capacity.started");
+        let mut connection = Connection::pre_handshake(
+            StalledTx(Mutex::new(Some(started))),
+            PendingRx,
+            None,
+            open_rx,
+            close_rx,
+            control_tx.clone(),
+            control_rx,
+            None,
+            None,
+        );
+        let lane = connection
+            .establish_from_handshake(test_handshake(
+                ConnectionSettings {
+                    parity: Parity::Odd,
+                    max_concurrent_requests: 1,
+                    initial_channel_credit: 1,
+                },
+                ConnectionSettings {
+                    parity: Parity::Even,
+                    max_concurrent_requests: 1,
+                    initial_channel_credit: 1,
+                },
+            ))
+            .unwrap();
+        let sender = lane.sender.clone();
+        let first_sender = sender.clone();
+        let first = tokio::spawn(async move {
+            first_sender
+                .send(ConnectionMessage::Channel(channel()))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let capacity = connection.connection_core.outbound_queue_stats().1;
+        for _ in 0..capacity {
+            sender
+                .try_send_channel_with_writer_schema(channel(), None)
+                .unwrap();
+        }
+        assert_eq!(
+            connection.connection_core.outbound_queue_stats(),
+            (capacity, capacity)
+        );
+        let blocked_sender = sender.clone();
+        let mut blocked = tokio::spawn(async move {
+            blocked_sender
+                .send(ConnectionMessage::Channel(channel()))
+                .await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut blocked)
+                .await
+                .is_err()
+        );
+        control_tx.send(DropControlRequest::Shutdown).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), connection.run())
+            .await
+            .unwrap();
+        let outcome = tokio::time::timeout(Duration::from_millis(200), &mut blocked).await;
+        first.abort();
+        blocked.abort();
+        connection.outbound_abort.abort();
+        let result = outcome
+            .expect("shutdown left the capacity-blocked producer waiting")
+            .unwrap();
+        result.expect_err("shutdown allowed a capacity-blocked send to succeed");
     }
 
     #[tokio::test]

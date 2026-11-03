@@ -137,6 +137,10 @@ impl<F: MsgFamily, LTx: LinkTx + MaybeSend + 'static> ConduitTx for BareConduitT
         self.link_tx.close().await
     }
 
+    async fn close_shared_bounded(&self, budget: std::time::Duration) -> std::io::Result<()> {
+        self.link_tx.close_shared_bounded(budget).await
+    }
+
     fn abort(&self) {
         self.link_tx.abort();
     }

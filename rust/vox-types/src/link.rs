@@ -71,6 +71,18 @@ pub trait LinkTx: MaybeSend + MaybeSync + 'static {
     where
         Self: Sized;
 
+    /// Request a bounded graceful close without consuming a shared sender.
+    /// Unsupported transports return an error and must not claim closure.
+    fn close_shared_bounded(
+        &self,
+        _budget: std::time::Duration,
+    ) -> impl Future<Output = std::io::Result<()>> + MaybeSend + '_ {
+        std::future::ready(Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "shared bounded close is not supported by this link",
+        )))
+    }
+
     /// Abort outbound work without waiting for a graceful flush, if supported.
     /// The default does nothing; transports may retain their own tasks after it.
     fn abort(&self) {}

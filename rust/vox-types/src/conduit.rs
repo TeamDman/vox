@@ -66,6 +66,17 @@ pub trait ConduitTx {
     where
         Self: Sized;
 
+    /// Request bounded graceful close through a shared sender, if supported.
+    fn close_shared_bounded(
+        &self,
+        _budget: std::time::Duration,
+    ) -> impl Future<Output = std::io::Result<()>> + MaybeSend + '_ {
+        std::future::ready(Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "shared bounded close is not supported by this conduit",
+        )))
+    }
+
     /// Abort outbound work without waiting for a graceful flush, if supported.
     fn abort(&self) {}
 }

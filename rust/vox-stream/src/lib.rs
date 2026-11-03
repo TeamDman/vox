@@ -446,6 +446,7 @@ where
                 writer_task,
                 admission: vox_rt::sync::Mutex::new("stream_link_admission", false),
                 close_claimed: AtomicBool::new(false),
+                terminal: AtomicBool::new(false),
             },
             StreamLinkRx {
                 rx: read_rx,
@@ -466,16 +467,19 @@ pub struct StreamLinkTx {
     writer_task: JoinHandle<io::Result<()>>,
     admission: vox_rt::sync::Mutex<bool>,
     close_claimed: AtomicBool,
+    terminal: AtomicBool,
 }
 
 struct AbortCloseOnDrop<'a> {
     writer: &'a JoinHandle<io::Result<()>>,
+    terminal: &'a AtomicBool,
     completed: bool,
 }
 
 impl Drop for AbortCloseOnDrop<'_> {
     fn drop(&mut self) {
         if !self.completed {
+            self.terminal.store(true, Ordering::Release);
             self.writer.abort();
         }
     }
@@ -488,6 +492,9 @@ impl StreamLinkTx {
     /// An abort is asynchronous and does not prove the writer has stopped.
     /// The cutoff is setting the flag under `admission`, not claiming the close;
     /// sends may be admitted while close waits for that mutex.
+    /// A failed or cancelled close sets `terminal` before aborting. A sender that
+    /// passed its final terminal check before that transition may still enqueue;
+    /// the abort can then cause that send to fail or have an uncertain outcome.
     pub async fn close_shared_bounded(&self, budget: std::time::Duration) -> io::Result<()> {
         if self.close_claimed.swap(true, Ordering::AcqRel) {
             return Err(io::Error::new(
@@ -497,6 +504,7 @@ impl StreamLinkTx {
         }
         let mut guard = AbortCloseOnDrop {
             writer: &self.writer_task,
+            terminal: &self.terminal,
             completed: false,
         };
         if budget.is_zero() {
@@ -550,7 +558,7 @@ impl LinkTx for StreamLinkTx {
         // r[impl link.tx.cancel-safe]
         // r[impl link.message.empty]
         let closed = self.admission.lock().await;
-        if *closed {
+        if *closed || self.terminal.load(Ordering::Acquire) {
             return Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "stream already closing",
@@ -559,6 +567,12 @@ impl LinkTx for StreamLinkTx {
         let permit = self.tx.clone().reserve_owned().await.map_err(|_| {
             io::Error::new(io::ErrorKind::ConnectionReset, "stream writer task stopped")
         })?;
+        if self.terminal.load(Ordering::Acquire) {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "stream is terminated",
+            ));
+        }
         let (flushed, wait_for_flush) = oneshot::channel("stream_link_flushed");
         drop(permit.send(QueuedWrite::Frame { bytes, flushed }));
         drop(closed);
@@ -575,7 +589,12 @@ impl LinkTx for StreamLinkTx {
         self.writer_task.await.map_err(io::Error::other)?
     }
 
+    async fn close_shared_bounded(&self, budget: std::time::Duration) -> io::Result<()> {
+        StreamLinkTx::close_shared_bounded(self, budget).await
+    }
+
     fn abort(&self) {
+        self.terminal.store(true, Ordering::Release);
         self.writer_task.abort();
     }
 }
@@ -1115,6 +1134,7 @@ mod tests {
             writer_task,
             admission: vox_rt::sync::Mutex::new("stream_test_admission", false),
             close_claimed: AtomicBool::new(false),
+            terminal: AtomicBool::new(false),
         }
     }
 
@@ -1433,6 +1453,21 @@ mod tests {
         assert!(other_rx.recv().await.unwrap().is_none());
     }
 
+    #[tokio::test]
+    async fn shared_close_is_forwarded_through_type_erased_bare_conduit() {
+        use vox_types::Conduit;
+        let (a, b) = duplex_pair();
+        let (tx, _rx) = vox_core::BareConduit::<vox_types::MessageFamily, _>::new(a).split();
+        let shared: std::sync::Arc<dyn vox_core::DynConduitTx> = std::sync::Arc::new(tx);
+        let (_other_tx, mut other_rx) = b.split();
+        shared
+            .clone()
+            .close_shared_bounded(std::time::Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert!(other_rx.recv().await.unwrap().is_none());
+    }
+
     // r[verify link.tx.shared-close]
     #[tokio::test]
     async fn shared_close_waits_for_a_frame_already_in_flight() {
@@ -1620,6 +1655,84 @@ mod tests {
             .unwrap();
         drop(held);
         let _send_error = sender.send(b"late".to_vec()).await.unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn cancelled_close_denies_sender_blocked_before_abort_is_observed() {
+        let (tx, mut rx) = mpsc::channel::<QueuedWrite>("terminal_pending_admission", 1);
+        let (flushed, _wait) = oneshot::channel("terminal_occupied");
+        tx.try_send(QueuedWrite::Frame {
+            bytes: b"occupied".to_vec(),
+            flushed,
+        })
+        .unwrap();
+        // The receiver remains owned by this test, so aborting the fake writer
+        // does not close the queue. Rejection must come from terminal admission.
+        let sender = std::sync::Arc::new(test_sender(
+            tx,
+            vox_rt::spawn(async { std::future::pending::<io::Result<()>>().await }),
+        ));
+        let sending = sender.clone();
+        let pending_send = tokio::spawn(async move { sending.send(b"blocked".to_vec()).await });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while sender.admission.try_lock().is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let closing = sender.clone();
+        let close = tokio::spawn(async move {
+            closing
+                .close_shared_bounded(std::time::Duration::from_secs(5))
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !sender.close_claimed.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        close.abort();
+        let _cancelled = close.await.unwrap_err();
+        assert!(sender.terminal.load(Ordering::Acquire));
+        let QueuedWrite::Frame { bytes, .. } = rx.recv().await.unwrap() else {
+            panic!("expected occupied frame")
+        };
+        assert_eq!(bytes, b"occupied");
+        let error = tokio::time::timeout(std::time::Duration::from_secs(2), pending_send)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert_eq!(
+            sender.send(b"late".to_vec()).await.unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe
+        );
+    }
+
+    #[tokio::test]
+    async fn abort_denies_send_even_while_receiver_is_still_held() {
+        let (tx, mut rx) = mpsc::channel::<QueuedWrite>("explicit_abort_admission", 1);
+        let sender = test_sender(
+            tx,
+            vox_rt::spawn(async { std::future::pending::<io::Result<()>>().await }),
+        );
+        sender.abort();
+        assert_eq!(
+            sender.send(b"late".to_vec()).await.unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
     }
 
     #[tokio::test]

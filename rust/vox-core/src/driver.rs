@@ -934,11 +934,49 @@ impl DriverShared {
         sender
     }
 
+    // Terminal messages do not consume item credit. Queue exactly one terminal
+    // after already accepted items even if every item slot is occupied. Hold
+    // the lifecycle lock across mailbox creation and enqueue so registration
+    // and request termination cannot observe a terminal channel before its
+    // terminal message is available, or create a second mailbox for it.
+    fn deliver_remote_terminal(
+        &self,
+        channel_id: ChannelId,
+        message: IncomingChannelMessage,
+    ) -> Option<bool> {
+        let mut lifecycle = self.channel_lifecycle.lock();
+        if lifecycle.all_closed || !lifecycle.terminal.insert(channel_id) {
+            return None;
+        }
+        let signal = lifecycle.close_signals.get(&channel_id).cloned();
+        let mut senders = self.channel_senders.lock();
+        let mut receivers = self.channel_receivers.lock();
+        let sender = senders.remove(&channel_id).unwrap_or_else(|| {
+            let (sender, receiver) = self.new_channel_mailbox();
+            receivers.insert(channel_id, receiver);
+            sender
+        });
+        // At most one extra entry per channel: lifecycle is marked terminal
+        // before insertion, including against request termination and repeats.
+        let delivered = sender.force_send(message).is_ok();
+        if !delivered {
+            receivers.remove(&channel_id);
+        }
+        drop(receivers);
+        drop(senders);
+        drop(lifecycle);
+        if let Some(signal) = signal {
+            signal.close();
+        }
+        Some(delivered)
+    }
+
     fn register_inbound_channel_receiver(
         &self,
         channel_id: ChannelId,
     ) -> (ChannelMailboxReceiver<IncomingChannelMessage>, bool) {
-        let terminal = self.is_channel_terminal(channel_id);
+        let lifecycle = self.channel_lifecycle.lock();
+        let terminal = lifecycle.all_closed || lifecycle.terminal.contains(&channel_id);
         let mut senders = self.channel_senders.lock();
         let mut receivers = self.channel_receivers.lock();
 
@@ -3111,10 +3149,6 @@ impl<H: Handler<DriverReplySink>> Driver<H> {
             }
             // r[impl rpc.channel.close]
             ChannelBodyKind::Close => {
-                if self.shared.is_channel_terminal(chan_id) {
-                    return;
-                }
-                let sender = self.shared.inbound_channel_sender(chan_id);
                 tracing::trace!(
                     conn_id = self.sender.lane_id().0,
                     channel_id = chan_id.0,
@@ -3124,14 +3158,14 @@ impl<H: Handler<DriverReplySink>> Driver<H> {
                     ChannelBody::Close(close) => close,
                     _ => unreachable!(),
                 });
-                let delivered = sender
-                    .send(IncomingChannelMessage::Close(close))
-                    .await
-                    .is_ok();
-                self.shared.channel_senders.lock().remove(&chan_id);
+                let Some(delivered) = self
+                    .shared
+                    .deliver_remote_terminal(chan_id, IncomingChannelMessage::Close(close))
+                else {
+                    return;
+                };
                 self.close_outbound_channel(chan_id);
                 if !delivered {
-                    self.shared.channel_receivers.lock().remove(&chan_id);
                     return;
                 }
                 self.shared
@@ -3142,10 +3176,6 @@ impl<H: Handler<DriverReplySink>> Driver<H> {
             }
             // r[impl rpc.channel.reset]
             ChannelBodyKind::Reset => {
-                if self.shared.is_channel_terminal(chan_id) {
-                    return;
-                }
-                let sender = self.shared.inbound_channel_sender(chan_id);
                 tracing::trace!(
                     conn_id = self.sender.lane_id().0,
                     channel_id = chan_id.0,
@@ -3155,14 +3185,14 @@ impl<H: Handler<DriverReplySink>> Driver<H> {
                     ChannelBody::Reset(reset) => reset,
                     _ => unreachable!(),
                 });
-                let delivered = sender
-                    .send(IncomingChannelMessage::Reset(reset))
-                    .await
-                    .is_ok();
-                self.shared.channel_senders.lock().remove(&chan_id);
+                let Some(delivered) = self
+                    .shared
+                    .deliver_remote_terminal(chan_id, IncomingChannelMessage::Reset(reset))
+                else {
+                    return;
+                };
                 self.close_outbound_channel(chan_id);
                 if !delivered {
-                    self.shared.channel_receivers.lock().remove(&chan_id);
                     return;
                 }
                 self.shared

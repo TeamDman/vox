@@ -365,6 +365,11 @@ weight = 12
 > closure. Lossy application policy belongs above this layer through APIs such
 > as `Tx::try_send`.
 >
+> A full item queue MUST NOT prevent the runtime from recording the first
+> terminal channel message and continuing to poll the consumer that drains the
+> queue. Terminal buffering MUST remain bounded when a peer repeats terminal
+> messages, and accepted items MUST precede a graceful close.
+>
 > This is an in-scope delivery guarantee only. It does not make raw channels
 > stable across request response, lane close, connection loss, reconnect, or
 > process death.

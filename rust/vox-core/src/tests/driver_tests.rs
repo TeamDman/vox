@@ -2695,6 +2695,97 @@ async fn buffered_close_before_registration_keeps_channel_terminal() {
     );
 }
 
+// r[verify rpc.channel.delivery.reliable]
+// r[verify rpc.channel.close]
+#[tokio::test]
+async fn full_early_item_mailbox_accepts_one_terminal_without_stalling_lane() {
+    full_early_item_mailbox_terminal(false).await;
+}
+
+// r[verify rpc.channel.delivery.reliable]
+// r[verify rpc.channel.reset]
+#[tokio::test]
+async fn full_early_item_mailbox_accepts_reset_without_stalling_lane() {
+    full_early_item_mailbox_terminal(true).await;
+}
+
+async fn full_early_item_mailbox_terminal(reset: bool) {
+    let (client, server, _connection) = captured_test_lane_pair(EchoHandler).await;
+    let sender = client.caller.driver().connection_sender().clone();
+    let channel_id = ChannelId(777);
+    let value = 123_u32;
+    for _ in 0..16 {
+        sender
+            .send(crate::connection::ConnectionMessage::Channel(
+                ChannelMessage {
+                    id: channel_id,
+                    body: ChannelBody::Item(ChannelItem {
+                        item: Payload::outgoing(&value),
+                    }),
+                },
+            ))
+            .await
+            .expect("send item within initial credit");
+    }
+    for _ in 0..32 {
+        sender
+            .send(crate::connection::ConnectionMessage::Channel(
+                ChannelMessage {
+                    id: channel_id,
+                    body: if reset {
+                        ChannelBody::Reset(vox_types::ChannelReset {
+                            metadata: Metadata::default(),
+                        })
+                    } else {
+                        ChannelBody::Close(ChannelClose {
+                            metadata: Metadata::default(),
+                        })
+                    },
+                },
+            ))
+            .await
+            .expect("send close");
+    }
+    // The unrelated RPC cannot complete if the lane driver is blocked trying
+    // to enqueue a terminal message into the full, unregistered mailbox.
+    let response = tokio::time::timeout(
+        Duration::from_secs(2),
+        client.caller.call(RequestCall {
+            channels: Vec::new(),
+            method_id: MethodId(1),
+            args: Payload::outgoing(&value),
+            schemas: Default::default(),
+            metadata: Default::default(),
+        }),
+    )
+    .await
+    .expect("full terminal mailbox stalled unrelated RPC")
+    .expect("unrelated RPC failed");
+    assert!(matches!(response.get().ret, Payload::Encoded(_)));
+
+    let mut rx = server
+        .caller
+        .driver()
+        .register_rx_channel(channel_id)
+        .receiver;
+    for _ in 0..16 {
+        assert!(matches!(
+            rx.recv().await,
+            Some(IncomingChannelMessage::Item(_))
+        ));
+    }
+    let terminal = rx.recv().await;
+    assert!(matches!(
+        (reset, terminal),
+        (false, Some(IncomingChannelMessage::Close(_)))
+            | (true, Some(IncomingChannelMessage::Reset(_)))
+    ));
+    assert!(
+        rx.recv().await.is_none(),
+        "duplicate terminal must not be queued"
+    );
+}
+
 #[tokio::test]
 async fn unsolicited_response_id_is_ignored_and_does_not_break_calls() {
     let (caller, server_caller, _server_connection) = captured_test_lane_pair(EchoHandler).await;

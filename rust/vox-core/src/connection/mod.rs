@@ -2922,8 +2922,8 @@ pub(crate) struct ConnectionCore {
     before_admission_commit: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     observer: Option<VoxObserverHandle>,
     /// Open gates for channels the local side opened but whose declaring Call has not
-    /// yet been enqueued. Keyed by channel id; entries removed when opened.
-    channel_gates: std::sync::Mutex<HashMap<vox_types::ChannelId, Arc<ChannelGate>>>,
+    /// yet been enqueued. Channel IDs are allocated per lane, so both are needed.
+    channel_gates: std::sync::Mutex<HashMap<(LaneId, vox_types::ChannelId), Arc<ChannelGate>>>,
 }
 
 pub trait OutboundSendFuture: Future<Output = std::io::Result<()>> + MaybeSend + 'static {}
@@ -3188,11 +3188,11 @@ impl ConnectionCore {
     /// the channel binder at allocation time (during a Call's arg-encode), BEFORE the
     /// Tx sink is bound — so a concurrently-parked `tx.send` that wakes on the bind
     /// finds the gate and waits. Idempotent. (`r[impl rpc.channel.item]`)
-    pub(crate) fn register_channel_gate(&self, channel_id: vox_types::ChannelId) {
+    pub(crate) fn register_channel_gate(&self, lane_id: LaneId, channel_id: vox_types::ChannelId) {
         self.channel_gates
             .lock()
             .expect("channel gates mutex poisoned")
-            .entry(channel_id)
+            .entry((lane_id, channel_id))
             .or_insert_with(|| {
                 Arc::new(ChannelGate {
                     opened: std::sync::atomic::AtomicBool::new(false),
@@ -3203,7 +3203,7 @@ impl ConnectionCore {
 
     /// Open the gates for `channels` (the channels a just-enqueued Call declared),
     /// releasing any parked channel-item sends so they reach the wire AFTER the Call.
-    fn open_channel_gates(&self, channels: &[vox_types::ChannelId]) {
+    fn open_channel_gates(&self, lane_id: LaneId, channels: &[vox_types::ChannelId]) {
         if channels.is_empty() {
             return;
         }
@@ -3212,7 +3212,7 @@ impl ConnectionCore {
             .lock()
             .expect("channel gates mutex poisoned");
         for id in channels {
-            if let Some(gate) = gates.remove(id) {
+            if let Some(gate) = gates.remove(&(lane_id, *id)) {
                 gate.opened
                     .store(true, std::sync::atomic::Ordering::Release);
                 gate.notify.notify_waiters();
@@ -3223,13 +3223,13 @@ impl ConnectionCore {
     /// Wait until channel `channel_id`'s declaring Call has been enqueued (its gate is
     /// open), if a gate exists. No gate (or an already-open one) returns immediately —
     /// so a non-channel item, or an item whose Call already went out, never blocks.
-    async fn await_channel_gate(&self, channel_id: vox_types::ChannelId) {
+    async fn await_channel_gate(&self, lane_id: LaneId, channel_id: vox_types::ChannelId) {
         let gate = {
             let gates = self
                 .channel_gates
                 .lock()
                 .expect("channel gates mutex poisoned");
-            match gates.get(&channel_id) {
+            match gates.get(&(lane_id, channel_id)) {
                 Some(gate) => Arc::clone(gate),
                 None => return,
             }
@@ -3248,11 +3248,11 @@ impl ConnectionCore {
 
     /// Whether channel `channel_id` may send now: true if it has no gate (not a
     /// locally-opened, not-yet-declared channel) or its gate is already open.
-    fn channel_gate_open(&self, channel_id: vox_types::ChannelId) -> bool {
+    fn channel_gate_open(&self, lane_id: LaneId, channel_id: vox_types::ChannelId) -> bool {
         self.channel_gates
             .lock()
             .expect("channel gates mutex poisoned")
-            .get(&channel_id)
+            .get(&(lane_id, channel_id))
             .is_none_or(|gate| gate.opened.load(std::sync::atomic::Ordering::Acquire))
     }
 
@@ -3473,7 +3473,7 @@ impl ConnectionCore {
         // r[impl rpc.channel.item] Hold an outbound channel item/close until the Call
         // that opened its channel has been enqueued — the sender upholds frame order.
         if let Some(channel_id) = gated_channel_id(&msg) {
-            let gate = self.await_channel_gate(channel_id).fuse();
+            let gate = self.await_channel_gate(lane_id, channel_id).fuse();
             let stopped = self.wait_admission_stopped().fuse();
             futures_util::pin_mut!(gate, stopped);
             futures_util::select_biased! {
@@ -3490,7 +3490,7 @@ impl ConnectionCore {
         ) {
             Ok(prepared) => prepared,
             Err(err) => {
-                self.open_channel_gates(&err.gated_channels);
+                self.open_channel_gates(lane_id, &err.gated_channels);
                 declared_channels(&err.gated_channels);
                 return Err(());
             }
@@ -3527,7 +3527,7 @@ impl ConnectionCore {
         // This Call is now on the queue (or the queue is gone): release its channels'
         // gates so parked items follow it — unconditionally, so a failed enqueue never
         // strands a parked `tx.send`.
-        self.open_channel_gates(&gated_channels);
+        self.open_channel_gates(lane_id, &gated_channels);
         if queued.is_err() {
             if let Some(observer) = &self.observer {
                 observer.driver_event(vox_types::DriverEvent::OutboundQueueClosed { lane_id });
@@ -3572,7 +3572,7 @@ impl ConnectionCore {
         // enqueued yet can't go out (frame order); signal backpressure so the caller
         // retries — the async `send` path parks instead.
         if let Some(channel_id) = gated_channel_id(&msg)
-            && !self.channel_gate_open(channel_id)
+            && !self.channel_gate_open(lane_id, channel_id)
         {
             return Err(TrySendError::Full(()));
         }
@@ -3585,14 +3585,14 @@ impl ConnectionCore {
         ) {
             Ok(prepared) => prepared,
             Err(err) => {
-                self.open_channel_gates(&err.gated_channels);
+                self.open_channel_gates(lane_id, &err.gated_channels);
                 return Err(TrySendError::Closed(()));
             }
         };
         let guard = match self.admission.try_lock() {
             Ok(guard) => guard,
             Err(_) => {
-                self.open_channel_gates(&gated_channels);
+                self.open_channel_gates(lane_id, &gated_channels);
                 return Err(if self.admission_is_stopped() {
                     TrySendError::Closed(())
                 } else {
@@ -3602,7 +3602,7 @@ impl ConnectionCore {
         };
         if *guard || self.admission_is_stopped() {
             drop(guard);
-            self.open_channel_gates(&gated_channels);
+            self.open_channel_gates(lane_id, &gated_channels);
             return Err(TrySendError::Closed(()));
         }
         // As above, a forced stop can overlap this already-admitted try-send.
@@ -3626,7 +3626,7 @@ impl ConnectionCore {
         });
         drop(guard);
         // Release this Call's channel gates now that it's been handed to the queue.
-        self.open_channel_gates(&gated_channels);
+        self.open_channel_gates(lane_id, &gated_channels);
         result
     }
 
@@ -4398,11 +4398,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn channel_gates_for_equal_ids_on_distinct_lanes_are_independent() {
+        let (connection, _lane) = make_capturing_connection(Arc::new(Mutex::new(Vec::new())));
+        let core = connection.connection_core.clone();
+        let channel_id = vox_types::ChannelId(3);
+        // Each lane's Driver has its own allocator, so both can allocate this ID.
+        let first_lane = LaneId(1);
+        let second_lane = LaneId(3);
+        core.register_channel_gate(first_lane, channel_id);
+        core.register_channel_gate(second_lane, channel_id);
+        let first_core = core.clone();
+        let first = tokio::spawn(async move {
+            first_core.await_channel_gate(first_lane, channel_id).await;
+        });
+        let second_core = core.clone();
+        let mut second = tokio::spawn(async move {
+            second_core
+                .await_channel_gate(second_lane, channel_id)
+                .await;
+        });
+        core.open_channel_gates(first_lane, &[channel_id]);
+        tokio::time::timeout(Duration::from_secs(2), first)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(core.channel_gate_open(first_lane, channel_id));
+        assert!(
+            !core.channel_gate_open(second_lane, channel_id),
+            "opening one lane must not open another lane's gate"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut second)
+                .await
+                .is_err()
+        );
+        core.open_channel_gates(second_lane, &[channel_id]);
+        tokio::time::timeout(Duration::from_secs(2), second)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(core.channel_gate_open(second_lane, channel_id));
+        connection.outbound_abort.abort();
+    }
+
+    #[tokio::test]
     async fn shutdown_wakes_producer_waiting_for_channel_gate() {
         let (mut connection, lane) = make_capturing_connection(Arc::new(Mutex::new(Vec::new())));
         let sender = lane.sender.clone();
         let channel_id = vox_types::ChannelId(3);
-        connection.connection_core.register_channel_gate(channel_id);
+        connection
+            .connection_core
+            .register_channel_gate(sender.lane_id(), channel_id);
         let message = ConnectionMessage::Channel(vox_types::ChannelMessage {
             id: channel_id,
             body: vox_types::ChannelBody::Close(vox_types::ChannelClose {

@@ -1770,7 +1770,7 @@ trait DriverChannelEndpoint {
             // item on the channel it opens.
             self.endpoint_sender()
                 .connection_core
-                .register_channel_gate(channel_id);
+                .register_channel_gate(self.endpoint_sender().lane_id(), channel_id);
         }
         let sink = make_tx_channel_sink(
             self.endpoint_sender(),

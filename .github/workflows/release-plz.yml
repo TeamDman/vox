@@ -1,9 +1,8 @@
 name: Release-plz
 
+# Source pushes must not publish crates. Dispatch only after release qualification.
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 
 jobs:
   release-plz-release:

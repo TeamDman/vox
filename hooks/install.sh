@@ -1,46 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-HOOK_SOURCE_DIR="$(git rev-parse --show-toplevel)/hooks"
-GIT_DIR="$(git rev-parse --git-dir)"
-
-copy_hook() {
-  local src="$1"
-  local dst="$2"
-
-  mkdir -p "$(dirname "$dst")"
-  cp "$src" "$dst"
-  chmod +x "$dst"
-
-  echo "✔ installed $(basename "$src") → $dst"
-}
-
-install_for_dir() {
-  local hook_dir="$1"
-
-  for hook in "$HOOK_SOURCE_DIR"/*; do
-    local name
-    name="$(basename "$hook")"
-    # Skip install.sh itself
-    if [ "$name" = "install.sh" ]; then
-      continue
-    fi
-    local target="$hook_dir/$name"
-
-    copy_hook "$hook" "$target"
-  done
-}
-
-echo "Installing hooks from $HOOK_SOURCE_DIR …"
-
-# main repo
-install_for_dir "$GIT_DIR/hooks"
-
-# worktrees
-for wt in "$GIT_DIR"/worktrees/*; do
-  if [ -d "$wt" ]; then
-    install_for_dir "$wt/hooks"
-  fi
-done
-
-echo "All hooks installed successfully."
+# This fork deliberately does not install Git hooks. Keep this entry point so
+# existing desktop and cloud setup commands also disable previously copied hooks.
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+git_dir="$(git -C "$repo_root" rev-parse --path-format=absolute --git-common-dir)"
+disabled_hooks_dir="$git_dir/hooks-disabled"
+mkdir -p "$disabled_hooks_dir"
+git -C "$repo_root" config --local core.hooksPath "$disabled_hooks_dir"
+if [[ "$(git -C "$repo_root" config --local --bool --get extensions.worktreeConfig || true)" == true ]]; then
+  git -C "$repo_root" config --worktree core.hooksPath "$disabled_hooks_dir"
+fi
+printf '%s\n' 'Git hooks are disabled for this checkout.'

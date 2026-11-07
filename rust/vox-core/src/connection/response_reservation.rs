@@ -56,6 +56,14 @@ impl RequestCapability {
     pub(crate) fn request_id(&self) -> RequestId {
         self.id
     }
+
+    /// Compare the original request and lane lifetimes, not just their wire IDs.
+    pub(super) fn same_generation(&self, other: &Self) -> bool {
+        self.id == other.id
+            && Arc::ptr_eq(&self.book, &other.book)
+            && Arc::ptr_eq(&self.identity, &other.identity)
+            && Arc::ptr_eq(&self.lane, &other.lane)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

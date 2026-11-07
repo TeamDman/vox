@@ -5,8 +5,9 @@
 //! module does not perform I/O, enforce its own deadline, or authorize a live
 //! proxy. Early channel frames are retained as bounded provisional entries.
 
+use super::response_reservation::RequestCapability;
 use std::collections::{HashMap, HashSet};
-use vox_types::{ChannelId, Parity, RequestId};
+use vox_types::{ChannelId, Parity};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum Side {
@@ -66,11 +67,26 @@ pub(super) enum CreditError {
     TerminalOrAmbiguous,
     Exhausted,
     CreditOverflow,
+    ForwardUncertain,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone)]
+struct Binding {
+    caller: Side,
+    request: RequestCapability,
+}
+
+/// Direction must be obtained from a qualified schema/value walk; the proxy
+/// does not currently have such a resolver, so this is not live authorization.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Declaration {
+    pub id: ChannelId,
+    pub sender: Side,
+}
+
+#[derive(Clone, Default)]
 struct ChannelState {
-    declared: Option<(Side, RequestId)>,
+    declared: Option<Binding>,
     sender: Option<Side>,
     sender_credit: u32,
     receiver_credit: u32,
@@ -82,6 +98,31 @@ pub(super) struct ProxyCreditGate {
     channels: HashMap<ChannelId, ChannelState>,
     provisional: usize,
     events: usize,
+    poisoned: bool,
+}
+
+/// Holds exclusive ownership of an applied transition until the associated
+/// write is locally settled. Cancellation or any error poisons the gate; it
+/// never attempts to roll back a frame that might already be in flight.
+pub(super) struct PendingForward<'a> {
+    gate: &'a mut ProxyCreditGate,
+    settled: bool,
+}
+
+impl PendingForward<'_> {
+    /// Call only after the transport's qualified local-settlement result.
+    /// This does not assert that the peer processed the frame.
+    pub(super) fn locally_settled(mut self) {
+        self.settled = true;
+    }
+}
+
+impl Drop for PendingForward<'_> {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.gate.poisoned = true;
+        }
+    }
 }
 
 impl ProxyCreditGate {
@@ -105,15 +146,48 @@ impl ProxyCreditGate {
             channels: HashMap::new(),
             provisional: 0,
             events: 0,
+            poisoned: false,
         })
     }
 
     fn remaining_event(&self) -> Result<(), CreditError> {
-        if self.events >= self.limits.max_events {
+        if self.poisoned {
+            Err(CreditError::ForwardUncertain)
+        } else if self.events >= self.limits.max_events {
             Err(CreditError::EventLimit)
         } else {
             Ok(())
         }
+    }
+
+    /// Stage a declaration for one locally settled write. A caller must retain
+    /// the guard across the send and terminate the connection if it is dropped.
+    pub(super) fn begin_declaration(
+        &mut self,
+        caller: Side,
+        request: &RequestCapability,
+        ids: &[Declaration],
+    ) -> Result<PendingForward<'_>, CreditError> {
+        self.declare(caller, request, ids)?;
+        Ok(PendingForward {
+            gate: self,
+            settled: false,
+        })
+    }
+
+    /// Stage channel accounting for one locally settled write. This alone does
+    /// not validate a provisional frame's direction or authorize forwarding.
+    pub(super) fn begin_frame(
+        &mut self,
+        from: Side,
+        id: ChannelId,
+        event: Event,
+    ) -> Result<PendingForward<'_>, CreditError> {
+        self.observe(from, id, event)?;
+        Ok(PendingForward {
+            gate: self,
+            settled: false,
+        })
     }
 
     /// Bind a call's channel IDs before forwarding it. Validate the entire
@@ -121,8 +195,8 @@ impl ProxyCreditGate {
     pub(super) fn declare(
         &mut self,
         caller: Side,
-        request: RequestId,
-        ids: &[ChannelId],
+        request: &RequestCapability,
+        ids: &[Declaration],
     ) -> Result<(), CreditError> {
         self.remaining_event()?;
         if ids.len() > self.limits.max_channel_ids {
@@ -132,12 +206,12 @@ impl ProxyCreditGate {
             Side::Left => self.limits.left_caller_parity,
             Side::Right => self.limits.right_caller_parity,
         };
-        if !request.has_parity(parity) {
+        if !request.request_id().has_parity(parity) {
             return Err(CreditError::InvalidChannel);
         }
         let mut seen = HashSet::new();
         let mut new_count = 0_usize;
-        for &id in ids {
+        for &Declaration { id, sender } in ids {
             if id.0 == 0 || !id.has_parity(parity) || !seen.insert(id) {
                 return Err(CreditError::InvalidChannel);
             }
@@ -146,6 +220,9 @@ impl ProxyCreditGate {
                     return Err(CreditError::DuplicateDeclaration);
                 }
                 Some(state) if state.terminal => return Err(CreditError::TerminalOrAmbiguous),
+                Some(state) if state.sender.is_some_and(|actual| actual != sender) => {
+                    return Err(CreditError::ConflictingDirection);
+                }
                 Some(_) => {}
                 None => new_count += 1,
             }
@@ -158,12 +235,23 @@ impl ProxyCreditGate {
         {
             return Err(CreditError::ChannelLimit);
         }
-        for &id in ids {
+        for &Declaration { id, sender } in ids {
             let state = self.channels.entry(id).or_default();
             if state.sender.is_some() {
                 self.provisional -= 1;
+            } else {
+                let flow = match sender {
+                    Side::Left => self.limits.left_to_right,
+                    Side::Right => self.limits.right_to_left,
+                };
+                state.sender = Some(sender);
+                state.sender_credit = flow.sender_initial;
+                state.receiver_credit = flow.receiver_initial;
             }
-            state.declared = Some((caller, request));
+            state.declared = Some(Binding {
+                caller,
+                request: request.clone(),
+            });
         }
         self.events += 1;
         Ok(())
@@ -251,11 +339,13 @@ impl ProxyCreditGate {
     pub(super) fn finish_request(
         &mut self,
         caller: Side,
-        request: RequestId,
+        request: &RequestCapability,
     ) -> Result<(), CreditError> {
         self.remaining_event()?;
         for state in self.channels.values_mut() {
-            if state.declared == Some((caller, request)) {
+            if state.declared.as_ref().is_some_and(|binding| {
+                binding.caller == caller && binding.request.same_generation(request)
+            }) {
                 state.terminal = true;
             }
         }
@@ -266,7 +356,20 @@ impl ProxyCreditGate {
 
 #[cfg(test)]
 mod tests {
+    use super::super::response_reservation::RequestBook;
     use super::*;
+    use futures_util::FutureExt;
+    use vox_types::{MethodId, RequestId};
+
+    fn request(id: u64) -> RequestCapability {
+        RequestBook::default()
+            .record(RequestId(id), MethodId(1))
+            .unwrap()
+    }
+
+    fn declaration(id: ChannelId, sender: Side) -> Declaration {
+        Declaration { id, sender }
+    }
 
     fn limits() -> Limits {
         Limits {
@@ -308,7 +411,8 @@ mod tests {
     fn repeated_grants_are_bounded_by_accumulated_destination_credit() {
         let mut gate = ProxyCreditGate::new(limits()).unwrap();
         let id = ChannelId(3);
-        gate.declare(Side::Left, RequestId(1), &[id]).unwrap();
+        gate.declare(Side::Left, &request(1), &[declaration(id, Side::Left)])
+            .unwrap();
         gate.observe(Side::Right, id, Event::Grant(2)).unwrap();
         assert_eq!(
             gate.observe(Side::Right, id, Event::Grant(1)),
@@ -324,7 +428,8 @@ mod tests {
     fn source_credit_cannot_exceed_what_the_proxy_advertised() {
         let mut gate = ProxyCreditGate::new(limits()).unwrap();
         let id = ChannelId(3);
-        gate.declare(Side::Left, RequestId(1), &[id]).unwrap();
+        gate.declare(Side::Left, &request(1), &[declaration(id, Side::Left)])
+            .unwrap();
         gate.observe(Side::Left, id, Event::Item).unwrap();
         gate.observe(Side::Left, id, Event::Item).unwrap();
         assert_eq!(
@@ -339,7 +444,8 @@ mod tests {
     fn reverse_direction_and_conflicting_orientation_are_distinguished() {
         let mut gate = ProxyCreditGate::new(limits()).unwrap();
         let id = ChannelId(2);
-        gate.declare(Side::Right, RequestId(2), &[id]).unwrap();
+        gate.declare(Side::Right, &request(2), &[declaration(id, Side::Right)])
+            .unwrap();
         gate.observe(Side::Left, id, Event::Grant(1)).unwrap();
         gate.observe(Side::Right, id, Event::Item).unwrap();
         assert_eq!(
@@ -352,18 +458,108 @@ mod tests {
     fn early_frames_are_bounded_then_bound_to_the_call() {
         let mut gate = ProxyCreditGate::new(limits()).unwrap();
         let id = ChannelId(3);
+        let original = request(1);
         gate.observe(Side::Left, id, Event::Item).unwrap();
         assert_eq!(gate.provisional, 1);
-        gate.declare(Side::Left, RequestId(1), &[id]).unwrap();
+        gate.declare(Side::Left, &original, &[declaration(id, Side::Left)])
+            .unwrap();
         assert_eq!(gate.provisional, 0);
         assert_eq!(
-            gate.declare(Side::Left, RequestId(3), &[id]),
+            gate.declare(Side::Left, &request(3), &[declaration(id, Side::Left)]),
             Err(CreditError::DuplicateDeclaration)
         );
-        gate.finish_request(Side::Left, RequestId(1)).unwrap();
+        gate.finish_request(Side::Left, &original).unwrap();
         assert_eq!(
             gate.observe(Side::Right, id, Event::Grant(1)),
             Err(CreditError::TerminalOrAmbiguous)
+        );
+    }
+
+    #[test]
+    fn declaration_must_match_early_direction_without_partial_binding() {
+        let mut gate = ProxyCreditGate::new(limits()).unwrap();
+        let early = ChannelId(3);
+        let other = ChannelId(5);
+        gate.observe(Side::Left, early, Event::Item).unwrap();
+        assert_eq!(
+            gate.declare(
+                Side::Left,
+                &request(1),
+                &[
+                    declaration(other, Side::Left),
+                    declaration(early, Side::Right)
+                ],
+            ),
+            Err(CreditError::ConflictingDirection)
+        );
+        assert_eq!(gate.provisional, 1);
+        assert!(!gate.channels.contains_key(&other));
+        assert!(gate.channels.get(&early).unwrap().declared.is_none());
+        gate.declare(Side::Left, &request(1), &[declaration(early, Side::Left)])
+            .unwrap();
+    }
+
+    #[test]
+    fn completion_requires_exact_request_generation_and_lane() {
+        let mut gate = ProxyCreditGate::new(limits()).unwrap();
+        let book = RequestBook::default();
+        let old = book.record(RequestId(1), MethodId(1)).unwrap();
+        book.retire_unreserved(&old).unwrap();
+        let replacement = book.record(RequestId(1), MethodId(1)).unwrap();
+        let other_lane = request(1);
+        let id = ChannelId(3);
+        gate.declare(Side::Left, &replacement, &[declaration(id, Side::Left)])
+            .unwrap();
+        gate.finish_request(Side::Left, &old).unwrap();
+        gate.finish_request(Side::Left, &other_lane).unwrap();
+        gate.observe(Side::Left, id, Event::Item).unwrap();
+        gate.finish_request(Side::Left, &replacement).unwrap();
+        assert_eq!(
+            gate.observe(Side::Left, id, Event::Item),
+            Err(CreditError::TerminalOrAmbiguous)
+        );
+    }
+
+    #[test]
+    fn dropped_or_cancelled_forward_poisons_gate_without_rollback() {
+        let mut gate = ProxyCreditGate::new(limits()).unwrap();
+        let id = ChannelId(3);
+        gate.begin_declaration(Side::Left, &request(1), &[declaration(id, Side::Left)])
+            .unwrap()
+            .locally_settled();
+        let cancelled = async {
+            let _forward = gate.begin_frame(Side::Left, id, Event::Item).unwrap();
+            std::future::pending::<()>().await;
+        }
+        .now_or_never();
+        assert!(cancelled.is_none());
+        assert_eq!(gate.channels.get(&id).unwrap().sender_credit, 1);
+        assert_eq!(
+            gate.observe(Side::Left, id, Event::Item),
+            Err(CreditError::ForwardUncertain)
+        );
+        assert_eq!(
+            gate.finish_request(Side::Left, &request(1)),
+            Err(CreditError::ForwardUncertain)
+        );
+    }
+
+    #[test]
+    fn local_settlement_allows_next_transition_but_not_peer_receipt_claims() {
+        let mut gate = ProxyCreditGate::new(limits()).unwrap();
+        let id = ChannelId(3);
+        gate.begin_declaration(Side::Left, &request(1), &[declaration(id, Side::Left)])
+            .unwrap()
+            .locally_settled();
+        gate.begin_frame(Side::Left, id, Event::Item)
+            .unwrap()
+            .locally_settled();
+        gate.begin_frame(Side::Left, id, Event::Item)
+            .unwrap()
+            .locally_settled();
+        assert_eq!(
+            gate.observe(Side::Left, id, Event::Item),
+            Err(CreditError::Exhausted)
         );
     }
 
@@ -372,17 +568,23 @@ mod tests {
         let mut gate = ProxyCreditGate::new(limits()).unwrap();
         let id = ChannelId(3);
         assert_eq!(
-            gate.declare(Side::Left, RequestId(1), &[id, id]),
+            gate.declare(
+                Side::Left,
+                &request(1),
+                &[declaration(id, Side::Left), declaration(id, Side::Left)]
+            ),
             Err(CreditError::InvalidChannel)
         );
         assert!(gate.channels.is_empty());
         assert_eq!(gate.events, 0);
-        gate.declare(Side::Left, RequestId(1), &[id]).unwrap();
+        gate.declare(Side::Left, &request(1), &[declaration(id, Side::Left)])
+            .unwrap();
         assert_eq!(
             gate.observe(Side::Right, id, Event::Grant(u32::MAX)),
             Err(CreditError::CreditOverflow)
         );
-        assert!(gate.channels.get(&id).unwrap().sender.is_none());
+        let state = gate.channels.get(&id).unwrap();
+        assert_eq!((state.sender_credit, state.receiver_credit), (2, 3));
         gate.observe(Side::Right, id, Event::Grant(1)).unwrap();
     }
 
@@ -397,8 +599,12 @@ mod tests {
             gate.observe(Side::Left, ChannelId(5), Event::Item),
             Err(CreditError::ProvisionalLimit)
         );
-        gate.declare(Side::Left, RequestId(1), &[ChannelId(3)])
-            .unwrap();
+        gate.declare(
+            Side::Left,
+            &request(1),
+            &[declaration(ChannelId(3), Side::Left)],
+        )
+        .unwrap();
         assert_eq!(
             gate.observe(Side::Left, ChannelId(3), Event::Item),
             Err(CreditError::EventLimit)
@@ -410,8 +616,12 @@ mod tests {
         let mut first = ProxyCreditGate::new(limits()).unwrap();
         let mut second = ProxyCreditGate::new(limits()).unwrap();
         let id = ChannelId(3);
-        first.declare(Side::Left, RequestId(1), &[id]).unwrap();
-        second.declare(Side::Left, RequestId(1), &[id]).unwrap();
+        first
+            .declare(Side::Left, &request(1), &[declaration(id, Side::Left)])
+            .unwrap();
+        second
+            .declare(Side::Left, &request(1), &[declaration(id, Side::Left)])
+            .unwrap();
         first.observe(Side::Left, id, Event::Item).unwrap();
         first.observe(Side::Left, id, Event::Item).unwrap();
         assert_eq!(
@@ -425,7 +635,8 @@ mod tests {
     fn post_reset_traffic_is_reported_as_ambiguous() {
         let mut gate = ProxyCreditGate::new(limits()).unwrap();
         let id = ChannelId(3);
-        gate.declare(Side::Left, RequestId(1), &[id]).unwrap();
+        gate.declare(Side::Left, &request(1), &[declaration(id, Side::Left)])
+            .unwrap();
         gate.observe(Side::Right, id, Event::Reset).unwrap();
         assert_eq!(
             gate.observe(Side::Left, id, Event::Item),

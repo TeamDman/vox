@@ -293,17 +293,58 @@ and fails conservatively, which may close otherwise valid sessions. Verify
 error propagation, cancellation, channel-ID reuse and session quotas before
 exposing it as a production option.
 
-The prototype infers a channel's direction from the first observed frame; it
-does not validate that direction against the declared schema. It also binds a
-channel to a numeric request ID rather than a request-generation capability.
-Neither is sufficient for production. Confirm each side's peer parity and the
-negotiated initial-credit mapping from the actual lane settings, and use the
-schema and generation identity when binding early frames. A successful local
+The current local follow-up changes the prototype's declaration API to accept
+an exact request-generation capability and an explicit per-channel sender.
+It checks provisional observations against that declaration and tests stale
+same-numbered request generations. This change is uncompiled and unreviewed.
+The proxy has no qualified resolver that derives each sender from the schema
+and actual encoded argument value, so these inputs are not yet available for
+production. Early frames cannot safely be forwarded on inferred direction
+alone: they require bounded buffering until validated, or conservative failure.
+Confirm each side's peer parity and the negotiated initial-credit mapping from
+the actual lane settings. A successful local
 accounting transition is not evidence that a frame reached the other peer:
 serialize accounting with forwarding, and fail the bounded connection on an
 uncertain or partially completed write rather than rolling credit back as if
 no bytes escaped. Provisional entries need a bounded lifetime as well as a
 count limit. These conditions remain unimplemented.
+
+The typed binder defines the orientation: passing `Tx` makes the callee the
+sender, and passing `Rx` makes the caller the sender. Current Phon derivation
+erases opaque adapter types to `Primitive::Bytes` (`phon/rust/phon/src/derive.rs`),
+and both channel adapters encode an inner `u32` index as opaque bytes. The
+Phon schema alone therefore does not distinguish a channel from an arbitrary
+opaque value or distinguish `Tx` from `Rx`. `plan_for_method_args` adds
+directional auxiliary roles only for recognized top-level channel arguments
+with a known element shape; those peer-provided roles are not by themselves a
+trusted description of the destination's local method. A generic schema walk
+cannot reconstruct every nested, optional, repeated or variant-contained
+channel's direction from this information.
+
+Options requiring separate design and review include a trusted method
+descriptor supplied by the proxy operator, a negotiated authenticated protocol
+extension carrying verifiable direction metadata, or a narrower channel-free
+profile. Do not enable channel forwarding on the assumption that the current
+schema is sufficient. Any resolver must validate index bounds, declaration
+coverage and direction consistency under explicit depth, byte and work limits,
+including cached and inline schema cases, without executing application code
+or creating channel bindings. The collector can reuse an index for repeated
+references to a handle, so an exactly-once-use rule needs compatibility review
+rather than assumption. No such resolver has been qualified here. The capability comparison prevents a stale completion from
+matching a later request with the same numeric ID, but by itself does not
+prove that a capability is still live: its admission and use must be bound to
+the request book and lane lifetime under the same lifecycle protocol.
+
+The local uncompiled accounting prototype now exposes a pending-forward guard
+that poisons the gate if dropped before an explicit local-settlement result.
+It retains the mutated accounting rather than rolling it back after an
+uncertain send, and blocks later gate operations. A synthetic cancellation
+test is prepared. The guard does not itself close or quarantine either
+connection, bound writer lifetime, validate a provisional channel, or prove
+peer receipt. Integration must retain the existing termination guard across
+the entire send, ensure its failure or cancellation requests bounded
+connection teardown, and classify unsupported or ambiguous settlement as
+uncertain. No live path uses this guard.
 
 Request ID rewriting is observable: `RequestContext::request_id()` exposes
 the wire-level ID at the receiving hop. The guarded proxy does not preserve
